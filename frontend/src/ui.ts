@@ -67,6 +67,14 @@ export function stageTone(stage: string): StageTone {
   return stageToneOf(stage);
 }
 
+/** Tone for an outbox status — green when confirmed, red on failure, muted
+ * when cancelled, neutral while in the review pipeline. */
+export function statusTone(status: string): "good" | "crit" | "none" {
+  if (status === "confirmed") return "good";
+  if (status === "failed") return "crit";
+  return "none";
+}
+
 /** Family-tree role label from a PDB component type. Institute-agnostic; falls
  * back to the raw type for anything not in the common assembly vocabulary. */
 export function roleLabel(componentType: string): string {
