@@ -27,6 +27,22 @@ export type ComponentDetail = ComponentOut & {
   children: ComponentOut[];
 };
 
+export type RequirementCheck = {
+  stage: string;
+  test_type: string;
+  status: "passed" | "failed" | "missing";
+};
+
+export type StageSuggestion = {
+  sn: string;
+  current_stage: string;
+  next_stage: string | null;
+  move_suggested: boolean;
+  suggested_stage: string | null;
+  checks: RequirementCheck[];
+  blocking: RequirementCheck[];
+};
+
 export type ComponentSyncResult = {
   institute_code: string;
   fetched: number;
@@ -256,6 +272,28 @@ export function getComponents(
 
 export function getComponent(sn: string, signal?: AbortSignal): Promise<ComponentDetail> {
   return request<ComponentDetail>(`/api/components/${encodeURIComponent(sn)}`, { signal });
+}
+
+export function getStageSuggestion(sn: string, signal?: AbortSignal): Promise<StageSuggestion> {
+  return request<StageSuggestion>(
+    `/api/components/${encodeURIComponent(sn)}/stage-suggestion`,
+    { signal },
+  );
+}
+
+export type OutboxCreateBody = {
+  institute_code: string;
+  kind: string;
+  payload: Record<string, unknown>;
+  created_by: string;
+};
+
+export function postOutboxAction(body: OutboxCreateBody): Promise<OutboxAction> {
+  return request<OutboxAction>("/api/outbox", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 export function postComponentSync(instituteCode: string): Promise<ComponentSyncResult> {
