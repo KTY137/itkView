@@ -1,0 +1,50 @@
+[project]
+name = "itkflow-backend"
+version = "0.1.0"
+description = "itkFlow backend — production cockpit for ATLAS ITk strip module assembly"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+]
+
+[project.optional-dependencies]
+# The itkdb client is only needed by the PDB gateway; the offline test suite
+# and the rest of the app must work without it.
+pdb = ["itkdb>=0.6"]
+postgres = ["psycopg[binary]>=3.1"]
+dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.5"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["fixtures/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# PDB sandbox integration tests need a token for the PDB *test* instance and
+# are excluded from the default run. Enable with: pytest -m pdb_sandbox
+addopts = "-m 'not pdb_sandbox'"
+markers = [
+    "pdb_sandbox: integration tests against the PDB test instance (require ITKDB access codes)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency injection uses calls in argument defaults by design.
+extend-immutable-calls = ["fastapi.Depends"]

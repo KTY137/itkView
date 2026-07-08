@@ -1,0 +1,39 @@
+# itkFlow CI — runs fully offline: no PDB access, no tokens, no secrets.
+# PDB sandbox integration tests (marker: pdb_sandbox) are NOT run here.
+
+stages:
+  - lint
+  - test
+  - build
+
+backend-lint:
+  stage: lint
+  image: python:3.12-slim
+  script:
+    - pip install --quiet ruff
+    - ruff check backend
+    - ruff format --check backend
+
+backend-test:
+  stage: test
+  image: python:3.12-slim
+  script:
+    - cd backend
+    - pip install --quiet -e ".[dev]"
+    - pytest --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: backend/report.xml
+
+frontend-build:
+  stage: build
+  image: node:22
+  script:
+    - cd frontend
+    - npm ci --no-fund --no-audit
+    - npm run build
+  artifacts:
+    expire_in: 1 week
+    paths:
+      - frontend/dist/

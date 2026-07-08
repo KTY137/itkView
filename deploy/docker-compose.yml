@@ -1,0 +1,62 @@
+# itkFlow full stack. Copy .env.example to .env first.
+# The PDB production instance is not configurable here — test instance only.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: itkflow
+      POSTGRES_USER: itkflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U itkflow -d itkflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/backend.Dockerfile
+    environment:
+      ITKFLOW_DATABASE_URL: postgresql+psycopg://itkflow:${POSTGRES_PASSWORD}@postgres:5432/itkflow
+      ITKFLOW_PDB_INSTANCE: test
+      ITKFLOW_ITKDB_ACCESS_CODE1: ${ITKFLOW_ITKDB_ACCESS_CODE1:-}
+      ITKFLOW_ITKDB_ACCESS_CODE2: ${ITKFLOW_ITKDB_ACCESS_CODE2:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  # Async outbox worker: the only process that writes reviewed actions to the
+  # PDB test instance. Shares the database with the backend; idle (no writes)
+  # unless ITKDB access codes are provided.
+  worker:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/backend.Dockerfile
+    command: ["python", "-m", "app.run_worker"]
+    environment:
+      ITKFLOW_DATABASE_URL: postgresql+psycopg://itkflow:${POSTGRES_PASSWORD}@postgres:5432/itkflow
+      ITKFLOW_PDB_INSTANCE: test
+      ITKFLOW_ITKDB_ACCESS_CODE1: ${ITKFLOW_ITKDB_ACCESS_CODE1:-}
+      ITKFLOW_ITKDB_ACCESS_CODE2: ${ITKFLOW_ITKDB_ACCESS_CODE2:-}
+      ITKFLOW_WORKER_POLL_SECONDS: ${ITKFLOW_WORKER_POLL_SECONDS:-5}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  pgdata:
