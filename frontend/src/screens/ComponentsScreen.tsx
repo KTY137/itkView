@@ -26,6 +26,27 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Client-side sort for the component list. "default" keeps the server order
+ * (local name first, then serial number). */
+function sortRows(rows: ComponentOut[], sortBy: string): ComponentOut[] {
+  const sorted = [...rows];
+  const bySn = (a: ComponentOut, b: ComponentOut) => a.sn.localeCompare(b.sn);
+  switch (sortBy) {
+    case "serial":
+      sorted.sort(bySn);
+      break;
+    case "stage":
+      sorted.sort((a, b) => a.stage.localeCompare(b.stage) || bySn(a, b));
+      break;
+    case "type":
+      sorted.sort((a, b) => a.component_type.localeCompare(b.component_type) || bySn(a, b));
+      break;
+    default:
+      break;
+  }
+  return sorted;
+}
+
 function sortInstitutes(institutes: Institute[]): Institute[] {
   return [...institutes].sort((a, b) => a.code.localeCompare(b.code));
 }
@@ -60,6 +81,9 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
   const [error, setError] = useState<string | null>(null);
   const [demo, setDemo] = useState(false);
   const [stageOptions, setStageOptions] = useState<string[]>([]);
+  const [componentType, setComponentType] = useState("");
+  const [typeOptions, setTypeOptions] = useState<string[]>([]);
+  const [sortBy, setSortBy] = useState("default");
   const [selectedSn, setSelectedSn] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [institutes, setInstitutes] = useState<Institute[]>([]);
@@ -116,10 +140,15 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
       setRows(data);
       setDemo(isDemo);
       setLoading(false);
-      // Union of every stage seen so far, so options never disappear while filtering.
+      // Union of every stage/type seen so far, so options never disappear.
       setStageOptions((prev) => {
         const next = new Set(prev);
         for (const c of data) next.add(c.stage);
+        return [...next].sort();
+      });
+      setTypeOptions((prev) => {
+        const next = new Set(prev);
+        for (const c of data) next.add(c.component_type);
         return [...next].sort();
       });
     };
@@ -235,6 +264,11 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
       />
     );
   }
+
+  const displayRows = sortRows(
+    componentType === "" ? rows : rows.filter((r) => r.component_type === componentType),
+    sortBy,
+  );
 
   return (
     <div className="screen">
@@ -360,6 +394,30 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
             </option>
           ))}
         </select>
+        <select
+          className="select-input"
+          value={componentType}
+          onChange={(e) => setComponentType(e.target.value)}
+          aria-label={t.components.typeFilterLabel}
+        >
+          <option value="">{t.components.allTypes}</option>
+          {typeOptions.map((tp) => (
+            <option key={tp} value={tp}>
+              {tp}
+            </option>
+          ))}
+        </select>
+        <select
+          className="select-input"
+          value={sortBy}
+          onChange={(e) => setSortBy(e.target.value)}
+          aria-label={t.components.sortByLabel}
+        >
+          <option value="default">{t.components.sortDefault}</option>
+          <option value="serial">{t.components.sortSerial}</option>
+          <option value="stage">{t.components.sortStage}</option>
+          <option value="type">{t.components.sortType}</option>
+        </select>
       </form>
       {error !== null ? (
         <div className="error-banner" role="alert">
@@ -372,7 +430,7 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
         </div>
       ) : loading ? (
         <p className="state-note">{t.common.loading}</p>
-      ) : rows.length === 0 ? (
+      ) : displayRows.length === 0 ? (
         <p className="state-note">{t.components.empty}</p>
       ) : (
         <div className="panel">
@@ -387,7 +445,7 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((c) => (
+              {displayRows.map((c) => (
                 <tr
                   key={c.sn}
                   className={c.trashed ? "row-click trashed" : "row-click"}
@@ -671,7 +729,7 @@ function StageSuggestionSection({
                 <tr key={`${check.stage}:${check.test_type}`}>
                   <td className="mono">{check.test_type}</td>
                   <td>
-                    <span className="chip stage">{check.stage}</span>
+                    <span className={stageChipClass(check.stage)}>{check.stage}</span>
                   </td>
                   <td>
                     <span className={STATUS_CHIP[check.status]}>{STATUS_LABEL[check.status]}</span>
