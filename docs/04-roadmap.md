@@ -85,6 +85,24 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
    PDB-Testinstanz-Check fuer `listComponents` mit echten Sandbox-Tokens laufen
    lassen und dokumentieren, welche Filter pro Institute-Profil noetig sind.
 
+## Geplant (Design steht, Umsetzung nach Freigabe)
+
+Drei durchdachte, aber noch nicht gebaute Erweiterungen. Details im jeweiligen
+Dokument:
+
+- **Nutzer, Rollen & Audit-Zuordnung** — `docs/06-users-roles-audit.md`. Echte
+  Konten (admin/operator/viewer), Institut nur durch Admin, serverseitige
+  `user_id`-Zuordnung statt client-gelieferter Actor-Strings. Empfehlung: lokale
+  Accounts fuer v1, OIDC/CERN-SSO als spaeterer Adapter. **Fundament fuer echte
+  Nachvollziehbarkeit — sollte vor Remote-Zugriff stehen.**
+- **Jig-/Tool-Registry + typ-gefilterter Quick-Select** —
+  `docs/07-jig-tool-quickselect.md`. Jigs/Tools/Glue-Batches im Assembly-Wizard
+  nach Modultyp vorfiltern statt per Hand eintippen; Kompatibilitaet als
+  Config/Registry (Regel #4). Phase 3/4.
+- **Remote-Zugriff / Tunneling** — `docs/08-remote-access.md`. Zugriff von
+  zuhause; Empfehlung Tailscale/WireGuard (spaeter Cloudflare Tunnel).
+  **Abhaengigkeit:** erst nach dem Auth-Fundament scharf schalten.
+
 ## Meilensteine
 
 ### Phase 0 - Fundament stabilisieren
