@@ -44,6 +44,14 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   PULL_STRENGTH/PULL_GRADE-Arrays, NUMBER_WIRES-Abgleich). `GET
   /api/ingest/files/{id}/preview` liefert den Dry-Run (auch im Triage-UI),
   und `propose-outbox` blockt bei Dry-Run-Issues mit 409.
+- Stage-Move-Suggestion-Engine (Phase-3-Kickoff): reine Domain-Logik in
+  `app/domain/stages.py` (Pflicht-Tests je Stage, institutsneutral via
+  `InstituteProfile.settings`, Seed-Default aus der UI-Design-Referenz).
+  `GET /api/components/{sn}/stage-suggestion` wertet bestaetigte Uploads
+  (confirmed `upload_test_run`) zu passed/failed/missing aus und schlaegt den
+  naechsten Stage-Move vor, wenn alle Pflicht-Tests der aktuellen Stage passen.
+  Das Detail-UI zeigt die Pflicht-Tests-Tabelle + Vorschlag-Callout, und
+  „Propose stage move" legt einen auditierten `stage_move`-Draft in die Outbox.
 - Async-Outbox-Worker: eigenstaendiger Prozess (`app/run_worker.py`,
   `worker`-Service in Compose) beansprucht `approved`/`submitted`-Aktionen,
   wiederholt den Dry-Run gegen den aktuellen Mirror, ruft einen injizierten
@@ -54,9 +62,12 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 
 ## Naechste Arbeitspakete
 
-1. **Komponenten-Cockpit haerten** (`frontend-dev`, `backend-dev`):
-   Detaildaten, Familienbaum, Institute-Sync-Fehler und leere Zustände so
-   stabilisieren, dass Phase 1 taeglich benutzt werden kann.
+1. **Stage-Move-Strecke schliessen** (`domain-modeler`, `backend-dev`,
+   `pdb-gateway-dev`): Die Suggestion-Engine + `stage_move`-Draft stehen
+   (2026-07-08). Offen: realer Submitter fuer `stage_move` im Outbox-Worker
+   (PDB-Stage-Move via itkdb, Testinstanz), und die „satisfied tests"-Quelle
+   perspektivisch aus einem PDB-Test-Run-Mirror statt nur aus confirmed
+   itkFlow-Uploads speisen (fuer Parallelbetrieb mit zFlow).
 2. **Dashboard ausbauen** (`frontend-dev`, `backend-dev`): Summary um offene
    Tests, Sync-Alter und auffaellige Stage-/Outbox-Zustaende erweitern.
 3. **Outbox-Worker haerten** (`backend-dev`, `pdb-gateway-dev`, `qa-engineer`):

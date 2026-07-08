@@ -66,6 +66,23 @@ const en = {
     fieldLocation: "Location",
     fieldInstitute: "Institute",
     fieldSynced: "Last PDB sync",
+    stageTitle: "Required tests per stage",
+    stageColTest: "Test",
+    stageColStage: "Stage",
+    stageColStatus: "Status",
+    stagePassed: "passed",
+    stageFailed: "failed",
+    stageMissing: "missing",
+    stageNoRequirements: "No required tests configured up to this stage.",
+    stageSuggestion: (stage: string) =>
+      `All required tests passed — suggested stage move to ${stage}.`,
+    stageBlocked: "Move blocked — required tests are still failing or missing.",
+    stageNoNext: "This is the final stage — no move to suggest.",
+    stageProposeMove: (stage: string) => `Propose stage move → ${stage}`,
+    stageProposing: "Proposing…",
+    stageProposed: (id: number, stage: string) =>
+      `Outbox draft #${id} created: stage move → ${stage}. Review it in the Outbox.`,
+    stageProposeFailed: "Could not create the stage-move draft",
   },
   dashboard: {
     loadError: "Could not load dashboard",

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 
-class TestStatus(str, Enum):
+class RequirementStatus(str, Enum):
     PASSED = "passed"
     FAILED = "failed"  # recorded but did not pass — blocks the move, needs review
     MISSING = "missing"  # never recorded for this component
@@ -107,7 +107,7 @@ def stage_model_from_settings(settings: Mapping | None) -> StageModel:
 class RequirementCheck:
     stage: str
     test_type: str
-    status: TestStatus
+    status: RequirementStatus
 
 
 @dataclass(frozen=True)
@@ -116,17 +116,17 @@ class StageEvaluation:
     next_stage: str | None
     checks: list[RequirementCheck]  # requirements up to and including current stage
     blocking: list[RequirementCheck]  # failed/missing at the *current* stage
-    move_suggested: bool
+    move_suggested: bool  # every current-stage requirement passed and a next stage exists
 
     @property
     def suggested_stage(self) -> str | None:
         return self.next_stage if self.move_suggested else None
 
 
-def _status(results: Mapping[str, bool], test_type: str) -> TestStatus:
+def _status(results: Mapping[str, bool], test_type: str) -> RequirementStatus:
     if test_type not in results:
-        return TestStatus.MISSING
-    return TestStatus.PASSED if results[test_type] else TestStatus.FAILED
+        return RequirementStatus.MISSING
+    return RequirementStatus.PASSED if results[test_type] else RequirementStatus.FAILED
 
 
 def evaluate_stage(
@@ -145,7 +145,7 @@ def evaluate_stage(
     blocking = [
         check
         for check in checks
-        if check.stage == current_stage and check.status is not TestStatus.PASSED
+        if check.stage == current_stage and check.status is not RequirementStatus.PASSED
     ]
     next_stage = model.next_stage(current_stage)
     move_suggested = not blocking and next_stage is not None

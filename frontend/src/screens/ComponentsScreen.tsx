@@ -5,10 +5,18 @@ import {
   getComponent,
   getComponents,
   getInstitutes,
+  getStageSuggestion,
   postComponentSync,
   postInstitute,
+  postOutboxAction,
 } from "../api";
-import type { ComponentDetail, ComponentOut, Institute } from "../api";
+import type {
+  ComponentDetail,
+  ComponentOut,
+  Institute,
+  RequirementCheck,
+  StageSuggestion,
+} from "../api";
 import { filterDemoComponents, getDemoComponent } from "../demoData";
 import { formatTimestamp, t } from "../i18n";
 
@@ -411,6 +419,20 @@ function ComponentDetailPanel({
   const [error, setError] = useState<string | null>(null);
   const [demo, setDemo] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [suggestion, setSuggestion] = useState<StageSuggestion | null>(null);
+
+  // Stage suggestion is a best-effort extra: hide the section when the backend
+  // is offline or has no data for this component, without disturbing the detail.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setSuggestion(null);
+    getStageSuggestion(sn, ctrl.signal)
+      .then((data) => setSuggestion(data))
+      .catch(() => {
+        /* offline / unknown component: section stays hidden */
+      });
+    return () => ctrl.abort();
+  }, [sn, reloadKey]);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -528,6 +550,9 @@ function ComponentDetailPanel({
           <Field label={t.components.fieldSynced} value={formatTimestamp(detail.synced_at)} />
         </div>
       </div>
+      {suggestion !== null && (
+        <StageSuggestionSection suggestion={suggestion} instituteCode={detail.institute_code} />
+      )}
       <h3 className="section-title">{t.components.family}</h3>
       <div className="panel">
         <ul className="tree">
@@ -550,6 +575,109 @@ function ComponentDetailPanel({
         )}
       </div>
     </div>
+  );
+}
+
+const STATUS_CHIP: Record<RequirementCheck["status"], string> = {
+  passed: "chip green",
+  failed: "chip red",
+  missing: "chip amber",
+};
+
+const STATUS_LABEL: Record<RequirementCheck["status"], string> = {
+  passed: t.components.stagePassed,
+  failed: t.components.stageFailed,
+  missing: t.components.stageMissing,
+};
+
+function StageSuggestionSection({
+  suggestion,
+  instituteCode,
+}: {
+  suggestion: StageSuggestion;
+  instituteCode: string;
+}) {
+  const [notice, setNotice] = useState<string | null>(null);
+  const [proposing, setProposing] = useState(false);
+  const [proposed, setProposed] = useState(false);
+
+  async function handlePropose() {
+    if (suggestion.suggested_stage === null) return;
+    setProposing(true);
+    setNotice(null);
+    try {
+      const action = await postOutboxAction({
+        institute_code: instituteCode,
+        kind: "stage_move",
+        payload: {
+          sn: suggestion.sn,
+          from_stage: suggestion.current_stage,
+          to_stage: suggestion.suggested_stage,
+        },
+        created_by: "ui-user",
+      });
+      setProposed(true);
+      setNotice(t.components.stageProposed(action.id, suggestion.suggested_stage));
+    } catch (err) {
+      setNotice(`${t.components.stageProposeFailed}: ${errorMessage(err)}`);
+    } finally {
+      setProposing(false);
+    }
+  }
+
+  return (
+    <>
+      <h3 className="section-title">{t.components.stageTitle}</h3>
+      <div className="panel">
+        {suggestion.checks.length === 0 ? (
+          <p className="state-note">{t.components.stageNoRequirements}</p>
+        ) : (
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th scope="col">{t.components.stageColTest}</th>
+                <th scope="col">{t.components.stageColStage}</th>
+                <th scope="col">{t.components.stageColStatus}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {suggestion.checks.map((check) => (
+                <tr key={`${check.stage}:${check.test_type}`}>
+                  <td className="mono">{check.test_type}</td>
+                  <td>
+                    <span className="chip stage">{check.stage}</span>
+                  </td>
+                  <td>
+                    <span className={STATUS_CHIP[check.status]}>{STATUS_LABEL[check.status]}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <div className={suggestion.move_suggested ? "callout ok" : "callout"}>
+          <span>
+            {suggestion.move_suggested && suggestion.suggested_stage !== null
+              ? t.components.stageSuggestion(suggestion.suggested_stage)
+              : suggestion.next_stage === null
+                ? t.components.stageNoNext
+                : t.components.stageBlocked}
+          </span>
+          {suggestion.move_suggested && suggestion.suggested_stage !== null && (
+            <button
+              className="btn primary"
+              disabled={proposing || proposed}
+              onClick={() => void handlePropose()}
+            >
+              {proposing
+                ? t.components.stageProposing
+                : t.components.stageProposeMove(suggestion.suggested_stage)}
+            </button>
+          )}
+        </div>
+        {notice !== null && <p className="state-note">{notice}</p>}
+      </div>
+    </>
   );
 }
 
