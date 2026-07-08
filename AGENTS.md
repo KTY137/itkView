@@ -18,8 +18,10 @@ Mandatory startup context:
 Hard rules, summarized:
 
 - Never execute or import `references/zeuthenflow`; read/grep only.
-- Never develop or test against the production ITk PDB. Defaults must point to
-  the PDB test instance.
+- PDB write protection (there is no test instance any more): production reads
+  need the double env opt-in; writes are technically confined to
+  itkFlow-registered DUMMY-batch test components (modules/hybrids only —
+  never register sensors or ASICs). See docs/09 and ADR 003.
 - Do not commit secrets, tokens, personal data, or non-anonymized fixtures.
 - Do not hardcode institute-specific behavior; it belongs in the institute
   profile/configuration.

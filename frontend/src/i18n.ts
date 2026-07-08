@@ -22,6 +22,7 @@ const en = {
     scanPlaceholder: "Scan SN / RFID / local name…",
     backendOffline: "backend offline",
     pdb: "PDB",
+    dummyWritesOnly: "DUMMY writes only",
   },
   board: {
     loadError: "Could not load the board",

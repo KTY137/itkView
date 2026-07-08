@@ -1,11 +1,18 @@
 """PDB gateway — the only module allowed to talk to the ITk Production Database.
 
-Safety layers, in order:
+There is no PDB test server any more; the collaboration-sanctioned way to test
+is against production, with writes confined to self-registered DUMMY-batch
+components (docs/09). Safety layers, in order:
+
 1. `Settings` refuses `pdb_instance="production"` without a second opt-in flag.
 2. This gateway re-checks that guard at construction time.
-3. The itkdb client is *always* built with an explicit test-instance URL —
-   itkdb's own defaults point at production, so we never rely on them.
-4. Production wiring is deliberately not implemented at all.
+3. For `pdb_instance="test"` the client is pinned to the (now defunct)
+   test-instance URL — the default configuration therefore reaches nothing.
+   For `production` the client uses itkdb's own defaults (which point at
+   production) and only exists behind the double opt-in.
+4. Writes are scoped separately in `app.pdb_submit` / `app.pdb_scope`:
+   `pdb_write_scope="dummy_only"` restricts every write to itkFlow-registered
+   DUMMY test components.
 
 `itkdb` is an optional dependency (`pip install -e ".[pdb]"`); the offline
 test suite never imports it.
@@ -35,15 +42,16 @@ class PdbGateway:
         return bool(self._settings.itkdb_access_code1 and self._settings.itkdb_access_code2)
 
     def client(self) -> Any:
-        """Build (lazily) an itkdb client pinned to the PDB test instance."""
+        """Build (lazily) an itkdb client for the configured instance."""
         if not self.is_configured:
             raise ProductionAccessError(
-                "No ITKDB access codes configured. Set ITKFLOW_ITKDB_ACCESS_CODE1/2 "
-                "for the PDB test instance."
+                "No ITKDB access codes configured. Set ITKFLOW_ITKDB_ACCESS_CODE1/2."
             )
-        if self._settings.pdb_instance != "test":
-            # Even with the double opt-in, production wiring does not exist yet.
-            raise ProductionAccessError("Production PDB wiring is deliberately not implemented.")
+        if self._settings.pdb_instance == "production" and not self._settings.allow_production:
+            # Settings already refuses this combination; re-checked defensively.
+            raise ProductionAccessError(
+                "PdbGateway refuses production PDB access without explicit opt-in."
+            )
         if self._client is None:
             try:
                 import itkdb
@@ -55,7 +63,13 @@ class PdbGateway:
                 access_code1=self._settings.itkdb_access_code1,
                 access_code2=self._settings.itkdb_access_code2,
             )
-            self._client = itkdb.Client(user=user, prefix_url=self._settings.pdb_test_api_url)
+            if self._settings.pdb_instance == "production":
+                # itkdb's own defaults point at the production PDB.
+                self._client = itkdb.Client(user=user)
+            else:
+                # Pin the client to the test URL; never fall back to itkdb's
+                # production default from a "test" configuration.
+                self._client = itkdb.Client(user=user, prefix_url=self._settings.pdb_test_api_url)
         return self._client
 
     def verify_connection(self) -> dict:

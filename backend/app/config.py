@@ -1,9 +1,13 @@
 """Application settings.
 
 Safety design: the PDB production instance is never reachable by default.
-`pdb_instance` defaults to "test" and switching it to "production" is refused
-unless `allow_production` is also set — two deliberate steps, both via
-environment variables, neither of which exists in any committed file.
+`pdb_instance` defaults to "test" (inert — that historical instance no longer
+exists, so the default configuration cannot reach any PDB at all). Switching to
+"production" is refused unless `allow_production` is also set — two deliberate
+steps, both via environment variables, neither of which exists in any committed
+file. Writes against production are additionally scoped by `pdb_write_scope`
+(default `dummy_only`): only components itkFlow itself registered into a
+DUMMY batch may ever be written to (see docs/09).
 """
 
 from functools import lru_cache
@@ -45,6 +49,20 @@ class Settings(BaseSettings):
     # itkdb access codes — only ever provided via environment, never committed.
     itkdb_access_code1: str | None = None
     itkdb_access_code2: str | None = None
+
+    # --- PDB write scope ----------------------------------------------------
+    # "dummy_only": writes (test-run uploads, stage moves) are refused unless
+    # the target is a component itkFlow itself registered into a DUMMY batch
+    # (mirror flag `is_dummy=True`). "unrestricted" is accepted as a value but
+    # deliberately not implemented — real production writes need their own,
+    # conscious release step.
+    pdb_write_scope: Literal["dummy_only", "unrestricted"] = "dummy_only"
+    # Opt-in read by the pdb_write end-to-end test only; nothing writes without it.
+    allow_pdb_writes: bool = False
+    # Component types itkFlow may register as DUMMY test components. Sensors
+    # and ASICs are never allowed here: there is no dummy mechanism for them
+    # and registering one corrupts collaboration serial numbering.
+    pdb_dummy_component_types: list[str] = ["MODULE", "HYBRID"]
 
     # --- Outbox worker ----------------------------------------------------
     # Seconds the async submission worker sleeps between polling cycles.

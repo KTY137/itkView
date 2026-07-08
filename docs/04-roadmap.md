@@ -25,9 +25,11 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 - Backend-Basis: FastAPI-App, SQLAlchemy-Modelle fuer Institute, Komponenten,
   Outbox und Audit; Pydantic-Schemas; Health-, Institute-, Component-, Outbox-
   und Audit-Endpunkte; Outbox-Statusvertrag als Backend-Quelle der Wahrheit.
-- Read-only PDB-Mirror ist im Aufbau: Komponentensync, PDB-Testinstanz-Gateway,
-  Mapping von PDB-Komponenten in lokale Mirror-Records, Demo-Fixtures und ein
-  API-Endpunkt zum Starten eines Institute-Komponentensyncs.
+- Read-only PDB-Mirror ist im Aufbau: Komponentensync, PDB-Gateway (seit
+  2026-07-08 produktionsfaehig hinter doppeltem Opt-in — es gibt keine
+  Testinstanz mehr, siehe docs/09 + ADR 003), Mapping von PDB-Komponenten in
+  lokale Mirror-Records, Demo-Fixtures und ein API-Endpunkt zum Starten eines
+  Institute-Komponentensyncs.
 - Frontend-Basis: Vite/React-Shell mit Navigation, Health-Anzeige,
   Komponentenliste mit Such-/Scan-Ergonomie, Detail-/Familienansicht und
   Institute-Sync-Control, Outbox-Screen mit Statusuebergaengen/Demo-Fallback
@@ -56,18 +58,19 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   `worker`-Service in Compose) beansprucht `approved`/`submitted`-Aktionen,
   wiederholt den Dry-Run gegen den aktuellen Mirror, ruft einen injizierten
   Submitter und setzt `confirmed` (mit `external_ref`) oder `failed`. Realer
-  Submitter schreibt `uploadTestRunResults` gegen die Testinstanz, ist ohne
-  Access-Codes inaktiv. Idempotenz ueber `external_ref`. Details: ADR 002.
+  Submitter schreibt `uploadTestRunResults`/`setComponentStage`, ist ohne
+  Access-Codes inaktiv und lehnt jedes Ziel ab, das keine eigene
+  DUMMY-Testkomponente ist (`pdb_write_scope=dummy_only`, ADR 003).
+  Idempotenz ueber `external_ref`. Details: ADR 002.
 - Watched-Folder-Agent ist bisher nur als Phase-2-Platzhalter dokumentiert.
 
 ## Naechste Arbeitspakete
 
 1. **Stage-Move-Strecke schliessen** (`domain-modeler`, `backend-dev`,
-   `pdb-gateway-dev`): Die Suggestion-Engine + `stage_move`-Draft stehen
-   (2026-07-08). Offen: realer Submitter fuer `stage_move` im Outbox-Worker
-   (PDB-Stage-Move via itkdb, Testinstanz), und die „satisfied tests"-Quelle
-   perspektivisch aus einem PDB-Test-Run-Mirror statt nur aus confirmed
-   itkFlow-Uploads speisen (fuer Parallelbetrieb mit zFlow).
+   `pdb-gateway-dev`): Suggestion-Engine, `stage_move`-Draft und realer
+   Submitter (setComponentStage, DUMMY-Scope) stehen (2026-07-08). Offen: die
+   „satisfied tests"-Quelle perspektivisch aus einem PDB-Test-Run-Mirror statt
+   nur aus confirmed itkFlow-Uploads speisen (fuer Parallelbetrieb mit zFlow).
 2. **Dashboard ausbauen** (`frontend-dev`, `backend-dev`): Summary um offene
    Tests, Sync-Alter und auffaellige Stage-/Outbox-Zustaende erweitern.
 3. **Outbox-Worker haerten** (`backend-dev`, `pdb-gateway-dev`, `qa-engineer`):
@@ -81,9 +84,11 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
    Uebergang `ParsedTestRun` → PDB-Uploadcall im Outbox-Worker definieren
    (Wer submittet? Wie wird der Dry-Run vor dem echten Upload wiederholt?),
    plus optional Metrologie-Rohformat-Parser.
-5. **Sandbox-Sync validieren** (`pdb-gateway-dev`, `qa-engineer`): markierten
-   PDB-Testinstanz-Check fuer `listComponents` mit echten Sandbox-Tokens laufen
-   lassen und dokumentieren, welche Filter pro Institute-Profil noetig sind.
+5. **Produktions-Reads + DUMMY-Write-E2E validieren** (`pdb-gateway-dev`,
+   `qa-engineer`): `pytest -m pdb_sandbox` (read-only Smoke gegen Produktion)
+   und `pytest -m pdb_write` (registriert ein `DUMMY_TUDO`-Modul, Upload +
+   Stage-Move nur darauf) mit echten Codes laufen lassen; dokumentieren,
+   welche `pdb_filters` pro Institute-Profil noetig sind. Setup: docs/09.
 
 ## Geplant (Design steht, Umsetzung nach Freigabe)
 

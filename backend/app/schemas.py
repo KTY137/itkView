@@ -191,6 +191,7 @@ class HealthOut(BaseModel):
     app: str
     version: str
     pdb_instance: str
+    pdb_write_scope: str
 
 
 # --- Auth / users (docs/06) ------------------------------------------------

@@ -21,9 +21,14 @@ Team: `docs/03-agent-team.md`.
 1. **`references/zeuthenflow` NIEMALS ausführen oder importieren** — nur mit Read/Grep lesen.
    Schon ein Import baut DB-Verbindungen auf. Der Ordner ist eine anonymisierte Lese-Referenz
    (siehe `references/zeuthenflow/ANONYMIZATION.md`); sein `.git` enthält noch Originaldaten — nicht anfassen.
-2. **Niemals gegen die produktive PDB entwickeln oder testen.** Ausschließlich die Testinstanz
-   `https://itkpd-test.unicorncollege.cz` bzw. Sandbox-Tokens verwenden. Kein Code, der ohne
-   explizite Konfiguration auf eine Produktions-URL zeigt; Default ist immer die Testinstanz.
+2. **PDB-Schreibschutz (es gibt keine Testinstanz mehr).** Lesende Zugriffe auf die produktive
+   PDB nur mit doppeltem Opt-in (`ITKFLOW_PDB_INSTANCE=production` + `ITKFLOW_ALLOW_PRODUCTION=true`);
+   der Default erreicht keine PDB. **Schreiboperationen ausschließlich gegen von itkFlow selbst
+   registrierte DUMMY-Batch-Testkomponenten** (nur Module/Hybride; **niemals Sensoren oder ASICs
+   registrieren** — dafür gibt es keinen Dummy-Mechanismus, das korrumpiert Seriennummern).
+   Technisch erzwungen via `pdb_write_scope=dummy_only` (`backend/app/pdb_scope.py`); echte
+   Produktions-Writes sind bewusst nicht implementiert. Details:
+   `docs/09-pdb-production-strategy.md`, `docs/adr/003-pdb-dummy-write-scope.md`.
 3. **Keine Secrets/Tokens/personenbezogene Daten** in Repo, Logs, Fixtures oder Doku.
    Beispieldaten nur anonymisiert (Schema wie in der Referenz: `Anna Abel <anna.abel@example.org>`).
 4. **Kein Institut-Hardcoding.** `TUDO`/`DESYZ`, lokale Namensschemata, Stage-/Test-Mappings,

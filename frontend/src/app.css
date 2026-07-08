@@ -274,6 +274,11 @@ button {
   background: var(--crit);
   box-shadow: 0 0 0 3px rgba(208, 59, 59, 0.15);
 }
+/* Production PDB: reachable, but writes are DUMMY-scoped — amber, not red. */
+.dot.prod {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px rgba(181, 137, 0, 0.18);
+}
 .badge {
   font: 600 11px var(--mono);
   border: 1px solid var(--line);
