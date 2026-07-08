@@ -20,6 +20,7 @@ import type {
 } from "../api";
 import { filterDemoComponents, getDemoComponent } from "../demoData";
 import { formatTimestamp, t } from "../i18n";
+import { roleLabel, stageChipClass } from "../ui";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -410,7 +411,7 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
                   <td className="mono">{c.sn}</td>
                   <td>{c.component_type}</td>
                   <td>
-                    <span className="chip stage">{c.stage}</span>
+                    <span className={stageChipClass(c.stage)}>{c.stage}</span>
                   </td>
                   <td>{c.location}</td>
                 </tr>
@@ -519,42 +520,13 @@ function ComponentDetailPanel({
 
   const parentSn = detail.parent_sn;
 
-  const selfNode = (
-    <li>
-      <div className="tree-row">
-        <strong>{detail.local_name ?? detail.sn}</strong>
-        <span className="mono muted">{detail.sn}</span>
-        <span className="chip stage">{detail.stage}</span>
-        <span className="muted">({t.components.thisComponent})</span>
-      </div>
-      {detail.children.length > 0 && (
-        <ul>
-          {detail.children.map((child) => (
-            <li key={child.sn}>
-              <div className="tree-row">
-                <button className="link-btn" onClick={() => onOpen(child.sn)}>
-                  {child.local_name ?? child.sn}
-                </button>
-                <span className="mono muted">{child.sn}</span>
-                <span>{child.component_type}</span>
-                <span className="chip stage">{child.stage}</span>
-                {child.is_dummy && <span className="chip muted">{t.components.dummy}</span>}
-                {child.trashed && <span className="chip red">{t.components.trashed}</span>}
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </li>
-  );
-
   return (
     <div className="screen">
       {toolbar}
       <div className="detail-head">
         <h2 className="detail-title">{detail.local_name ?? detail.sn}</h2>
         <span className="mono muted">{detail.sn}</span>
-        <span className="chip stage">{detail.stage}</span>
+        <span className={stageChipClass(detail.stage)}>{detail.stage}</span>
         {detail.is_dummy && <span className="chip muted">{t.components.dummy}</span>}
         {detail.trashed && <span className="chip red">{t.components.trashed}</span>}
       </div>
@@ -574,23 +546,42 @@ function ComponentDetailPanel({
           <h3 className="section-title">{t.components.family}</h3>
           <div className="panel">
             <ul className="tree">
-              {parentSn !== null ? (
-                <li>
-                  <div className="tree-row">
-                    <span className="muted">{t.components.parent}:</span>
-                    <button className="link-btn mono" onClick={() => onOpen(parentSn)}>
-                      {parentSn}
-                    </button>
-                  </div>
-                  <ul>{selfNode}</ul>
+              {parentSn !== null && (
+                <li className="tree-row">
+                  <span className="role">{t.components.parent}</span>
+                  <button className="link-btn mono" onClick={() => onOpen(parentSn)}>
+                    {parentSn}
+                  </button>
                 </li>
-              ) : (
-                selfNode
+              )}
+              <li className="tree-row">
+                <span className="role">{roleLabel(detail.component_type)}</span>
+                <strong>{detail.local_name ?? detail.sn}</strong>
+                <span className="mono muted">{detail.sn}</span>
+                <span className={stageChipClass(detail.stage)}>{detail.stage}</span>
+                <span className="ok is-muted">{t.components.thisComponent}</span>
+              </li>
+              {detail.children.map((child) => (
+                <li className="tree-row lvl1" key={child.sn}>
+                  <span className="role">{roleLabel(child.component_type)}</span>
+                  <button className="link-btn" onClick={() => onOpen(child.sn)}>
+                    {child.local_name ?? child.sn}
+                  </button>
+                  <span className="mono muted">{child.sn}</span>
+                  {child.is_dummy && <span className="chip muted">{t.components.dummy}</span>}
+                  {child.trashed ? (
+                    <span className="chip red">{t.components.trashed}</span>
+                  ) : (
+                    <span className="ok">{t.components.assembled} ✓</span>
+                  )}
+                </li>
+              ))}
+              {detail.children.length === 0 && (
+                <li className="tree-row lvl1">
+                  <span className="muted">{t.components.noChildren}</span>
+                </li>
               )}
             </ul>
-            {detail.children.length === 0 && (
-              <p className="state-note">{t.components.noChildren}</p>
-            )}
           </div>
         </div>
         <div className="det-col">
