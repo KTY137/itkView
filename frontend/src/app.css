@@ -147,15 +147,22 @@ button {
   margin-top: auto;
   display: flex;
   flex-direction: column;
+  gap: 10px;
+  padding-top: 10px;
 }
+/* The official logo has fixed brand colours (green mark + black wordmark), so
+   it sits on a white plate to stay legible in both light and dark themes. */
 .rail-logo {
-  padding: 12px 10px 4px;
-  border-top: 1px solid var(--line);
+  margin: 0 10px;
+  padding: 8px 10px;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
 }
 .rail-logo img {
   display: block;
   width: 100%;
-  max-height: 46px;
+  max-height: 40px;
   object-fit: contain;
   object-position: left center;
 }
@@ -167,9 +174,6 @@ button {
   align-items: center;
   color: var(--ink2);
   font-size: 12.5px;
-}
-.rail-logo + .me {
-  border-top: none;
 }
 .ava {
   width: 26px;
