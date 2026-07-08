@@ -1018,13 +1018,28 @@ code {
 .card-head h2 {
   margin: 0;
 }
-/* Category label in a horizontal bar row */
+/* Category label in a horizontal bar row (optionally with an institute logo) */
 .hbar-cat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   font: 11.5px var(--mono);
   color: var(--ink2);
+}
+.hbar-cat-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.hbar-logo {
+  flex: 0 0 auto;
+  height: 16px;
+  width: auto;
+  max-width: 34px;
+  object-fit: contain;
+  border-radius: 2px;
+  background: #fff;
 }
 /* Bars take their category tone (stage ramp / status); default = series hue. */
 .hbar-fill[data-tone="good"] { background: var(--good); }
