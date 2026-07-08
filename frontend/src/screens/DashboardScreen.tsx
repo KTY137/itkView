@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ApiError, getDashboardSummary } from "../api";
+import { ApiError, getDashboardSummary, getInstitutes } from "../api";
 import type { CountBucket, DashboardSummary } from "../api";
 import { makeDemoDashboardSummary } from "../demoData";
 import { formatCount, formatRelative, formatTimestamp, t } from "../i18n";
@@ -11,7 +11,7 @@ function errorMessage(err: unknown): string {
 }
 
 type Tone = string;
-type Row = { label: string; count: number; tone?: Tone };
+type Row = { label: string; count: number; tone?: Tone; logo?: string };
 
 export default function DashboardScreen() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -19,6 +19,24 @@ export default function DashboardScreen() {
   const [error, setError] = useState<string | null>(null);
   const [demo, setDemo] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [logos, setLogos] = useState<Record<string, string>>({});
+
+  // Institute logos are profile data (hard rule #4) — map each code to its
+  // configured logo_url so the "by institute" bars can carry the branding.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    getInstitutes(ctrl.signal)
+      .then((list) => {
+        const map: Record<string, string> = {};
+        for (const inst of list) {
+          const url = inst.settings?.logo_url;
+          if (typeof url === "string" && url !== "") map[inst.code] = url;
+        }
+        setLogos(map);
+      })
+      .catch(() => setLogos({}));
+    return () => ctrl.abort();
+  }, []);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -124,7 +142,10 @@ export default function DashboardScreen() {
         </section>
         <section className="chart-card">
           <h2>{t.dashboard.byInstitute}</h2>
-          <ToneBars rows={summary.by_institute} empty={t.dashboard.empty} />
+          <ToneBars
+            rows={summary.by_institute.map((b) => ({ ...b, logo: logos[b.label] }))}
+            empty={t.dashboard.empty}
+          />
         </section>
       </div>
     </div>
@@ -163,7 +184,8 @@ function ToneBars({ rows, empty }: { rows: Row[]; empty: string }) {
       {rows.map((r) => (
         <div className="hbar-row" key={r.label}>
           <span className="hbar-cat" title={r.label}>
-            {r.label}
+            {r.logo !== undefined && <img className="hbar-logo" src={r.logo} alt="" />}
+            <span className="hbar-cat-text">{r.label}</span>
           </span>
           <div className="hbar-track">
             <div
