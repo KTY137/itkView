@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import Base, ensure_phase0_sqlite_schema, make_engine, make_session_factory
-from app.models import InstituteProfile
+from app.models import InstituteProfile, Tool
 from app.sync import SyncStats, load_fixture_records, sync_components
 
 DEMO_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "demo_components.json"
@@ -32,6 +32,22 @@ DEMO_INSTITUTE_BRANDING: dict[str, dict] = {
         ),
     },
 }
+
+
+# Demo jigs/tools for the TUDO instance, tagged with the module types they fit
+# (docs/07). Seed data only — real deployments manage their own registry.
+DEMO_TOOLS: list[dict] = [
+    {"kind": "jig", "code": "HV-TAB-JIG-R5", "rfid": "E28011700000000000000001",
+     "compatible_types": ["R5M0", "R5M1"]},
+    {"kind": "jig", "code": "HV-TAB-JIG-R2", "rfid": "E28011700000000000000002",
+     "compatible_types": ["R2"]},
+    {"kind": "pickup_tool", "code": "PICKUP-R5", "rfid": "E28011700000000000000003",
+     "compatible_types": ["R5M0", "R5M1"]},
+    {"kind": "pickup_tool", "code": "PICKUP-R2", "rfid": "E28011700000000000000004",
+     "compatible_types": ["R2"]},
+    {"kind": "panel", "code": "GLUE-PANEL-R5-01", "rfid": None,
+     "compatible_types": ["R5M0", "R5M1"]},
+]
 
 
 def _default_prefix(code: str, local_names: list[str]) -> str:
@@ -68,6 +84,15 @@ def seed(database_url: str, fixture_path: Path = DEMO_FIXTURE_PATH) -> SyncStats
             elif logo_url and not (profile.settings or {}).get("logo_url"):
                 # Backfill demo branding on re-seed (JSON reassigned, not mutated).
                 profile.settings = {**(profile.settings or {}), "logo_url": logo_url}
+        session.flush()  # assign institute ids for tool attachment
+
+        tudo = session.scalar(select(InstituteProfile).where(InstituteProfile.code == "TUDO"))
+        if tudo is not None:
+            for spec in DEMO_TOOLS:
+                exists = session.scalar(select(Tool).where(Tool.code == spec["code"]))
+                if exists is None:
+                    session.add(Tool(institute_id=tudo.id, **spec))
+
         stats = sync_components(session, records)
         session.commit()
     return stats

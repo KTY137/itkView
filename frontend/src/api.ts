@@ -200,6 +200,21 @@ export const DEFAULT_OUTBOX_CONTRACT: OutboxContract = {
   },
 };
 
+// ---- Tools / jigs -----------------------------------------------------------
+
+export type Tool = {
+  id: number;
+  kind: string;
+  code: string;
+  rfid: string | null;
+  compatible_types: string[];
+  institute_id: number | null;
+  status: string;
+  created_at: string;
+};
+
+export type ToolQuery = { kind?: string; fits?: string; status?: string };
+
 // ---- Error handling ----------------------------------------------------------
 
 export class ApiError extends Error {
@@ -317,6 +332,10 @@ export function postInstitute(body: InstituteCreate): Promise<Institute> {
 
 export function getDashboardSummary(signal?: AbortSignal): Promise<DashboardSummary> {
   return request<DashboardSummary>("/api/dashboard/summary", { signal });
+}
+
+export function getTools(query: ToolQuery = {}, signal?: AbortSignal): Promise<Tool[]> {
+  return request<Tool[]>(`/api/tools${queryString(query)}`, { signal });
 }
 
 export function getOutboxContract(signal?: AbortSignal): Promise<OutboxContract> {

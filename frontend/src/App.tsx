@@ -6,6 +6,7 @@ import BoardScreen from "./screens/BoardScreen";
 import ComponentsScreen from "./screens/ComponentsScreen";
 import DashboardScreen from "./screens/DashboardScreen";
 import OutboxScreen from "./screens/OutboxScreen";
+import ToolsScreen from "./screens/ToolsScreen";
 import TriageScreen from "./screens/TriageScreen";
 
 type Health = {
@@ -23,14 +24,17 @@ const SCREENS = [
   { id: "dashboard", label: t.nav.dashboard, icon: "◔" },
 ] as const;
 
+const SITE_SCREENS = [{ id: "tools", label: t.nav.tools, icon: "⚒" }] as const;
+
 const SOON = [
   { label: t.nav.glueBatches, icon: "⬡" },
   { label: t.nav.shipments, icon: "⛟" },
-  { label: t.nav.tools, icon: "⚒" },
   { label: t.nav.reminders, icon: "✉" },
 ] as const;
 
-type ScreenId = (typeof SCREENS)[number]["id"];
+type ScreenId =
+  | (typeof SCREENS)[number]["id"]
+  | (typeof SITE_SCREENS)[number]["id"];
 
 /** Cross-screen navigation intent (open a component, or seed the search). */
 export type NavIntent = { token: number; sn?: string; q?: string };
@@ -97,7 +101,7 @@ export default function App() {
     setScanText("");
   }
 
-  const activeLabel = SCREENS.find((s) => s.id === screen)?.label ?? "";
+  const activeLabel = [...SCREENS, ...SITE_SCREENS].find((s) => s.id === screen)?.label ?? "";
   const instituteCode = institutes[0]?.code;
   // Institute branding is profile data (hard rule #4: never hardcode an
   // institute) — the logo comes from the selected institute's settings.
@@ -129,6 +133,20 @@ export default function App() {
           ))}
         </nav>
         <div className="grp">{t.nav.groupSite}</div>
+        {SITE_SCREENS.map((s) => (
+          <button
+            key={s.id}
+            type="button"
+            className="nav-btn"
+            aria-current={screen === s.id ? "page" : undefined}
+            onClick={() => setScreen(s.id)}
+          >
+            <span className="ic" aria-hidden="true">
+              {s.icon}
+            </span>{" "}
+            {s.label}
+          </button>
+        ))}
         {SOON.map((s) => (
           <button key={s.label} type="button" className="nav-btn dis" disabled>
             <span className="ic" aria-hidden="true">
@@ -191,6 +209,8 @@ export default function App() {
             <TriageScreen />
           ) : screen === "outbox" ? (
             <OutboxScreen />
+          ) : screen === "tools" ? (
+            <ToolsScreen />
           ) : (
             <DashboardScreen />
           )}

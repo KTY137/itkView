@@ -236,3 +236,36 @@ class MeOut(BaseModel):
     role: str
     institute_id: int | None
     institute_code: str | None
+
+
+# --- Tools / jigs (docs/07) ------------------------------------------------
+
+ToolStatus = Literal["active", "flagged", "blacklisted"]
+
+
+class ToolCreate(BaseModel):
+    kind: str = Field(min_length=1, max_length=24)
+    code: str = Field(min_length=1, max_length=64)
+    rfid: str | None = Field(default=None, max_length=64)
+    compatible_types: list[str] = Field(default_factory=list)
+    status: ToolStatus = "active"
+
+
+class ToolUpdate(BaseModel):
+    code: str | None = Field(default=None, min_length=1, max_length=64)
+    rfid: str | None = Field(default=None, max_length=64)
+    compatible_types: list[str] | None = None
+    status: ToolStatus | None = None
+
+
+class ToolOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    kind: str
+    code: str
+    rfid: str | None
+    compatible_types: list[str]
+    institute_id: int | None
+    status: str
+    created_at: datetime
