@@ -99,6 +99,10 @@ export default function App() {
 
   const activeLabel = SCREENS.find((s) => s.id === screen)?.label ?? "";
   const instituteCode = institutes[0]?.code;
+  // Institute branding is profile data (hard rule #4: never hardcode an
+  // institute) — the logo comes from the selected institute's settings.
+  const rawLogo = institutes[0]?.settings?.logo_url;
+  const logoUrl = typeof rawLogo === "string" && rawLogo !== "" ? rawLogo : null;
 
   return (
     <div className="frame">
@@ -133,15 +137,22 @@ export default function App() {
             {s.label} <span className="soon">P4</span>
           </button>
         ))}
-        <div className="me">
-          <span className="ava">it</span>
-          <span>
-            itkFlow
-            <br />
-            <span className="role">
-              {instituteCode ? `${t.nav.operator} · ${instituteCode}` : t.nav.operator}
+        <div className="rail-bottom">
+          {logoUrl !== null && (
+            <div className="rail-logo">
+              <img src={logoUrl} alt={instituteCode ? `${instituteCode} logo` : "Institute logo"} />
+            </div>
+          )}
+          <div className="me">
+            <span className="ava">it</span>
+            <span>
+              itkFlow
+              <br />
+              <span className="role">
+                {instituteCode ? `${t.nav.operator} · ${instituteCode}` : t.nav.operator}
+              </span>
             </span>
-          </span>
+          </div>
         </div>
       </aside>
 

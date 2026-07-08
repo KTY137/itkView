@@ -19,6 +19,20 @@ from app.sync import SyncStats, load_fixture_records, sync_components
 
 DEMO_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "demo_components.json"
 
+# Demo-only branding for seeded institutes. This is seed *data*, not product
+# logic: the app reads an institute's name/logo from its profile (hard rule #4),
+# so real deployments set these in their own profile. This map only makes the
+# built-in demo look complete for the TUDO instance.
+DEMO_INSTITUTE_BRANDING: dict[str, dict] = {
+    "TUDO": {
+        "name": "TU Dortmund",
+        "logo_url": (
+            "https://upload.wikimedia.org/wikipedia/commons/e/e6/"
+            "Technische_Universit%C3%A4t_Dortmund_Logo.svg"
+        ),
+    },
+}
+
 
 def _default_prefix(code: str, local_names: list[str]) -> str:
     candidates = [name for name in local_names if name.startswith(f"{code}-")]
@@ -39,16 +53,21 @@ def seed(database_url: str, fixture_path: Path = DEMO_FIXTURE_PATH) -> SyncStats
             else:
                 by_institute.setdefault(record.institute_code, [])
         for code, local_names in by_institute.items():
+            branding = DEMO_INSTITUTE_BRANDING.get(code, {})
+            logo_url = branding.get("logo_url")
             profile = session.scalar(select(InstituteProfile).where(InstituteProfile.code == code))
             if profile is None:
                 session.add(
                     InstituteProfile(
                         code=code,
-                        name=f"Demo {code}",
+                        name=branding.get("name", f"Demo {code}"),
                         local_name_prefix=_default_prefix(code, local_names),
-                        settings={},
+                        settings={"logo_url": logo_url} if logo_url else {},
                     )
                 )
+            elif logo_url and not (profile.settings or {}).get("logo_url"):
+                # Backfill demo branding on re-seed (JSON reassigned, not mutated).
+                profile.settings = {**(profile.settings or {}), "logo_url": logo_url}
         stats = sync_components(session, records)
         session.commit()
     return stats
