@@ -38,6 +38,7 @@ class ComponentOut(BaseModel):
     parent_sn: str | None
     is_dummy: bool
     trashed: bool
+    stale: bool
     synced_at: datetime
 
 
@@ -52,6 +53,7 @@ class ComponentSyncOut(BaseModel):
     created: int
     updated: int
     unchanged: int
+    stale: int
     total: int
 
 
@@ -247,6 +249,7 @@ ToolStatus = Literal["active", "flagged", "blacklisted"]
 class ToolCreate(BaseModel):
     kind: str = Field(min_length=1, max_length=24)
     code: str = Field(min_length=1, max_length=64)
+    label: str | None = Field(default=None, max_length=120)
     rfid: str | None = Field(default=None, max_length=64)
     compatible_types: list[str] = Field(default_factory=list)
     status: ToolStatus = "active"
@@ -265,8 +268,71 @@ class ToolOut(BaseModel):
     id: int
     kind: str
     code: str
+    label: str | None
     rfid: str | None
     compatible_types: list[str]
     institute_id: int | None
     status: str
     created_at: datetime
+
+
+# --- Production statistics (reconstructed from the stage-event history) ------
+
+
+class ThroughputPoint(BaseModel):
+    period: str
+    count: int
+
+
+class LeadTimeOut(BaseModel):
+    count: int
+    median_days: float | None
+    p25_days: float | None
+    p75_days: float | None
+
+
+class StageDwellOut(BaseModel):
+    stage: str
+    median_days: float
+    count: int
+
+
+class ReworkStageOut(BaseModel):
+    stage: str
+    count: int
+
+
+class ReworkOut(BaseModel):
+    rate: float
+    reworked_components: int
+    total_components: int
+    by_stage: list[ReworkStageOut]
+
+
+class YieldOut(BaseModel):
+    good: int
+    failed: int
+    concluded: int
+    in_progress: int
+    rate: float | None
+
+
+class ProductionStatsOut(BaseModel):
+    component_type: str | None
+    type_code: str | None
+    institute: str | None
+    target_stage: str
+    bucket: str
+    components_tracked: int
+    stage_order: list[str]
+    throughput: list[ThroughputPoint]
+    lead_time: LeadTimeOut
+    stage_dwell: list[StageDwellOut]
+    rework: ReworkOut
+    yield_: YieldOut
+
+
+class StatsDimensionsOut(BaseModel):
+    component_types: list[str]
+    type_codes: list[str]
+    institutes: list[str]

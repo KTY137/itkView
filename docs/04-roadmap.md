@@ -63,6 +63,18 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   DUMMY-Testkomponente ist (`pdb_write_scope=dummy_only`, ADR 003).
   Idempotenz ueber `external_ref`. Details: ADR 002.
 - Watched-Folder-Agent ist bisher nur als Phase-2-Platzhalter dokumentiert.
+- **Gegen echte Produktions-PDB validiert (2026-07-08):** Voller TUDO-Sync
+  laeuft (read-only), reale Mapping-/Pagination-/Schema-Bugs gefixt, Prune
+  (`stale`) fuer verschwundene Komponenten. Erstes DUMMY-Modul registriert
+  (`20USEM00000435`). `is_dummy` leitet sich aus DUMMY-**Batch**-Mitgliedschaft
+  ab (nicht dem `dummy`-Flag).
+- **Statistik/Verlauf (Phase-1-Dashboard-Ausbau):** `StageEvent`-Historie wird
+  beim Sync aus dem PDB-`stages[]`-Log rekonstruiert; `app/stats.py` +
+  `/api/stats/production` liefern Throughput, Lead-Time, Stage-Dwell und Rework;
+  eigener **Statistics-Screen** im Frontend. Kein separater Zeitreihen-Speicher
+  noetig — alles aus einem Fetch.
+- **Stage-Farbsystem:** geordneter Ramp kuehl→gruen (Fortschritt); Gruen nur
+  FINISHED, Rot nur FAILED/TRASHED (CVD-sicher, `ui.ts`/`app.css`).
 
 ## Naechste Arbeitspakete
 
@@ -85,10 +97,13 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
    (Wer submittet? Wie wird der Dry-Run vor dem echten Upload wiederholt?),
    plus optional Metrologie-Rohformat-Parser.
 5. **Produktions-Reads + DUMMY-Write-E2E validieren** (`pdb-gateway-dev`,
-   `qa-engineer`): `pytest -m pdb_sandbox` (read-only Smoke gegen Produktion)
-   und `pytest -m pdb_write` (registriert ein `DUMMY_TUDO`-Modul, Upload +
-   Stage-Move nur darauf) mit echten Codes laufen lassen; dokumentieren,
-   welche `pdb_filters` pro Institute-Profil noetig sind. Setup: docs/09.
+   `qa-engineer`): Read-Smoke gegen Produktion und **voller TUDO-Sync
+   validiert** (2026-07-08): 3628 Payloads → ~2655 Mirror-Zeilen. Dabei mehrere
+   reale Bugs gefunden+gefixt (Parent-ObjectId-Crash, Pagination-Check,
+   `institute_code`-Overflow auf 32, `is_dummy` aus DUMMY-**Batch** statt
+   `dummy`-Flag, Prune/`stale`). **Erstes echtes Dummy-Modul registriert**
+   (`20USEM00000435`, `DUMMY_TUDO`). Offen: der volle `pytest -m pdb_write`
+   (Upload + Stage-Move-Kreis auf der Dummy-SN) noch scharf durchziehen.
 
 ## Geplant (Design steht, Umsetzung nach Freigabe)
 

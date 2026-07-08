@@ -1,6 +1,15 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -25,14 +34,20 @@ class Component(Base):
     component_type: Mapped[str] = mapped_column(String(32))  # e.g. MODULE, SENSOR, HYBRID, PWB
     type_code: Mapped[str] = mapped_column(String(32))  # PDB type code, e.g. R5M0, R5H1
     stage: Mapped[str] = mapped_column(String(48))  # current PDB stage, e.g. GLUED
-    location: Mapped[str] = mapped_column(String(16))  # institute code of the current location
-    institute_code: Mapped[str] = mapped_column(String(16), index=True)  # owning institute
+    # PDB institute codes run longer than a short abbreviation (e.g.
+    # UCSC_STRIP_SENSORS, 18 chars), so these hold 32 rather than 16.
+    location: Mapped[str] = mapped_column(String(32))  # institute code of the current location
+    institute_code: Mapped[str] = mapped_column(String(32), index=True)  # owning institute
     local_name: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
     parent_id: Mapped[int | None] = mapped_column(
         ForeignKey("component.id"), default=None, index=True
     )
     is_dummy: Mapped[bool] = mapped_column(Boolean, default=False)
     trashed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Set by a full institute sync when the PDB stops returning a component we
+    # still hold (moved away, deleted). The row is kept for its local links but
+    # flagged as no longer live; a later sync that sees it again clears this.
+    stale: Mapped[bool] = mapped_column(Boolean, default=False)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     parent: Mapped["Component | None"] = relationship(
@@ -54,7 +69,8 @@ class InstituteProfile(Base):
     __tablename__ = "institute_profile"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    code: Mapped[str] = mapped_column(String(16), unique=True, index=True)  # PDB code, e.g. TUDO
+    # PDB code (e.g. TUDO); 32 to fit longer codes like UCSC_STRIP_SENSORS.
+    code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120))
     local_name_prefix: Mapped[str] = mapped_column(String(32), default="")
     # Free-form profile: glue targets, stage automation flags, notification channels, …
@@ -178,7 +194,10 @@ class Tool(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     kind: Mapped[str] = mapped_column(String(24), index=True)  # jig | pickup_tool | panel | …
-    code: Mapped[str] = mapped_column(String(64))  # local/institute identifier
+    code: Mapped[str] = mapped_column(String(64))  # local/institute identifier (scannable)
+    # Human-friendly name operators use ("R5M0 Module jig #3 (orange)"); the code
+    # stays the scannable serial. Optional.
+    label: Mapped[str | None] = mapped_column(String(120), default=None)
     rfid: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
     # Module types / R-types this tool fits, e.g. ["R5M0", "R5M1"].
     compatible_types: Mapped[list] = mapped_column(JSON, default=list)
@@ -203,3 +222,30 @@ class UserSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     user: Mapped[User] = relationship()
+
+
+class StageEvent(Base):
+    """One timestamped stage transition, reconstructed from the PDB `stages[]`.
+
+    The PDB records the full dated stage log of every component; the sync mirrors
+    it here so we can compute throughput, cycle time, rework and WIP over time
+    without a separate time-series store. Denormalised component facts
+    (type/institute) let the stats queries filter without a join. Rows are owned
+    by the sync layer and rebuilt per component on each full sync.
+    """
+
+    __tablename__ = "stage_event"
+    __table_args__ = (
+        # A component enters a given stage at a given instant exactly once;
+        # this makes re-sync idempotent.
+        UniqueConstraint("component_sn", "stage", "entered_at", name="uq_stage_event"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    component_sn: Mapped[str] = mapped_column(String(20), index=True)
+    component_type: Mapped[str] = mapped_column(String(32), index=True)
+    type_code: Mapped[str] = mapped_column(String(32))
+    institute_code: Mapped[str] = mapped_column(String(32), index=True)
+    stage: Mapped[str] = mapped_column(String(48), index=True)
+    entered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    rework: Mapped[bool] = mapped_column(Boolean, default=False)

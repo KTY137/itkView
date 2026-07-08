@@ -64,6 +64,18 @@ def test_tool_by_rfid(client: TestClient, session_factory):
     assert client.get("/api/tools/by-rfid/UNKNOWN").status_code == 404
 
 
+def test_scan_tool_matches_rfid_or_code_case_insensitively(client: TestClient, session_factory):
+    add_tool(session_factory, kind="jig", code="HV-TAB-JIG-R5", rfid="E280-AA", compatible_types=[])
+
+    def scan(code: str):
+        return client.get("/api/tools/scan", params={"code": code})
+
+    assert scan("e280-aa").json()["code"] == "HV-TAB-JIG-R5"  # by RFID
+    assert scan("hv-tab-jig-r5").json()["rfid"] == "E280-AA"  # by printed code
+    assert scan("nope").status_code == 404
+    assert scan("  ").status_code == 422
+
+
 def test_create_tool_requires_operator(client: TestClient, session_factory, tudo):
     assert client.post("/api/tools", json={"kind": "jig", "code": "X"}).status_code == 401
 

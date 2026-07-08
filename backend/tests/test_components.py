@@ -5,7 +5,13 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import make_engine, make_session_factory
 from app.models import Component, InstituteProfile
-from app.pdb_sync import FetchResult, PdbSyncUnavailable
+from app.pdb_sync import (
+    FetchResult,
+    PdbSyncUnavailable,
+    _materialise,
+    build_id_to_sn,
+    map_pdb_component,
+)
 from app.seed_demo import DEMO_FIXTURE_PATH, seed
 from app.sync import SyncRecord, UnknownParentError, load_fixture_records, sync_components
 
@@ -229,6 +235,7 @@ def test_component_sync_endpoint_uses_configured_fetcher(
         "created": 2,
         "updated": 0,
         "unchanged": 0,
+        "stale": 0,
         "total": 2,
     }
 
@@ -353,3 +360,197 @@ def test_dashboard_summary_counts_components_and_outbox(
     assert {"label": "draft", "count": 2} in body["outbox_by_status"]
     assert {"label": "failed", "count": 1} in body["outbox_by_status"]
     assert "/api/dashboard/summary" in client.get("/openapi.json").json()["paths"]
+
+
+# --------------------------------------------------------------------------
+# PDB payload mapping — shapes verified against a real production fetch
+# --------------------------------------------------------------------------
+
+
+def _pdb_payload(sn: str, oid: str, **overrides) -> dict:
+    """A minimal 'ready' listComponents payload as production returns it."""
+    payload = {
+        "id": oid,
+        "serialNumber": sn,
+        "state": "ready",
+        "componentType": {"code": "SENSOR"},
+        "type": {"code": "ATLAS18R0"},
+        "currentStage": {"code": "BONDED"},
+        "institution": {"code": "TUDO"},
+        "currentLocation": {"code": "TUDO"},
+        "parents": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_map_resolves_string_parent_object_id():
+    """parents[].component is the parent's object-id *string*, not a nested dict."""
+    parent = _pdb_payload("20USEM00000001", "OID_PARENT", componentType={"code": "MODULE"})
+    child = _pdb_payload(
+        "20USES00000001", "OID_CHILD", parents=[{"component": "OID_PARENT", "state": "ready"}]
+    )
+    id_to_sn = build_id_to_sn([parent, child])
+    rec = map_pdb_component(child, id_to_sn)
+    assert rec is not None
+    assert rec.parent_sn == "20USEM00000001"
+
+
+def test_map_string_parent_without_state_is_treated_live():
+    """Most real parent entries omit `state`; a present component id is live."""
+    child = _pdb_payload("20USES00000002", "C2", parents=[{"component": "OID_P"}])
+    rec = map_pdb_component(child, {"OID_P": "20USEM00000002"})
+    assert rec is not None and rec.parent_sn == "20USEM00000002"
+
+
+def test_map_unresolved_parent_stays_none_without_crashing():
+    """A parent outside the fetched batch must not dangle or raise."""
+    child = _pdb_payload("20USES00000003", "C3", parents=[{"component": "OID_MISSING"}])
+    rec = map_pdb_component(child, {})  # empty lookup
+    assert rec is not None and rec.parent_sn is None
+
+
+def test_map_ignores_empty_parent_slots():
+    child = _pdb_payload("20USES00000004", "C4", parents=[{"component": None}, {"order": 0}])
+    rec = map_pdb_component(child, {})
+    assert rec is not None and rec.parent_sn is None
+
+
+def test_map_accepts_long_institute_code():
+    """Real codes like UCSC_STRIP_SENSORS (18 chars) exceed the old 16 limit."""
+    payload = _pdb_payload(
+        "20USES00000005", "C5", institution={"code": "UCSC_STRIP_SENSORS"}
+    )
+    rec = map_pdb_component(payload, {})
+    assert rec is not None and rec.institute_code == "UCSC_STRIP_SENSORS"
+
+
+def test_map_skips_deleted_and_serial_less():
+    assert map_pdb_component(_pdb_payload("20USES00000006", "C6", state="deleted"), {}) is None
+    assert map_pdb_component(_pdb_payload("", "C7"), {}) is None
+
+
+def test_map_picks_up_pdb_dummy_flag():
+    rec = map_pdb_component(_pdb_payload("20USES00000008", "C8", dummy=True), {})
+    assert rec is not None and rec.is_dummy is True
+
+
+def test_map_dummy_batch_membership_marks_dummy():
+    """A part in a DUMMY_<institute> batch is a write target even if dummy=False.
+
+    This is the authoritative marker: a freshly registered dummy module sits in
+    DUMMY_TUDO but its per-component `dummy` boolean stays false.
+    """
+    payload = _pdb_payload(
+        "20USEM00000435", "M435", dummy=False, batches=[{"number": "DUMMY_TUDO"}]
+    )
+    rec = map_pdb_component(payload, {})
+    assert rec is not None and rec.is_dummy is True
+
+
+def test_map_dummy_batch_match_is_case_insensitive():
+    payload = _pdb_payload("20USES00000009", "C9", batches=[{"number": "Dummy_O1"}])
+    assert map_pdb_component(payload, {}).is_dummy is True
+
+
+def test_map_real_production_batch_is_not_dummy():
+    payload = _pdb_payload(
+        "20USES00000010", "C10", dummy=False, batches=[{"number": "VPA50980"}]
+    )
+    assert map_pdb_component(payload, {}).is_dummy is False
+
+
+# --------------------------------------------------------------------------
+# Pagination completeness guard (_materialise)
+# --------------------------------------------------------------------------
+
+
+class _FakePaged:
+    """Stand-in for itkdb's PagedResponse: iterable, with a reported total."""
+
+    def __init__(self, items: list, total: int) -> None:
+        self._items = items
+        self.total = total
+
+    def __iter__(self):
+        return iter(self._items)
+
+
+def test_materialise_accepts_complete_paged():
+    assert _materialise(_FakePaged([{"a": 1}, {"a": 2}], total=2)) == [{"a": 1}, {"a": 2}]
+
+
+def test_materialise_rejects_truncated_paged():
+    with pytest.raises(PdbSyncUnavailable):
+        _materialise(_FakePaged([{"a": 1}], total=5))
+
+
+def test_materialise_rejects_truncated_dict():
+    with pytest.raises(PdbSyncUnavailable):
+        _materialise({"itemList": [{"a": 1}], "pageInfo": {"total": 3}})
+
+
+def test_materialise_accepts_complete_dict():
+    assert _materialise({"itemList": [{"a": 1}], "pageInfo": {"total": 1}}) == [{"a": 1}]
+
+
+# --------------------------------------------------------------------------
+# Prune: a full institute sync flags rows the PDB no longer returns
+# --------------------------------------------------------------------------
+
+
+def test_prune_flags_and_clears_stale(session_factory):
+    both = [record("20USE5M0000801"), record("20USE5M0000802")]
+    with session_factory() as s:
+        sync_components(s, both, prune_scope="TUDO")
+        s.commit()
+
+    # A later full sync returns only the first → the second is pruned as stale.
+    with session_factory() as s:
+        stats = sync_components(s, [record("20USE5M0000801")], prune_scope="TUDO")
+        s.commit()
+        assert stats.stale == 1
+        gone = s.scalar(select(Component).where(Component.sn == "20USE5M0000802"))
+        kept = s.scalar(select(Component).where(Component.sn == "20USE5M0000801"))
+        assert gone is not None and gone.stale is True
+        assert kept.stale is False
+
+    # It reappears → un-staled, and reported stale drops back to zero.
+    with session_factory() as s:
+        stats = sync_components(s, both, prune_scope="TUDO")
+        s.commit()
+        assert stats.stale == 0
+        back = s.scalar(select(Component).where(Component.sn == "20USE5M0000802"))
+        assert back.stale is False
+
+
+def test_sync_without_prune_scope_never_marks_stale(session_factory):
+    with session_factory() as s:
+        sync_components(s, [record("20USE5M0000801"), record("20USE5M0000802")])
+        s.commit()
+    with session_factory() as s:
+        stats = sync_components(s, [record("20USE5M0000801")])  # partial, no prune
+        s.commit()
+        assert stats.stale == 0
+        untouched = s.scalar(select(Component).where(Component.sn == "20USE5M0000802"))
+        assert untouched.stale is False
+
+
+def test_stale_filter_on_component_list(client: TestClient, tudo: dict):
+    def fetch_two(settings, institute):
+        return FetchResult(
+            records=[record("20USE5M0000801"), record("20USE5M0000802")], skipped=0
+        )
+
+    def fetch_one(settings, institute):
+        return FetchResult(records=[record("20USE5M0000801")], skipped=0)
+
+    client.app.state.component_fetcher = fetch_two
+    client.post("/api/sync/components/TUDO")
+    client.app.state.component_fetcher = fetch_one
+    assert client.post("/api/sync/components/TUDO").json()["stale"] == 1
+
+    stale_only = client.get("/api/components", params={"stale": "true"}).json()
+    assert {c["sn"] for c in stale_only} == {"20USE5M0000802"}
+    live_only = client.get("/api/components", params={"stale": "false"}).json()
+    assert {c["sn"] for c in live_only} == {"20USE5M0000801"}

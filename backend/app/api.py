@@ -24,6 +24,7 @@ from app.models import (
     IngestFile,
     InstituteProfile,
     OutboxAction,
+    StageEvent,
     Tool,
     User,
     UserSession,
@@ -57,8 +58,10 @@ from app.schemas import (
     OutboxCreate,
     OutboxOut,
     OutboxTransition,
+    ProductionStatsOut,
     RequirementCheckOut,
     StageSuggestionOut,
+    StatsDimensionsOut,
     ToolCreate,
     ToolOut,
     ToolUpdate,
@@ -67,6 +70,7 @@ from app.schemas import (
     UserUpdate,
 )
 from app.stage_service import evaluate_for_component
+from app.stats import production_stats
 from app.sync import UnknownParentError, sync_components
 
 
@@ -320,6 +324,30 @@ def get_tool_by_rfid(rfid: str, db: Session = Depends(get_db)) -> Tool:
     return tool
 
 
+@router.get("/api/tools/scan", response_model=ToolOut, tags=["tools"])
+def scan_tool(code: str, db: Session = Depends(get_db)) -> Tool:
+    """Resolve a scanned value to a tool by RFID *or* printed code.
+
+    Scanner-first: a wedge scanner emits either the RFID tag or the label code,
+    so match both, case-insensitively. This is the auto-pull the Tools screen
+    uses to surface a jig the moment it is scanned.
+    """
+    needle = code.strip()
+    if needle == "":
+        raise HTTPException(status_code=422, detail="Empty scan value.")
+    tool = db.scalar(
+        select(Tool).where(
+            or_(
+                func.lower(Tool.rfid) == needle.lower(),
+                func.lower(Tool.code) == needle.lower(),
+            )
+        )
+    )
+    if tool is None:
+        raise HTTPException(status_code=404, detail=f"No tool matches scan '{code}'.")
+    return tool
+
+
 @router.post("/api/tools", response_model=ToolOut, status_code=201, tags=["tools"])
 def create_tool(
     body: ToolCreate, db: Session = Depends(get_db), user: User = Depends(require_operator)
@@ -327,6 +355,7 @@ def create_tool(
     tool = Tool(
         kind=body.kind,
         code=body.code,
+        label=body.label,
         rfid=body.rfid,
         compatible_types=body.compatible_types,
         status=body.status,
@@ -372,6 +401,7 @@ def list_components(
     stage: str | None = None,
     component_type: str | None = None,
     institute: str | None = None,
+    stale: bool | None = None,
     db: Session = Depends(get_db),
 ) -> list[Component]:
     stmt = (
@@ -388,6 +418,8 @@ def list_components(
         stmt = stmt.where(Component.component_type == component_type)
     if institute:
         stmt = stmt.where(Component.institute_code == institute)
+    if stale is not None:
+        stmt = stmt.where(Component.stale.is_(stale))
     return list(db.scalars(stmt))
 
 
@@ -449,7 +481,8 @@ def sync_components_for_institute(
     fetcher = request.app.state.component_fetcher
     try:
         fetched = fetcher(request.app.state.settings, institute)
-        stats = sync_components(db, fetched.records)
+        # A full institute fetch is authoritative, so prune rows that vanished.
+        stats = sync_components(db, fetched.records, prune_scope=institute.code)
     except PdbSyncUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except UnknownParentError as exc:
@@ -463,6 +496,7 @@ def sync_components_for_institute(
         created=stats.created,
         updated=stats.updated,
         unchanged=stats.unchanged,
+        stale=stats.stale,
         total=stats.total,
     )
 
@@ -505,6 +539,46 @@ def dashboard_summary(db: Session = Depends(get_db)) -> DashboardSummaryOut:
         outbox_by_status=order_buckets(
             count_buckets(db, OutboxAction.status), [s.value for s in OutboxStatus]
         ),
+    )
+
+
+# --------------------------------------------------------------------------
+# Statistics (throughput / cycle time / rework, from the stage-event history)
+# --------------------------------------------------------------------------
+
+
+@router.get("/api/stats/dimensions", response_model=StatsDimensionsOut, tags=["stats"])
+def stats_dimensions(db: Session = Depends(get_db)) -> StatsDimensionsOut:
+    """Distinct filter values present in the stage-event history."""
+
+    def distinct(column) -> list[str]:
+        return [v for (v,) in db.execute(select(column).distinct().order_by(column)) if v]
+
+    return StatsDimensionsOut(
+        component_types=distinct(StageEvent.component_type),
+        type_codes=distinct(StageEvent.type_code),
+        institutes=distinct(StageEvent.institute_code),
+    )
+
+
+@router.get("/api/stats/production", response_model=ProductionStatsOut, tags=["stats"])
+def get_production_stats(
+    component_type: str | None = "MODULE",
+    type_code: str | None = None,
+    institute: str | None = None,
+    target_stage: str = "FINISHED",
+    bucket: str = "month",
+    db: Session = Depends(get_db),
+) -> dict:
+    if bucket not in ("week", "month", "year"):
+        raise HTTPException(status_code=422, detail="bucket must be week, month or year.")
+    return production_stats(
+        db,
+        component_type=component_type or None,
+        type_code=type_code or None,
+        institute=institute or None,
+        target_stage=target_stage,
+        bucket=bucket,
     )
 
 

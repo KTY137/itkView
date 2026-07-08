@@ -14,7 +14,8 @@ from pydantic import ValidationError
 from app.config import Settings
 from app.models import InstituteProfile
 from app.pdb_gateway import PdbGateway
-from app.sync import SyncRecord
+from app.pdb_scope import DUMMY_BATCH_PREFIX
+from app.sync import StageEventRecord, SyncRecord
 
 # Component payloads that never made it past registration have no stage or
 # subtype yet; the mirror columns are non-null, so those show up as UNKNOWN.
@@ -27,7 +28,7 @@ DEFAULT_PDB_FILTERS: dict[str, Any] = {"project": "S"}
 
 
 class PdbSyncUnavailable(RuntimeError):
-    """The PDB test instance cannot be queried (configuration or connectivity)."""
+    """The production PDB cannot be queried (configuration or connectivity)."""
 
 
 @dataclass
@@ -47,30 +48,91 @@ def _code(value: Any) -> str | None:
     return None
 
 
-def _parent_sn(payload: dict) -> str | None:
-    """Serial number of the assembly parent, if any.
+def _is_dummy(payload: dict) -> bool:
+    """Whether a component is a test part safe for itkFlow to write to.
 
-    `parents` entries carry `component: None` for slots that were never
-    assembled; disassembled parents keep an entry whose component is no
-    longer `ready`. A part sits in at most one live assembly, so the first
-    ready parent is the assembly parent.
+    The collaboration separates test parts with a `DUMMY_<institute>` *batch*
+    (supervisor guidance, docs/09) — that batch membership is the authoritative
+    marker and is what a freshly registered dummy carries (its per-component
+    `dummy` boolean stays false). We also honour that legacy `dummy` flag so
+    pre-existing dummy parts (e.g. dummy hybrids) still qualify. Batch names are
+    matched case-insensitively (`DUMMY_UT`, `Dummy_O1` both occur in the PDB).
+    """
+    if payload.get("dummy"):
+        return True
+    for batch in payload.get("batches") or []:
+        number = batch.get("number") if isinstance(batch, dict) else batch
+        if isinstance(number, str) and number.upper().startswith(DUMMY_BATCH_PREFIX):
+            return True
+    return False
+
+
+def _stage_events(payload: dict) -> list[StageEventRecord]:
+    """Dated stage transitions from a component's `stages[]` log.
+
+    Each entry is `{code, dateTime, rework, ...}`; entries without a code or a
+    timestamp are skipped. The log is noisy (same-second correction entries,
+    rework loops) but faithful — downstream stats smooth it, they don't lose it.
+    """
+    events: list[StageEventRecord] = []
+    for entry in payload.get("stages") or []:
+        if not isinstance(entry, dict):
+            continue
+        code = entry.get("code")
+        when = entry.get("dateTime")
+        if not code or not when:
+            continue
+        try:
+            events.append(
+                StageEventRecord(stage=code, entered_at=when, rework=bool(entry.get("rework")))
+            )
+        except ValidationError:
+            continue
+    return events
+
+
+def _live_parent_object_id(payload: dict) -> str | None:
+    """Internal object-id of the assembly this part is currently mounted into.
+
+    Each `parents` entry carries the parent's **internal PDB object id** as a
+    bare string in `component` (not a nested object, and *not* a serial
+    number); empty slots carry `None`. A disassembled relationship drops its
+    id (goes null) and, where present, a `state` other than `ready` marks a
+    non-live link. A part sits in at most one live assembly, so the first
+    entry that still names a component wins. The caller maps this object id
+    back to a serial number via the batch's `id_to_sn` lookup.
     """
     for member in payload.get("parents") or []:
         component = member.get("component")
-        if not component or component.get("state") != "ready":
+        if not isinstance(component, str) or not component:
             continue
-        sn = component.get("serialNumber")
-        if sn:
-            return sn
+        if member.get("state", "ready") != "ready":
+            continue
+        return component
     return None
 
 
-def map_pdb_component(payload: dict) -> SyncRecord | None:
+def build_id_to_sn(payloads: list[dict]) -> dict[str, str]:
+    """Map every component's internal object id to its serial number.
+
+    Parents are referenced by object id, so resolving assembly links to serial
+    numbers needs this lookup built across the whole fetched batch first.
+    """
+    return {
+        payload["id"]: payload["serialNumber"]
+        for payload in payloads
+        if payload.get("state") == "ready" and payload.get("id") and payload.get("serialNumber")
+    }
+
+
+def map_pdb_component(payload: dict, id_to_sn: dict[str, str] | None = None) -> SyncRecord | None:
     """Turn one PDB component payload into a `SyncRecord`, or None to skip it.
 
-    Skipped: components not in state `ready` (deleted), without a serial
-    number (registered but never initialised), or with values the mirror
-    schema rejects.
+    `id_to_sn` resolves the parent's internal object id to its serial number;
+    a parent outside the fetched batch stays unresolved (`parent_sn=None`)
+    rather than dangling. Skipped: components not in state `ready` (deleted),
+    without a serial number (registered but never initialised), or with values
+    the mirror schema rejects.
     """
     if payload.get("state") != "ready":
         return None
@@ -79,6 +141,8 @@ def map_pdb_component(payload: dict) -> SyncRecord | None:
     institute_code = _code(payload.get("institution")) or _code(payload.get("currentLocation"))
     if not sn or component_type is None or institute_code is None:
         return None
+    parent_oid = _live_parent_object_id(payload)
+    parent_sn = (id_to_sn or {}).get(parent_oid) if parent_oid else None
     try:
         return SyncRecord(
             sn=sn,
@@ -88,9 +152,10 @@ def map_pdb_component(payload: dict) -> SyncRecord | None:
             location=_code(payload.get("currentLocation")) or institute_code,
             institute_code=institute_code,
             local_name=payload.get("alternativeIdentifier") or None,
-            parent_sn=_parent_sn(payload),
-            is_dummy=bool(payload.get("dummy", False)),
+            parent_sn=parent_sn,
+            is_dummy=_is_dummy(payload),
             trashed=bool(payload.get("trashed", False)),
+            stage_events=_stage_events(payload),
         )
     except ValidationError:
         return None
@@ -128,12 +193,39 @@ def fetch_for_institute(settings: Settings, institute: InstituteProfile) -> Fetc
     }
     try:
         response = client.get("listComponents", json=data)
-        # itkdb wraps paged list endpoints in an iterable PagedResponse;
-        # tolerate a plain dict in case a small result comes back unwrapped.
-        payloads = response.get("itemList", []) if isinstance(response, dict) else response
-        mapped = [map_pdb_component(payload) for payload in payloads]
+        payloads = _materialise(response)
+        # Parents reference components by internal object id; resolving those
+        # links to serial numbers needs the whole batch mapped up front.
+        id_to_sn = build_id_to_sn(payloads)
+        mapped = [map_pdb_component(payload, id_to_sn) for payload in payloads]
+    except PdbSyncUnavailable:
+        raise
     except Exception as exc:
         raise PdbSyncUnavailable(f"PDB component listing failed: {exc}") from exc
 
     records = [record for record in mapped if record is not None]
     return FetchResult(records=records, skipped=len(mapped) - len(records))
+
+
+def _materialise(response: Any) -> list[dict]:
+    """Collect every component across all pages, refusing a truncated result.
+
+    itkdb wraps `listComponents` in an iterable `PagedResponse` that fetches
+    each page transparently as it is iterated, so `list(response)` yields the
+    full set. We cross-check against the reported `total` and treat any
+    shortfall as a failed sync rather than silently mirroring a partial view.
+    A plain dict (a small unwrapped result) is tolerated but likewise checked
+    against its `pageInfo.total`.
+    """
+    if isinstance(response, dict):
+        payloads = response.get("itemList", [])
+        expected = (response.get("pageInfo") or {}).get("total")
+    else:
+        payloads = list(response)
+        expected = getattr(response, "total", None)
+    if isinstance(expected, int) and len(payloads) != expected:
+        raise PdbSyncUnavailable(
+            f"Paginated component listing incomplete: fetched {len(payloads)} "
+            f"of {expected} reported components; refusing a truncated sync."
+        )
+    return payloads
