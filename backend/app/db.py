@@ -57,3 +57,17 @@ def ensure_phase0_sqlite_schema(engine: Engine) -> None:
                 connection.execute(
                     text("ALTER TABLE outbox_action ADD COLUMN external_ref VARCHAR(64)")
                 )
+        if "component" in tables:
+            component_columns = {
+                row[1] for row in connection.execute(text("PRAGMA table_info(component)"))
+            }
+            if "stale" not in component_columns:
+                connection.execute(
+                    text("ALTER TABLE component ADD COLUMN stale BOOLEAN NOT NULL DEFAULT 0")
+                )
+        if "tool" in tables:
+            tool_columns = {
+                row[1] for row in connection.execute(text("PRAGMA table_info(tool)"))
+            }
+            if "label" not in tool_columns:
+                connection.execute(text("ALTER TABLE tool ADD COLUMN label VARCHAR(120)"))

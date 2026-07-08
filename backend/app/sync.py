@@ -10,13 +10,14 @@ their parents. The caller owns the transaction (commit/rollback).
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
-from app.models import Component, utcnow
+from app.models import Component, StageEvent, utcnow
 
 # Mirror fields copied verbatim from a record to the row. Changing any of
 # them counts the row as "updated"; `synced_at` alone does not.
@@ -32,6 +33,14 @@ _MIRROR_FIELDS = (
 )
 
 
+class StageEventRecord(BaseModel):
+    """One dated stage transition from a component's PDB `stages[]` log."""
+
+    stage: str = Field(min_length=1, max_length=48)
+    entered_at: datetime
+    rework: bool = False
+
+
 class SyncRecord(BaseModel):
     """One component as reported by the PDB (parents referenced by SN)."""
 
@@ -39,12 +48,13 @@ class SyncRecord(BaseModel):
     component_type: str = Field(min_length=1, max_length=32)
     type_code: str = Field(min_length=1, max_length=32)
     stage: str = Field(min_length=1, max_length=48)
-    location: str = Field(min_length=1, max_length=16)
-    institute_code: str = Field(min_length=1, max_length=16)
+    location: str = Field(min_length=1, max_length=32)
+    institute_code: str = Field(min_length=1, max_length=32)
     local_name: str | None = Field(default=None, max_length=64)
     parent_sn: str | None = Field(default=None, max_length=20)
     is_dummy: bool = False
     trashed: bool = False
+    stage_events: list[StageEventRecord] = Field(default_factory=list)
 
 
 @dataclass
@@ -52,6 +62,7 @@ class SyncStats:
     created: int = 0
     updated: int = 0
     unchanged: int = 0
+    stale: int = 0  # in-scope rows the PDB no longer returned (pruned)
 
     @property
     def total(self) -> int:
@@ -68,11 +79,21 @@ class UnknownParentError(ValueError):
         )
 
 
-def sync_components(session: Session, records: Sequence[SyncRecord]) -> SyncStats:
+def sync_components(
+    session: Session,
+    records: Sequence[SyncRecord],
+    prune_scope: str | None = None,
+) -> SyncStats:
     """Upsert PDB component records into the local mirror. Idempotent.
 
     Duplicate serial numbers within one batch are allowed; the last record
     wins. `synced_at` is refreshed on every seen component, changed or not.
+
+    `prune_scope` is an institute code that makes this a *full* sync of that
+    institute: after upserting, any mirror row governed by it (owned by or
+    located at it) that this batch did not return is flagged `stale`, so a
+    complete fetch also cleans up components that left the PDB's view. Rows
+    seen this run are un-staled. Leave it None for partial/fixture syncs.
     """
     now = utcnow()
     by_sn: dict[str, Component] = {}
@@ -85,7 +106,9 @@ def sync_components(session: Session, records: Sequence[SyncRecord]) -> SyncStat
             select(Component).where(Component.sn == record.sn)
         )
         if component is None:
-            component = Component(synced_at=now, **record.model_dump(exclude={"parent_sn"}))
+            component = Component(
+                synced_at=now, **record.model_dump(exclude={"parent_sn", "stage_events"})
+            )
             session.add(component)
             created.add(record.sn)
         else:
@@ -96,6 +119,10 @@ def sync_components(session: Session, records: Sequence[SyncRecord]) -> SyncStat
                     if record.sn not in created:
                         updated.add(record.sn)
             component.synced_at = now
+        # A component we just saw is live; clear any earlier stale flag. This
+        # is lifecycle state, not mirrored PDB data, so it never counts as an
+        # "updated" field change.
+        component.stale = False
         by_sn[record.sn] = component
     session.flush()  # assign ids before linking parents
 
@@ -116,11 +143,72 @@ def sync_components(session: Session, records: Sequence[SyncRecord]) -> SyncStat
                 updated.add(record.sn)
     session.flush()
 
+    _sync_stage_events(session, records, by_sn)
+
+    # Prune pass: flag governed rows this full sync did not return as stale.
+    # Keyed on the seen serial numbers (not timestamps) so it is independent of
+    # clock resolution and re-runnable.
+    stale = 0
+    if prune_scope is not None:
+        seen = set(by_sn)
+        governed = session.scalars(
+            select(Component).where(
+                or_(
+                    Component.institute_code == prune_scope,
+                    Component.location == prune_scope,
+                )
+            )
+        )
+        for row in governed:
+            if row.sn not in seen:
+                row.stale = True
+                stale += 1
+        session.flush()
+
     return SyncStats(
         created=len(created),
         updated=len(updated),
         unchanged=len(by_sn) - len(created) - len(updated),
+        stale=stale,
     )
+
+
+def _sync_stage_events(
+    session: Session,
+    records: Sequence[SyncRecord],
+    by_sn: dict[str, Component],
+) -> None:
+    """Rebuild the stage-transition history for every component carrying one.
+
+    Delete-and-reinsert per component (not per record) so the duplicate rows an
+    OR-location search returns don't double-insert. Only components that report
+    stage events are touched, so fixture/demo syncs (no history) are untouched.
+    """
+    events_by_sn = {r.sn: r.stage_events for r in records if r.stage_events}
+    if not events_by_sn:
+        return
+    session.execute(
+        delete(StageEvent).where(StageEvent.component_sn.in_(list(events_by_sn)))
+    )
+    session.flush()
+    for sn, events in events_by_sn.items():
+        component = by_sn[sn]
+        deduped: dict[tuple[str, datetime], StageEventRecord] = {}
+        for ev in events:
+            deduped[(ev.stage, ev.entered_at)] = ev  # collapse identical entries
+        for ev in deduped.values():
+            session.add(
+                StageEvent(
+                    component_sn=sn,
+                    component_type=component.component_type,
+                    type_code=component.type_code,
+                    institute_code=component.institute_code,
+                    stage=ev.stage,
+                    entered_at=ev.entered_at,
+                    rework=ev.rework,
+                )
+            )
+    session.flush()
 
 
 def load_fixture_records(path: str | Path) -> list[SyncRecord]:

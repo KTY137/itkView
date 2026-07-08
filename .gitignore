@@ -18,6 +18,8 @@ dist/
 .env
 *.db
 *.sqlite3
+# itkdb HTTP response cache — may hold real PDB data (hard rule #3)
+.webcache/
 
 # Read-only reference, not part of the product
 references/
