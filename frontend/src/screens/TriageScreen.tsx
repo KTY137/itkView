@@ -147,9 +147,13 @@ export default function TriageScreen() {
 
   return (
     <div className="screen">
+      <div className="sc-head">
+        <h1>{t.nav.triage}</h1>
+        <span className="sub">{t.triage.subtitle}</span>
+        {demo && <span className="badge warn">{t.common.demoBadge}</span>}
+      </div>
       {demo && (
         <div className="toolbar">
-          <span className="badge warn">{t.common.demoBadge}</span>
           <span className="muted">{t.common.demoNote}</span>
         </div>
       )}

@@ -7,7 +7,6 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app import __version__
-from app.domain.stages import evaluate_stage, stage_model_from_settings
 from app.ingestion import ParsedTestRun, parse_payload
 from app.models import AuditEvent, Component, IngestFile, InstituteProfile, OutboxAction
 from app.outbox import (
@@ -39,6 +38,7 @@ from app.schemas import (
     RequirementCheckOut,
     StageSuggestionOut,
 )
+from app.stage_service import evaluate_for_component
 from app.sync import UnknownParentError, sync_components
 
 
@@ -142,33 +142,6 @@ def get_component(sn: str, db: Session = Depends(get_db)) -> Component:
     return component
 
 
-def satisfied_test_results(db: Session, sn: str) -> dict[str, bool]:
-    """Map each test type uploaded for a component to whether it passed.
-
-    Source of truth is itkFlow's own confirmed uploads: every `upload_test_run`
-    outbox action that reached `confirmed`. Later runs of the same test type
-    win. A richer source (a PDB test-run mirror) can replace this without
-    touching the suggestion engine.
-    """
-    actions = db.scalars(
-        select(OutboxAction)
-        .where(
-            OutboxAction.kind == "upload_test_run",
-            OutboxAction.status == OutboxStatus.CONFIRMED.value,
-        )
-        .order_by(OutboxAction.updated_at, OutboxAction.id)
-    )
-    results: dict[str, bool] = {}
-    for action in actions:
-        payload = action.payload or {}
-        if payload.get("component_sn") != sn:
-            continue
-        test_type = payload.get("test_type")
-        if isinstance(test_type, str) and test_type:
-            results[test_type] = bool(payload.get("passed"))
-    return results
-
-
 @router.get(
     "/api/components/{sn}/stage-suggestion",
     response_model=StageSuggestionOut,
@@ -179,12 +152,7 @@ def component_stage_suggestion(sn: str, db: Session = Depends(get_db)) -> StageS
     if component is None:
         raise HTTPException(status_code=404, detail=f"Component '{sn}' not found.")
 
-    institute = db.scalar(
-        select(InstituteProfile).where(InstituteProfile.code == component.institute_code)
-    )
-    model = stage_model_from_settings(institute.settings if institute is not None else None)
-    results = satisfied_test_results(db, sn)
-    evaluation = evaluate_stage(component.stage, results, model)
+    evaluation = evaluate_for_component(db, component)
 
     def out(checks) -> list[RequirementCheckOut]:
         return [

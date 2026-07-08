@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
+import type { NavIntent } from "../App";
 import {
   ApiError,
   getComponent,
@@ -50,7 +51,7 @@ function pickScanTarget(rows: ComponentOut[], needle: string): ComponentOut | un
   return exact ?? (rows.length === 1 ? rows[0] : undefined);
 }
 
-export default function ComponentsScreen() {
+export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
   const [q, setQ] = useState("");
   const [stage, setStage] = useState("");
   const [rows, setRows] = useState<ComponentOut[]>([]);
@@ -72,6 +73,19 @@ export default function ComponentsScreen() {
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
 
   const debouncedQ = useDebounced(q, 250);
+
+  // React to a cross-screen navigation intent (board card click, topbar scan).
+  const navToken = nav?.token ?? 0;
+  useEffect(() => {
+    if (navToken === 0 || nav === undefined) return;
+    if (nav.sn !== undefined) {
+      setSelectedSn(nav.sn);
+    } else if (nav.q !== undefined) {
+      setSelectedSn(null);
+      setQ(nav.q);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navToken]);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -223,9 +237,13 @@ export default function ComponentsScreen() {
 
   return (
     <div className="screen">
+      <div className="sc-head">
+        <h1>{t.nav.components}</h1>
+        <span className="sub">{t.components.subtitle}</span>
+        {demo && <span className="badge warn">{t.common.demoBadge}</span>}
+      </div>
       {demo && (
         <div className="toolbar">
-          <span className="badge warn">{t.common.demoBadge}</span>
           <span className="muted">{t.common.demoNote}</span>
         </div>
       )}
@@ -540,39 +558,56 @@ function ComponentDetailPanel({
         {detail.is_dummy && <span className="chip muted">{t.components.dummy}</span>}
         {detail.trashed && <span className="chip red">{t.components.trashed}</span>}
       </div>
-      <div className="panel">
-        <div className="field-grid">
-          <Field label={t.components.fieldType} value={detail.component_type} />
-          <Field label={t.components.fieldTypeCode} value={detail.type_code} mono />
-          <Field label={t.components.fieldStage} value={detail.stage} mono />
-          <Field label={t.components.fieldLocation} value={detail.location} />
-          <Field label={t.components.fieldInstitute} value={detail.institute_code} />
-          <Field label={t.components.fieldSynced} value={formatTimestamp(detail.synced_at)} />
+      <div className="det">
+        <div className="det-col">
+          <h3 className="section-title">{t.components.masterData}</h3>
+          <div className="panel">
+            <div className="field-grid">
+              <Field label={t.components.fieldType} value={detail.component_type} />
+              <Field label={t.components.fieldTypeCode} value={detail.type_code} mono />
+              <Field label={t.components.fieldStage} value={detail.stage} mono />
+              <Field label={t.components.fieldLocation} value={detail.location} />
+              <Field label={t.components.fieldInstitute} value={detail.institute_code} />
+              <Field label={t.components.fieldSynced} value={formatTimestamp(detail.synced_at)} />
+            </div>
+          </div>
+          <h3 className="section-title">{t.components.family}</h3>
+          <div className="panel">
+            <ul className="tree">
+              {parentSn !== null ? (
+                <li>
+                  <div className="tree-row">
+                    <span className="muted">{t.components.parent}:</span>
+                    <button className="link-btn mono" onClick={() => onOpen(parentSn)}>
+                      {parentSn}
+                    </button>
+                  </div>
+                  <ul>{selfNode}</ul>
+                </li>
+              ) : (
+                selfNode
+              )}
+            </ul>
+            {detail.children.length === 0 && (
+              <p className="state-note">{t.components.noChildren}</p>
+            )}
+          </div>
         </div>
-      </div>
-      {suggestion !== null && (
-        <StageSuggestionSection suggestion={suggestion} instituteCode={detail.institute_code} />
-      )}
-      <h3 className="section-title">{t.components.family}</h3>
-      <div className="panel">
-        <ul className="tree">
-          {parentSn !== null ? (
-            <li>
-              <div className="tree-row">
-                <span className="muted">{t.components.parent}:</span>
-                <button className="link-btn mono" onClick={() => onOpen(parentSn)}>
-                  {parentSn}
-                </button>
-              </div>
-              <ul>{selfNode}</ul>
-            </li>
+        <div className="det-col">
+          {suggestion !== null ? (
+            <StageSuggestionSection
+              suggestion={suggestion}
+              instituteCode={detail.institute_code}
+            />
           ) : (
-            selfNode
+            <>
+              <h3 className="section-title">{t.components.stageTitle}</h3>
+              <div className="panel">
+                <p className="state-note">{t.components.stageUnavailable}</p>
+              </div>
+            </>
           )}
-        </ul>
-        {detail.children.length === 0 && (
-          <p className="state-note">{t.components.noChildren}</p>
-        )}
+        </div>
       </div>
     </div>
   );

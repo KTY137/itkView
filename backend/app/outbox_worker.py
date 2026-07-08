@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.ingestion import parse_payload
 from app.models import AuditEvent, Component, IngestFile, OutboxAction
 from app.outbox import OutboxStatus, assert_transition
+from app.stage_service import evaluate_for_component
 
 WORKER_ACTOR = "outbox-worker"
 
@@ -83,15 +84,22 @@ class WorkerStats:
         return self.confirmed + self.rejected + self.unavailable + self.revalidation_failed
 
 
+def revalidate(session: Session, action: OutboxAction) -> list[str]:
+    """Re-check an action against the *current* mirror just before submitting.
+
+    Returns blocking issues (empty list = good to submit). Dispatches by kind;
+    kinds with no dry-run gate return no issues.
+    """
+    if action.kind == "upload_test_run":
+        return revalidate_upload(session, action)
+    if action.kind == "stage_move":
+        return revalidate_stage_move(session, action)
+    return []
+
+
 def revalidate_upload(session: Session, action: OutboxAction) -> list[str]:
     """Re-run the dry-run for an `upload_test_run` action against the current
-    mirror. Returns blocking issues (empty list = good to submit).
-
-    Only `upload_test_run` carries an instrument payload today; other kinds
-    have nothing to revalidate yet and return no issues.
-    """
-    if action.kind != "upload_test_run":
-        return []
+    mirror. Returns blocking issues (empty list = good to submit)."""
     ingest_id = action.payload.get("ingest_file_id")
     ingest = session.get(IngestFile, ingest_id) if ingest_id is not None else None
     if ingest is None:
@@ -110,6 +118,34 @@ def revalidate_upload(session: Session, action: OutboxAction) -> list[str]:
     if component is None:
         issues.append("Component is no longer in the local mirror; re-sync before submitting.")
     return issues
+
+
+def revalidate_stage_move(session: Session, action: OutboxAction) -> list[str]:
+    """A stage move is only sent if the suggestion engine still endorses it:
+    the component is at the recorded `from_stage` and the target is still the
+    suggested next stage (required tests passed). This stops a move whose tests
+    later failed, or a component that already advanced, from being written."""
+    payload = action.payload or {}
+    sn = payload.get("sn")
+    to_stage = payload.get("to_stage")
+    component = session.scalar(select(Component).where(Component.sn == sn)) if sn else None
+    if component is None:
+        return [f"Component '{sn}' is no longer in the local mirror."]
+
+    from_stage = payload.get("from_stage")
+    if from_stage is not None and component.stage != from_stage:
+        return [
+            f"Component already moved: expected stage '{from_stage}', now '{component.stage}'."
+        ]
+
+    evaluation = evaluate_for_component(session, component)
+    if not evaluation.move_suggested:
+        return ["Stage move is no longer suggested: required tests are failing or missing."]
+    if evaluation.suggested_stage != to_stage:
+        return [
+            f"Suggested stage changed to '{evaluation.suggested_stage}', not '{to_stage}'."
+        ]
+    return []
 
 
 def _audit(session: Session, action: OutboxAction, name: str, detail: dict) -> None:
@@ -161,7 +197,7 @@ def _process_one(session: Session, submitter: Submitter, action: OutboxAction) -
         )
         return "confirmed"
 
-    issues = revalidate_upload(session, action)
+    issues = revalidate(session, action)
     if issues:
         _fail(session, action, "Dry-run validation failed: " + "; ".join(issues), transient=False)
         return "revalidation_failed"
