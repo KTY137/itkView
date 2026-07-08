@@ -168,6 +168,29 @@ class User(Base):
     institute: Mapped[InstituteProfile | None] = relationship()
 
 
+class Tool(Base):
+    """A jig/tool/panel in the local registry, tagged with the module types it
+    fits — so the assembly wizard can offer a type-filtered quick-select instead
+    of free text (docs/07). Institute-scoped; no type mapping hardcoded in code.
+    """
+
+    __tablename__ = "tool"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(24), index=True)  # jig | pickup_tool | panel | …
+    code: Mapped[str] = mapped_column(String(64))  # local/institute identifier
+    rfid: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
+    # Module types / R-types this tool fits, e.g. ["R5M0", "R5M1"].
+    compatible_types: Mapped[list] = mapped_column(JSON, default=list)
+    institute_id: Mapped[int | None] = mapped_column(
+        ForeignKey("institute_profile.id"), default=None, index=True
+    )
+    status: Mapped[str] = mapped_column(String(16), default="active")  # active|flagged|blacklisted
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    institute: Mapped[InstituteProfile | None] = relationship()
+
+
 class UserSession(Base):
     """Server-side session: an opaque cookie token bound to a user."""
 

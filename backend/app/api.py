@@ -24,6 +24,7 @@ from app.models import (
     IngestFile,
     InstituteProfile,
     OutboxAction,
+    Tool,
     User,
     UserSession,
     utcnow,
@@ -58,6 +59,9 @@ from app.schemas import (
     OutboxTransition,
     RequirementCheckOut,
     StageSuggestionOut,
+    ToolCreate,
+    ToolOut,
+    ToolUpdate,
     UserCreate,
     UserOut,
     UserUpdate,
@@ -279,6 +283,78 @@ def create_institute(body: InstituteCreate, db: Session = Depends(get_db)) -> In
     db.commit()
     db.refresh(institute)
     return institute
+
+
+# --------------------------------------------------------------------------
+# Tools / jigs registry (docs/07). Reads open; writes require operator/admin.
+# --------------------------------------------------------------------------
+
+
+@router.get("/api/tools", response_model=list[ToolOut], tags=["tools"])
+def list_tools(
+    kind: str | None = None,
+    fits: str | None = None,
+    status: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[Tool]:
+    stmt = select(Tool).order_by(Tool.kind, Tool.code)
+    if kind:
+        stmt = stmt.where(Tool.kind == kind)
+    if status:
+        stmt = stmt.where(Tool.status == status)
+    tools = list(db.scalars(stmt))
+    if fits:  # keep only tools compatible with this component/module type
+        tools = [tool for tool in tools if fits in (tool.compatible_types or [])]
+    return tools
+
+
+@router.get("/api/tools/by-rfid/{rfid}", response_model=ToolOut, tags=["tools"])
+def get_tool_by_rfid(rfid: str, db: Session = Depends(get_db)) -> Tool:
+    tool = db.scalar(select(Tool).where(Tool.rfid == rfid))
+    if tool is None:
+        raise HTTPException(status_code=404, detail=f"No tool with RFID '{rfid}'.")
+    return tool
+
+
+@router.post("/api/tools", response_model=ToolOut, status_code=201, tags=["tools"])
+def create_tool(
+    body: ToolCreate, db: Session = Depends(get_db), user: User = Depends(require_operator)
+) -> Tool:
+    tool = Tool(
+        kind=body.kind,
+        code=body.code,
+        rfid=body.rfid,
+        compatible_types=body.compatible_types,
+        status=body.status,
+        institute_id=user.institute_id,
+    )
+    db.add(tool)
+    db.commit()
+    db.refresh(tool)
+    return tool
+
+
+@router.patch("/api/tools/{tool_id}", response_model=ToolOut, tags=["tools"])
+def update_tool(
+    tool_id: int,
+    body: ToolUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> Tool:
+    tool = db.get(Tool, tool_id)
+    if tool is None:
+        raise HTTPException(status_code=404, detail=f"Tool {tool_id} not found.")
+    if body.code is not None:
+        tool.code = body.code
+    if body.rfid is not None:
+        tool.rfid = body.rfid
+    if body.compatible_types is not None:
+        tool.compatible_types = body.compatible_types
+    if body.status is not None:
+        tool.status = body.status
+    db.commit()
+    db.refresh(tool)
+    return tool
 
 
 # --------------------------------------------------------------------------

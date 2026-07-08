@@ -6,6 +6,7 @@ import type {
   DashboardSummary,
   IngestFile,
   OutboxAction,
+  Tool,
 } from "./api";
 
 /**
@@ -304,6 +305,28 @@ export function makeDemoIngestFiles(): IngestFile[] {
       updated_at: "2026-07-08T07:10:00Z",
     },
   ];
+}
+
+const DEMO_TOOLS: Tool[] = [
+  { kind: "jig", code: "HV-TAB-JIG-R5", rfid: "E28011700000000000000001", compatible_types: ["R5M0", "R5M1"] },
+  { kind: "jig", code: "HV-TAB-JIG-R2", rfid: "E28011700000000000000002", compatible_types: ["R2"] },
+  { kind: "pickup_tool", code: "PICKUP-R5", rfid: "E28011700000000000000003", compatible_types: ["R5M0", "R5M1"] },
+  { kind: "pickup_tool", code: "PICKUP-R2", rfid: "E28011700000000000000004", compatible_types: ["R2"] },
+  { kind: "panel", code: "GLUE-PANEL-R5-01", rfid: null, compatible_types: ["R5M0", "R5M1"] },
+].map((spec, index) => ({
+  id: 900 + index,
+  institute_id: 1,
+  status: "active",
+  created_at: SYNCED,
+  ...spec,
+}));
+
+export function filterDemoTools(kind: string, fits: string): Tool[] {
+  return DEMO_TOOLS.filter(
+    (tool) =>
+      (kind === "" || tool.kind === kind) &&
+      (fits === "" || tool.compatible_types.includes(fits)),
+  );
 }
 
 function buckets(values: string[]): CountBucket[] {
