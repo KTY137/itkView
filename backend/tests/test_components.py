@@ -122,8 +122,10 @@ def test_demo_seed_creates_institute_profile(tmp_path):
     with make_session_factory(engine)() as session:
         institutes = list(session.scalars(select(InstituteProfile)))
         assert [(i.code, i.name, i.local_name_prefix) for i in institutes] == [
-            ("TUDO", "Demo TUDO", "TUDO-")
+            ("TUDO", "TU Dortmund", "TUDO-")
         ]
+        # Demo branding: TUDO carries an institute logo in its profile settings.
+        assert institutes[0].settings.get("logo_url", "").startswith("https://")
 
 
 def test_list_components_sorted_by_local_name_then_sn(client: TestClient, demo_mirror):

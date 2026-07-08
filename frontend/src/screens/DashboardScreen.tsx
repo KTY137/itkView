@@ -82,13 +82,53 @@ export default function DashboardScreen() {
         <Metric label={t.dashboard.submittedOutbox} value={String(summary.submitted_outbox)} />
         <Metric label={t.dashboard.failedOutbox} value={String(summary.failed_outbox)} />
       </div>
+      <div className="charts">
+        <BarChart title={t.dashboard.byStage} buckets={summary.by_stage} />
+        <BarChart title={t.dashboard.outboxByStatus} buckets={summary.outbox_by_status} />
+      </div>
       <div className="dashboard-grid">
-        <BucketTable title={t.dashboard.byStage} buckets={summary.by_stage} />
         <BucketTable title={t.dashboard.byType} buckets={summary.by_component_type} />
         <BucketTable title={t.dashboard.byInstitute} buckets={summary.by_institute} />
-        <BucketTable title={t.dashboard.outboxByStatus} buckets={summary.outbox_by_status} />
       </div>
     </div>
+  );
+}
+
+/**
+ * Single-series magnitude chart (count per category). One hue (var(--series)),
+ * so no legend is needed — the title names what is plotted. Each column carries
+ * its value on the cap and a hover title; the bars container has an aria-label
+ * so the data is legible without color, and the raw numbers also live in the
+ * tables below.
+ */
+function BarChart({ title, buckets }: { title: string; buckets: CountBucket[] }) {
+  const max = Math.max(1, ...buckets.map((b) => b.count));
+  const summary = buckets.map((b) => `${b.label}: ${b.count}`).join(", ");
+  return (
+    <section className="chart-card">
+      <h2>{title}</h2>
+      {buckets.length === 0 ? (
+        <p className="state-note">{t.dashboard.empty}</p>
+      ) : (
+        <>
+          <div className="bars" role="img" aria-label={`${title} — ${summary}`}>
+            {buckets.map((bucket) => (
+              <div className="bar-g" key={bucket.label} title={`${bucket.label}: ${bucket.count}`}>
+                <span className="v">{bucket.count}</span>
+                <div className="bar" style={{ height: `${(bucket.count / max) * 100}%` }} />
+              </div>
+            ))}
+          </div>
+          <div className="bar-lbls" aria-hidden="true">
+            {buckets.map((bucket) => (
+              <span key={bucket.label} title={bucket.label}>
+                {bucket.label}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 
