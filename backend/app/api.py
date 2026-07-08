@@ -7,6 +7,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app import __version__
+from app.domain.stages import DEFAULT_STAGE_ORDER
 from app.ingestion import ParsedTestRun, parse_payload
 from app.models import AuditEvent, Component, IngestFile, InstituteProfile, OutboxAction
 from app.outbox import (
@@ -55,6 +56,15 @@ def count_buckets(db: Session, column) -> list[CountBucket]:
         select(column, func.count()).group_by(column).order_by(func.count().desc(), column)
     )
     return [CountBucket(label=str(label), count=count) for label, count in rows]
+
+
+def order_buckets(
+    buckets: list[CountBucket], order: tuple[str, ...] | list[str]
+) -> list[CountBucket]:
+    """Reorder buckets to follow a domain sequence (e.g. production stages left
+    to right), with any label not in `order` appended alphabetically."""
+    rank = {name: index for index, name in enumerate(order)}
+    return sorted(buckets, key=lambda b: (rank.get(b.label, len(rank)), b.label))
 
 
 def canonical_json_bytes(payload: dict) -> bytes:
@@ -236,10 +246,14 @@ def dashboard_summary(db: Session = Depends(get_db)) -> DashboardSummaryOut:
         last_synced_at=last_synced_at,
         submitted_outbox=submitted_outbox,
         failed_outbox=failed_outbox,
-        by_stage=count_buckets(db, Component.stage),
+        # Stages read left-to-right in production order (…→ TESTED → FINISHED),
+        # and outbox statuses in their lifecycle order — not by frequency.
+        by_stage=order_buckets(count_buckets(db, Component.stage), DEFAULT_STAGE_ORDER),
         by_component_type=count_buckets(db, Component.component_type),
         by_institute=count_buckets(db, Component.institute_code),
-        outbox_by_status=count_buckets(db, OutboxAction.status),
+        outbox_by_status=order_buckets(
+            count_buckets(db, OutboxAction.status), [s.value for s in OutboxStatus]
+        ),
     )
 
 

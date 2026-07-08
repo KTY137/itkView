@@ -1,3 +1,4 @@
+import { OUTBOX_STATUSES } from "./api";
 import type {
   ComponentDetail,
   ComponentOut,
@@ -313,6 +314,25 @@ function buckets(values: string[]): CountBucket[] {
     .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
 }
 
+// Production stage order, so the demo dashboard's stage histogram reads
+// left-to-right in flow order (…→ TESTED → FINISHED), matching the backend.
+const DEMO_STAGE_ORDER = [
+  "HV_TAB_ATTACHED",
+  "GLUED",
+  "STITCH_BONDING",
+  "BONDED",
+  "TESTED",
+  "FINISHED",
+];
+
+function orderBuckets(items: CountBucket[], order: string[]): CountBucket[] {
+  const rank = (label: string) => {
+    const i = order.indexOf(label);
+    return i === -1 ? order.length : i;
+  };
+  return [...items].sort((a, b) => rank(a.label) - rank(b.label) || a.label.localeCompare(b.label));
+}
+
 export function makeDemoDashboardSummary(): DashboardSummary {
   const outbox = makeDemoOutbox();
   return {
@@ -320,9 +340,9 @@ export function makeDemoDashboardSummary(): DashboardSummary {
     last_synced_at: SYNCED,
     submitted_outbox: outbox.filter((a) => a.status === "submitted").length,
     failed_outbox: outbox.filter((a) => a.status === "failed").length,
-    by_stage: buckets(DEMO_COMPONENTS.map((c) => c.stage)),
+    by_stage: orderBuckets(buckets(DEMO_COMPONENTS.map((c) => c.stage)), DEMO_STAGE_ORDER),
     by_component_type: buckets(DEMO_COMPONENTS.map((c) => c.component_type)),
     by_institute: buckets(DEMO_COMPONENTS.map((c) => c.institute_code)),
-    outbox_by_status: buckets(outbox.map((a) => a.status)),
+    outbox_by_status: orderBuckets(buckets(outbox.map((a) => a.status)), [...OUTBOX_STATUSES]),
   };
 }
