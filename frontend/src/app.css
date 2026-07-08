@@ -1006,12 +1006,38 @@ code {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 12px 14px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  box-shadow: var(--shadow);
 }
+.card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 20px;
+  margin-bottom: 14px;
+}
+.card-head h2 {
+  margin: 0;
+}
+/* Category label in a horizontal bar row */
+.hbar-cat {
+  font: 11.5px var(--mono);
+  color: var(--ink2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Bars take their category tone (stage ramp / status); default = series hue. */
+.hbar-fill[data-tone="good"] { background: var(--good); }
+.hbar-fill[data-tone="warn"] { background: var(--warn); }
+.hbar-fill[data-tone="crit"] { background: var(--crit); }
+.hbar-fill[data-tone="hv"] { background: var(--stage-hv); }
+.hbar-fill[data-tone="glue"] { background: var(--stage-glue); }
+.hbar-fill[data-tone="stitch"] { background: var(--stage-stitch); }
+.hbar-fill[data-tone="bonded"] { background: var(--stage-bonded); }
+.hbar-fill[data-tone="tested"] { background: var(--stage-tested); }
+/* Metric tile accent (e.g. failed outbox draws a red edge) */
+.metric-tile[data-tone="crit"] { border-left: 3px solid var(--crit); }
+.metric-tile[data-tone="good"] { border-left: 3px solid var(--good); }
 .legend-row {
   display: flex;
   flex-wrap: wrap;

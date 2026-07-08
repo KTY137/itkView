@@ -3,10 +3,15 @@ import { ApiError, getDashboardSummary } from "../api";
 import type { CountBucket, DashboardSummary } from "../api";
 import { makeDemoDashboardSummary } from "../demoData";
 import { formatCount, formatRelative, formatTimestamp, t } from "../i18n";
+import StageLegend from "../StageLegend";
+import { stageTone, statusTone } from "../ui";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+type Tone = string;
+type Row = { label: string; count: number; tone?: Tone };
 
 export default function DashboardScreen() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -45,7 +50,7 @@ export default function DashboardScreen() {
           <span>
             {t.dashboard.loadError}: {error}
           </span>
-          <button className="btn" onClick={() => setReloadKey((key) => key + 1)}>
+          <button type="button" className="btn" onClick={() => setReloadKey((key) => key + 1)}>
             {t.common.retry}
           </button>
         </div>
@@ -56,6 +61,15 @@ export default function DashboardScreen() {
   if (loading || summary === null) {
     return <p className="state-note">{t.common.loading}</p>;
   }
+
+  const stageRows: Row[] = summary.by_stage.map((b) => ({ ...b, tone: stageTone(b.label) }));
+  const statusRows: Row[] = summary.outbox_by_status.map((b) => ({
+    ...b,
+    tone: statusTone(b.label),
+  }));
+  // The type breakdown is long (20+ types at a real institute); keep the top 8
+  // and roll the rest into "other" so the card stays scannable.
+  const typeRows = topN(summary.by_component_type, 8);
 
   return (
     <div className="screen">
@@ -69,6 +83,7 @@ export default function DashboardScreen() {
           <span className="muted">{t.common.demoNote}</span>
         </div>
       )}
+
       <div className="metric-grid">
         <Metric label={t.dashboard.totalComponents} value={formatCount(summary.total_components)} />
         <Metric
@@ -78,88 +93,88 @@ export default function DashboardScreen() {
               ? t.dashboard.noSyncYet
               : formatRelative(summary.last_synced_at)
           }
-          title={summary.last_synced_at === null ? undefined : formatTimestamp(summary.last_synced_at)}
+          title={
+            summary.last_synced_at === null ? undefined : formatTimestamp(summary.last_synced_at)
+          }
         />
-        <Metric label={t.dashboard.submittedOutbox} value={String(summary.submitted_outbox)} />
-        <Metric label={t.dashboard.failedOutbox} value={String(summary.failed_outbox)} />
+        <Metric label={t.dashboard.submittedOutbox} value={formatCount(summary.submitted_outbox)} />
+        <Metric
+          label={t.dashboard.failedOutbox}
+          value={formatCount(summary.failed_outbox)}
+          tone={summary.failed_outbox > 0 ? "crit" : undefined}
+        />
       </div>
-      <div className="charts">
-        <BarChart title={t.dashboard.byStage} buckets={summary.by_stage} />
-        <BarChart title={t.dashboard.outboxByStatus} buckets={summary.outbox_by_status} />
-      </div>
+
+      <section className="chart-card">
+        <div className="card-head">
+          <h2>{t.dashboard.byStage}</h2>
+          <StageLegend label={t.stats.stageFlow} />
+        </div>
+        <ToneBars rows={stageRows} empty={t.dashboard.empty} />
+      </section>
+
       <div className="dashboard-grid">
-        <BucketTable title={t.dashboard.byType} buckets={summary.by_component_type} />
-        <BucketTable title={t.dashboard.byInstitute} buckets={summary.by_institute} />
+        <section className="chart-card">
+          <h2>{t.dashboard.byType}</h2>
+          <ToneBars rows={typeRows} empty={t.dashboard.empty} />
+        </section>
+        <section className="chart-card">
+          <h2>{t.dashboard.outboxByStatus}</h2>
+          <ToneBars rows={statusRows} empty={t.dashboard.empty} />
+        </section>
+        <section className="chart-card">
+          <h2>{t.dashboard.byInstitute}</h2>
+          <ToneBars rows={summary.by_institute} empty={t.dashboard.empty} />
+        </section>
       </div>
     </div>
   );
 }
 
-/**
- * Single-series magnitude chart (count per category). One hue (var(--series)),
- * so no legend is needed — the title names what is plotted. Each column carries
- * its value on the cap and a hover title; the bars container has an aria-label
- * so the data is legible without color, and the raw numbers also live in the
- * tables below.
- */
-function BarChart({ title, buckets }: { title: string; buckets: CountBucket[] }) {
-  const max = Math.max(1, ...buckets.map((b) => b.count));
-  const summary = buckets.map((b) => `${b.label}: ${b.count}`).join(", ");
-  return (
-    <section className="chart-card">
-      <h2>{title}</h2>
-      {buckets.length === 0 ? (
-        <p className="state-note">{t.dashboard.empty}</p>
-      ) : (
-        <>
-          <div className="bars" role="img" aria-label={`${title} — ${summary}`}>
-            {buckets.map((bucket) => (
-              <div className="bar-g" key={bucket.label} title={`${bucket.label}: ${bucket.count}`}>
-                <span className="v">{bucket.count}</span>
-                <div className="bar" style={{ height: `${(bucket.count / max) * 100}%` }} />
-              </div>
-            ))}
-          </div>
-          <div className="bar-lbls" aria-hidden="true">
-            {buckets.map((bucket) => (
-              <span key={bucket.label} title={bucket.label}>
-                {bucket.label}
-              </span>
-            ))}
-          </div>
-        </>
-      )}
-    </section>
-  );
+function topN(buckets: CountBucket[], n: number): Row[] {
+  if (buckets.length <= n) return buckets;
+  const head = buckets.slice(0, n);
+  const rest = buckets.slice(n).reduce((sum, b) => sum + b.count, 0);
+  return rest > 0 ? [...head, { label: `+${buckets.length - n} other`, count: rest }] : head;
 }
 
-function Metric({ label, value, title }: { label: string; value: string; title?: string }) {
+function Metric({ label, value, title, tone }: { label: string; value: string; title?: string; tone?: string }) {
   return (
-    <div className="metric-tile" title={title}>
+    <div className="metric-tile" data-tone={tone} title={title}>
       <div className="field-label">{label}</div>
       <div className="metric-value">{value}</div>
     </div>
   );
 }
 
-function BucketTable({ title, buckets }: { title: string; buckets: CountBucket[] }) {
+/**
+ * Horizontal magnitude bars, one row per category. A bar's fill takes its
+ * category tone where one is given (stage ramp / status), so the chart reads
+ * in the same colour language as the rest of the app; untoned rows fall back
+ * to the single series hue. The category totals sit at the end, and an
+ * aria-label carries the data for non-visual reads.
+ */
+function ToneBars({ rows, empty }: { rows: Row[]; empty: string }) {
+  if (rows.length === 0) return <p className="state-note">{empty}</p>;
+  const max = Math.max(1, ...rows.map((r) => r.count));
+  const summary = rows.map((r) => `${r.label}: ${r.count}`).join(", ");
   return (
-    <section className="panel dashboard-panel">
-      <h2 className="section-title">{title}</h2>
-      {buckets.length === 0 ? (
-        <p className="state-note">{t.dashboard.empty}</p>
-      ) : (
-        <table className="data-table compact-table">
-          <tbody>
-            {buckets.map((bucket) => (
-              <tr key={bucket.label}>
-                <td className="mono">{bucket.label}</td>
-                <td className="count-cell">{bucket.count}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </section>
+    <div className="hbars" role="img" aria-label={summary}>
+      {rows.map((r) => (
+        <div className="hbar-row" key={r.label}>
+          <span className="hbar-cat" title={r.label}>
+            {r.label}
+          </span>
+          <div className="hbar-track">
+            <div
+              className="hbar-fill"
+              data-tone={r.tone}
+              style={{ width: `${(r.count / max) * 100}%` }}
+            />
+          </div>
+          <span className="hbar-val">{formatCount(r.count)}</span>
+        </div>
+      ))}
+    </div>
   );
 }
