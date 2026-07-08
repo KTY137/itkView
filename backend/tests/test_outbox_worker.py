@@ -12,7 +12,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import ensure_phase0_sqlite_schema, make_engine
-from app.models import AuditEvent, OutboxAction
+from app.models import AuditEvent, Component, OutboxAction
 from app.outbox import OutboxStatus
 from app.outbox_worker import (
     PdbSubmitUnavailable,
@@ -281,3 +281,114 @@ def test_run_worker_once_smoke(tmp_path):
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'worker.db'}", _env_file=None)
     # No due actions and no PDB access: must run cleanly and write nothing.
     worker_main(["--once"], settings=settings)
+
+
+def test_real_submitter_is_inactive_without_access_codes(tmp_path):
+    """Guard: the real PDB submitter must never write without configured codes.
+
+    This is the safety net behind 'no real itkdb writes until approved' — an
+    approved stage_move action is processed with the *real* submitter, which
+    must refuse (PdbSubmitUnavailable -> failed/transient), not reach itkdb.
+    """
+    from app.config import Settings
+    from app.pdb_submit import make_pdb_submitter
+
+    settings = Settings(database_url="sqlite:///:memory:", _env_file=None)
+    assert settings.itkdb_access_code1 is None and settings.itkdb_access_code2 is None
+    submitter = make_pdb_submitter(settings)
+
+    class _Action:
+        kind = "stage_move"
+        payload = {"sn": "20USE5M0000701", "to_stage": "BONDED"}
+
+    with pytest.raises(PdbSubmitUnavailable):
+        submitter(None, _Action())
+
+
+# --------------------------------------------------------------------------
+# stage_move actions (fake submitter only — never touches itkdb)
+# --------------------------------------------------------------------------
+
+
+def seed_stage_move(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    *,
+    sn: str = "20USE5M0000703",
+    to_stage: str = "STITCH_BONDING",
+    all_passed: bool = True,
+    status: OutboxStatus = OutboxStatus.APPROVED,
+) -> int:
+    """Mirror components, confirm the GLUED requirements (so the move is
+    endorsed), and create a stage_move action in the requested status."""
+    tudo = client.post(
+        "/api/institutes",
+        json={"code": "TUDO", "name": "TU Dortmund", "local_name_prefix": "TUDO-"},
+    ).json()
+    with session_factory() as session:
+        sync_components(session, load_fixture_records(DEMO_FIXTURE_PATH))
+        session.commit()
+    for test_type in ("GLUE_WEIGHT", "MODULE_BOW", "MODULE_METROLOGY"):
+        with session_factory() as session:
+            session.add(
+                OutboxAction(
+                    institute_id=tudo["id"],
+                    kind="upload_test_run",
+                    status=OutboxStatus.CONFIRMED.value,
+                    created_by="worker",
+                    external_ref="PDB-RUN-X",
+                    payload={"component_sn": sn, "test_type": test_type, "passed": all_passed},
+                )
+            )
+            session.commit()
+    with session_factory() as session:
+        action = OutboxAction(
+            institute_id=tudo["id"],
+            kind="stage_move",
+            status=status.value,
+            created_by="ui-user",
+            payload={"sn": sn, "from_stage": "GLUED", "to_stage": to_stage},
+        )
+        session.add(action)
+        session.commit()
+        return action.id
+
+
+def test_worker_confirms_endorsed_stage_move(client, session_factory):
+    action_id = seed_stage_move(client, session_factory)
+
+    with session_factory() as session:
+        stats = process_due_actions(session, confirming("STITCH_BONDING"))
+
+    assert stats.confirmed == 1
+    action = load_action(session_factory, action_id)
+    assert action.status == OutboxStatus.CONFIRMED.value
+    assert action.external_ref == "STITCH_BONDING"
+
+
+def test_worker_blocks_stage_move_when_no_longer_suggested(client, session_factory):
+    # A required test failed, so the engine no longer endorses the move.
+    action_id = seed_stage_move(client, session_factory, all_passed=False)
+
+    with session_factory() as session:
+        stats = process_due_actions(session, never_called)
+
+    assert stats.revalidation_failed == 1
+    action = load_action(session_factory, action_id)
+    assert action.status == OutboxStatus.FAILED.value
+    assert "no longer suggested" in action.error
+
+
+def test_worker_blocks_stage_move_after_component_already_advanced(client, session_factory):
+    action_id = seed_stage_move(client, session_factory)
+    # Someone/something moved the component past GLUED in the meantime.
+    with session_factory() as session:
+        comp = session.scalar(select(Component).where(Component.sn == "20USE5M0000703"))
+        comp.stage = "BONDED"
+        session.commit()
+
+    with session_factory() as session:
+        stats = process_due_actions(session, never_called)
+
+    assert stats.revalidation_failed == 1
+    assert "already moved" in load_action(session_factory, action_id).error

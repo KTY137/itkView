@@ -12,6 +12,23 @@ const en = {
     triage: "Test triage",
     outbox: "Outbox",
     dashboard: "Dashboard",
+    groupProduction: "Production",
+    groupSite: "Site",
+    glueBatches: "Glue batches",
+    shipments: "Shipments",
+    tools: "Tools & jigs",
+    reminders: "Reminders",
+    operator: "Operator",
+    scanPlaceholder: "Scan SN / RFID / local name…",
+    backendOffline: "backend offline",
+    pdb: "PDB",
+  },
+  board: {
+    loadError: "Could not load the board",
+    empty: "No modules to show yet. Sync an institute in Components first.",
+    subtitle: (n: number) => `${n} modules · stage data from the PDB mirror`,
+    dummy: "dummy",
+    trashed: "trashed",
   },
   common: {
     loading: "Loading…",
@@ -23,6 +40,9 @@ const en = {
     none: "—",
   },
   components: {
+    subtitle: "Browse and search the local PDB mirror. Scanner-first.",
+    masterData: "Master data",
+    stageUnavailable: "Stage suggestion needs a running backend.",
     instituteLabel: "Institute",
     allInstitutes: "All institutes",
     noInstitutes: "No institute profiles yet.",
@@ -85,6 +105,7 @@ const en = {
     stageProposeFailed: "Could not create the stage-move draft",
   },
   dashboard: {
+    subtitle: "Live counts from the local PDB mirror.",
     loadError: "Could not load dashboard",
     totalComponents: "Components",
     lastSynced: "Last PDB sync",
@@ -98,6 +119,7 @@ const en = {
     empty: "No data yet.",
   },
   outbox: {
+    subtitle: "Reviewed writes to the PDB — nothing is sent without approval.",
     statusFilterLabel: "Filter by status",
     allStatuses: "All statuses",
     loadError: "Could not load outbox",
@@ -126,6 +148,7 @@ const en = {
     } satisfies Record<OutboxStatus, string>,
   },
   triage: {
+    subtitle: "Instrument JSONs land here, get parsed, validated and queued.",
     loadError: "Could not load ingestion inbox",
     filenameLabel: "Filename",
     filenamePlaceholder: "instrument-output.json",

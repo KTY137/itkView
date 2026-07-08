@@ -59,9 +59,13 @@ export default function DashboardScreen() {
 
   return (
     <div className="screen">
+      <div className="sc-head">
+        <h1>{t.nav.dashboard}</h1>
+        <span className="sub">{t.dashboard.subtitle}</span>
+        {demo && <span className="badge warn">{t.common.demoBadge}</span>}
+      </div>
       {demo && (
         <div className="toolbar">
-          <span className="badge warn">{t.common.demoBadge}</span>
           <span className="muted">{t.common.demoNote}</span>
         </div>
       )}
