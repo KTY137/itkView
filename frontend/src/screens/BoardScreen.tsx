@@ -3,6 +3,7 @@ import { ApiError, getComponents } from "../api";
 import type { ComponentOut } from "../api";
 import { filterDemoComponents } from "../demoData";
 import { t } from "../i18n";
+import { stageTone } from "../ui";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -83,7 +84,7 @@ export default function BoardScreen({ onOpen }: { onOpen: (sn: string) => void }
           <div className="board">
             {stages.map((stage) => (
               <div className="col" key={stage}>
-                <div className="col-h">
+                <div className="col-h" data-tone={stageTone(stage)}>
                   <span className="stg">{stage}</span>
                   <span className="n">{byStage(stage).length}</span>
                 </div>
@@ -92,6 +93,7 @@ export default function BoardScreen({ onOpen }: { onOpen: (sn: string) => void }
                     <button
                       type="button"
                       className={m.trashed ? "card trashed" : "card"}
+                      data-tone={m.trashed ? "crit" : stageTone(stage)}
                       key={m.sn}
                       onClick={() => onOpen(m.sn)}
                     >

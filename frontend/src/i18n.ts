@@ -79,6 +79,7 @@ const en = {
     parent: "Parent",
     family: "Family",
     thisComponent: "this component",
+    assembled: "assembled",
     noChildren: "No child components attached.",
     fieldType: "Type",
     fieldTypeCode: "Type code",

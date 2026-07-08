@@ -595,22 +595,50 @@ code {
 .tree {
   list-style: none;
   margin: 0;
-  padding: 14px;
-}
-.tree ul {
-  list-style: none;
-  margin: 6px 0 0;
-  padding-left: 18px;
-  border-left: 2px solid var(--line);
-}
-.tree li {
-  padding: 4px 0;
+  padding: 12px 14px;
+  font: 12.5px var(--mono);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .tree-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+.tree > .tree-row {
+  padding: 6px 8px;
+  border-radius: 7px;
+}
+.tree > .tree-row:hover {
+  background: var(--surface2);
+}
+.tree .role {
+  font: 600 10px var(--sans);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  width: 84px;
+  flex: 0 0 auto;
+}
+.tree .ok {
+  margin-left: auto;
+  font: 600 11px var(--sans);
+  color: var(--good-text);
+}
+.tree .ok.is-muted {
+  color: var(--muted);
+}
+.tree .lvl1 {
+  margin-left: 22px;
+  position: relative;
+}
+.tree .lvl1::before {
+  content: "└";
+  position: absolute;
+  left: -16px;
+  color: var(--muted);
 }
 
 .payload-details summary {
@@ -904,3 +932,11 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Stage tone accents (board cards + column headers) */
+.card[data-tone="good"] { border-left: 3px solid var(--good); }
+.card[data-tone="warn"] { border-left: 3px solid var(--warn); }
+.card[data-tone="crit"] { border-left: 3px solid var(--crit); }
+.col-h[data-tone="good"] .stg { color: var(--good-text); }
+.col-h[data-tone="warn"] .stg { color: var(--warn-text); }
+.col-h[data-tone="crit"] .stg { color: var(--crit); }
