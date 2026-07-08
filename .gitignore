@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local state / secrets — never commit
+.env
+*.db
+*.sqlite3
+
+# Read-only reference, not part of the product
+references/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db

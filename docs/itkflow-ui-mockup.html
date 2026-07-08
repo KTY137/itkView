@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>itkFlow — UI-Mockup</title>
+<!--
+  itkFlow UI-Mockup — verbindliche Design-Referenz (siehe docs/05-ui-design-reference.md).
+  Eigenstaendig und offline lauffaehig: nur Inline-CSS/JS, keine externen Assets.
+  Hinweis: Die Labels hier sind Deutsch (Design-Skizze). Das ausgelieferte Produkt-UI
+  ist Englisch (CLAUDE.md Regel #5) — dieser Mockup zeigt Layout/Interaktion, nicht die Texte.
+-->
+<style>
+  /* Tokens — Cleanroom-Cockpit: Silizium-Grau als Grund, Kapton-Kupfer als Akzent,
+     Mono als Datenstimme, Charts aus der validierten Referenzpalette. */
+  :root{
+    --bg:#ECEEF1; --surface:#FCFCFC; --surface2:#F3F4F6; --ink:#16181C; --ink2:#565B63;
+    --muted:#878C95; --line:#DDE0E5; --hairline:rgba(20,24,30,.10);
+    --accent:#B4641F; --accent-hi:#8F4E15; --accent-soft:rgba(180,100,31,.12); --accent-fg:#ffffff;
+    --good:#0ca30c; --good-text:#006300; --warn:#fab219; --serious:#ec835a; --crit:#d03b3b;
+    --series:#2a78d6; --chart-surface:#fcfcfb; --grid:#e1e0d9; --axis:#c3c2b7;
+    --mono:"Cascadia Mono",Consolas,ui-monospace,"SF Mono",monospace;
+    --sans:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;
+    --shadow:0 1px 2px rgba(15,18,24,.06),0 4px 14px rgba(15,18,24,.06);
+    --r:8px;
+    color-scheme:light dark;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#101215; --surface:#1A1C20; --surface2:#22252B; --ink:#EDEEF1; --ink2:#B6BAC2;
+      --muted:#8A8F98; --line:#2E3239; --hairline:rgba(255,255,255,.12);
+      --accent:#E09A52; --accent-hi:#EBAF71; --accent-soft:rgba(224,154,82,.15); --accent-fg:#181410;
+      --good-text:#2fbd2f;
+      --series:#3987e5; --chart-surface:#1a1a19; --grid:#2c2c2a; --axis:#45454a;
+      --shadow:0 1px 2px rgba(0,0,0,.35),0 4px 16px rgba(0,0,0,.30);
+    }
+  }
+  :root[data-theme="dark"]{
+      --bg:#101215; --surface:#1A1C20; --surface2:#22252B; --ink:#EDEEF1; --ink2:#B6BAC2;
+      --muted:#8A8F98; --line:#2E3239; --hairline:rgba(255,255,255,.12);
+      --accent:#E09A52; --accent-hi:#EBAF71; --accent-soft:rgba(224,154,82,.15); --accent-fg:#181410;
+      --good-text:#2fbd2f;
+      --series:#3987e5; --chart-surface:#1a1a19; --grid:#2c2c2a; --axis:#45454a;
+      --shadow:0 1px 2px rgba(0,0,0,.35),0 4px 16px rgba(0,0,0,.30);
+  }
+  :root[data-theme="light"]{
+    --bg:#ECEEF1; --surface:#FCFCFC; --surface2:#F3F4F6; --ink:#16181C; --ink2:#565B63;
+    --muted:#878C95; --line:#DDE0E5; --hairline:rgba(20,24,30,.10);
+    --accent:#B4641F; --accent-hi:#8F4E15; --accent-soft:rgba(180,100,31,.12); --accent-fg:#ffffff;
+    --good:#0ca30c; --good-text:#006300; --warn:#fab219; --serious:#ec835a; --crit:#d03b3b;
+    --series:#2a78d6; --chart-surface:#fcfcfb; --grid:#e1e0d9; --axis:#c3c2b7;
+    --shadow:0 1px 2px rgba(15,18,24,.06),0 4px 14px rgba(15,18,24,.06);
+  }
+
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--sans)}
+  button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+  @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
+
+  .frame{display:grid;grid-template-columns:216px 1fr;min-height:100vh;max-width:1440px;margin:0 auto}
+
+  /* ---------- nav rail ---------- */
+  .rail{border-right:1px solid var(--line);padding:16px 12px;display:flex;flex-direction:column;gap:4px;background:var(--surface)}
+  .brand{display:flex;align-items:baseline;gap:8px;padding:4px 10px 14px}
+  .brand b{font-size:17px;letter-spacing:-.01em}
+  .brand b span{color:var(--accent)}
+  .inst{font:600 11px/1 var(--mono);background:var(--accent-soft);color:var(--accent-hi);border:1px solid var(--accent);border-radius:999px;padding:4px 8px}
+  .rail .grp{font:600 10px/1 var(--sans);text-transform:uppercase;letter-spacing:.09em;color:var(--muted);padding:14px 10px 6px}
+  .nav-btn{display:flex;align-items:center;gap:9px;width:100%;text-align:left;padding:8px 10px;border-radius:var(--r);color:var(--ink2)}
+  .nav-btn:hover{background:var(--surface2)}
+  .nav-btn[aria-current="page"]{background:var(--accent-soft);color:var(--accent-hi);font-weight:600}
+  .nav-btn .ic{width:18px;text-align:center;opacity:.85}
+  .nav-btn.dis{opacity:.42;cursor:default}
+  .nav-btn .soon{margin-left:auto;font:600 9px/1 var(--sans);letter-spacing:.06em;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:2px 6px}
+  .rail .me{margin-top:auto;border-top:1px solid var(--line);padding:12px 10px 2px;display:flex;gap:9px;align-items:center;color:var(--ink2);font-size:12.5px}
+  .ava{width:26px;height:26px;border-radius:50%;background:var(--accent-soft);color:var(--accent-hi);display:grid;place-items:center;font:700 11px var(--sans)}
+
+  /* ---------- topbar ---------- */
+  .main{display:flex;flex-direction:column;min-width:0}
+  .top{display:flex;align-items:center;gap:14px;padding:12px 22px;border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:5}
+  .crumb{font-size:13px;color:var(--muted);white-space:nowrap}
+  .crumb b{color:var(--ink);font-weight:600}
+  .scan{flex:1;max-width:430px;display:flex;align-items:center;gap:8px;background:var(--surface2);border:1px solid var(--line);border-radius:var(--r);padding:7px 12px;color:var(--muted)}
+  .scan input{border:none;background:none;outline:none;flex:1;color:var(--ink);font:13px var(--mono);min-width:60px}
+  .scan kbd{font:11px var(--mono);border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:1px 5px;color:var(--muted)}
+  .mock-tag{font:700 10px/1 var(--sans);letter-spacing:.1em;color:var(--serious);border:1.5px dashed var(--serious);border-radius:6px;padding:5px 8px}
+  .sync{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink2);white-space:nowrap}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--good);box-shadow:0 0 0 3px rgba(12,163,12,.15)}
+
+  .screen{display:none;padding:22px;min-width:0}
+  .screen.active{display:block}
+  .sc-head{display:flex;align-items:baseline;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+  .sc-head h1{font-size:19px;margin:0;letter-spacing:-.01em;text-wrap:balance}
+  .sc-head .sub{color:var(--muted);font-size:12.5px}
+  .sc-head .cta{margin-left:auto}
+  .btn{border-radius:var(--r);padding:8px 14px;font-weight:600;font-size:13px;border:1px solid var(--line);background:var(--surface);color:var(--ink2)}
+  .btn:hover{background:var(--surface2)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+  .btn.primary:hover{background:var(--accent-hi)}
+  .btn.sm{padding:4px 10px;font-size:12px}
+
+  /* ---------- chips ---------- */
+  .chip{display:inline-flex;align-items:center;gap:5px;font:600 11px/1 var(--sans);border-radius:999px;padding:4px 9px;border:1px solid var(--line);color:var(--ink2);background:var(--surface)}
+  .chip.mono{font-family:var(--mono);font-weight:500}
+  .chip .st{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+  .chip.good{color:var(--good-text);border-color:color-mix(in srgb,var(--good) 45%,var(--line))}
+  .chip.good .st{background:var(--good)}
+  .chip.warn .st{background:var(--warn)}
+  .chip.serious{border-color:color-mix(in srgb,var(--serious) 55%,var(--line))}
+  .chip.serious .st{background:var(--serious)}
+  .chip.crit{color:var(--crit);border-color:color-mix(in srgb,var(--crit) 55%,var(--line))}
+  .chip.crit .st{background:var(--crit)}
+  .chip.queued .st{background:var(--warn)}
+
+  /* ---------- kanban ---------- */
+  .board-wrap{overflow-x:auto;padding-bottom:8px}
+  .board{display:flex;gap:14px;min-width:max-content}
+  .col{width:236px;flex:0 0 auto}
+  .col-h{display:flex;align-items:center;gap:8px;padding:0 4px 10px}
+  .col-h .stg{font:600 11px var(--mono);letter-spacing:.02em;color:var(--ink2)}
+  .col-h .n{margin-left:auto;font:600 11px var(--mono);color:var(--muted);background:var(--surface2);border-radius:999px;padding:2px 8px}
+  .col-list{display:flex;flex-direction:column;gap:10px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:11px 12px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:7px;cursor:pointer;transition:border-color .12s}
+  .card:hover{border-color:var(--accent)}
+  .card .nm{display:flex;align-items:center;gap:8px;font-weight:650;font-size:13.5px}
+  .card .typ{margin-left:auto;font:600 10px var(--mono);color:var(--accent-hi);background:var(--accent-soft);border-radius:5px;padding:2px 6px}
+  .card .sn{font:11.5px var(--mono);color:var(--muted)}
+  .card .row{display:flex;gap:5px;flex-wrap:wrap}
+  .ghost{border:1.5px dashed var(--line);border-radius:10px;color:var(--muted);font-size:12px;display:grid;place-items:center;padding:14px;background:none;width:100%}
+  .ghost:hover{border-color:var(--accent);color:var(--accent-hi)}
+
+  /* ---------- detail ---------- */
+  .det{display:grid;grid-template-columns:minmax(320px,5fr) minmax(320px,6fr);gap:16px}
+  .det > div{display:flex;flex-direction:column;gap:16px;min-width:0}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:16px 18px;min-width:0}
+  .panel h2{font-size:11px;margin:0 0 12px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);font-weight:650}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 18px;font-size:13px;margin:0}
+  .kv dt{color:var(--muted)}
+  .kv dd{margin:0;font-family:var(--mono);font-size:12.5px}
+  .tree{list-style:none;margin:6px 0 0;padding:0;font:12.5px var(--mono)}
+  .tree li{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px}
+  .tree li:hover{background:var(--surface2)}
+  .tree .lvl1{margin-left:22px;position:relative}
+  .tree .lvl1::before{content:"└";position:absolute;left:-16px;color:var(--muted)}
+  .tree .role{font:600 10px var(--sans);text-transform:uppercase;letter-spacing:.07em;color:var(--muted);width:82px;flex:0 0 auto}
+  .tree .ok{color:var(--good-text);margin-left:auto;font-family:var(--sans);font-size:11px;font-weight:600}
+  .ttable{width:100%;border-collapse:collapse;font-size:12.5px}
+  .ttable th{text-align:left;font:600 10px var(--sans);text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--line)}
+  .ttable td{padding:7px 8px;border-bottom:1px solid var(--hairline);vertical-align:middle;white-space:nowrap}
+  .ttable td.m{font-family:var(--mono);font-size:12px}
+  .ttable td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right}
+  .tl{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column}
+  .tl li{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--hairline);font-size:12.5px;align-items:baseline;flex-wrap:wrap}
+  .tl li:last-child{border-bottom:none}
+  .tl time{font:11px var(--mono);color:var(--muted);width:88px;flex:0 0 auto}
+  .callout{margin-top:14px;border:1px solid color-mix(in srgb,var(--warn) 55%,var(--line));background:color-mix(in srgb,var(--warn) 9%,var(--surface));border-radius:10px;padding:12px 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px}
+  .callout b{font-family:var(--mono);font-weight:600;font-size:12px}
+
+  /* ---------- triage ---------- */
+  .tbl-wrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
+  .tbl{width:100%;border-collapse:collapse;font-size:13px;min-width:860px}
+  .tbl th{text-align:left;font:600 10px var(--sans);text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:11px 14px;border-bottom:1px solid var(--line)}
+  .tbl td{padding:11px 14px;border-bottom:1px solid var(--hairline);vertical-align:middle}
+  .tbl tr:last-child td{border-bottom:none}
+  .tbl td.m{font-family:var(--mono);font-size:12px}
+  .tbl .file{color:var(--ink2)}
+  .tbl .acts{display:flex;gap:6px;justify-content:flex-end}
+
+  /* ---------- dashboard ---------- */
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:16px}
+  .tile{background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:14px 16px}
+  .tile .lbl{font:600 10.5px var(--sans);text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+  .tile .val{font-size:30px;font-weight:650;letter-spacing:-.02em;margin-top:4px;line-height:1.1}
+  .tile .sub{font-size:11.5px;color:var(--muted);margin-top:3px}
+  .tile .sub.up{color:var(--good-text);font-weight:600}
+  .tile .sub.warn-t{color:var(--serious);font-weight:600}
+  .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+  .chart-card{background:var(--chart-surface);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:16px 18px;min-width:0}
+  .chart-card h2{font-size:13.5px;margin:0 0 2px;font-weight:650}
+  .chart-card .sub{font-size:11.5px;color:var(--muted);margin-bottom:14px}
+  .bars{display:flex;align-items:flex-end;gap:14px;height:150px;border-bottom:1px solid var(--axis);padding:0 6px}
+  .bar-g{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:5px;min-width:0}
+  .bar-g .v{font:600 11px var(--mono);font-variant-numeric:tabular-nums;color:var(--ink2)}
+  .bar-g .bar{width:70%;max-width:44px;background:var(--series);border-radius:4px 4px 0 0;transition:opacity .12s}
+  .bar-g:hover .bar{opacity:.8}
+  .bar-lbls{display:flex;gap:14px;padding:6px 6px 0}
+  .bar-lbls span{flex:1;text-align:center;font:9.5px var(--mono);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .spark{width:100%;height:auto;display:block}
+
+  /* ---------- modal ---------- */
+  .veil{position:fixed;inset:0;background:rgba(10,12,16,.45);display:none;place-items:center;z-index:50;padding:20px}
+  .veil.open{display:grid}
+  .modal{background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);width:min(520px,100%);padding:20px 22px;max-height:92vh;overflow-y:auto}
+  .modal h2{margin:0;font-size:16px}
+  .modal .for{font:12px var(--mono);color:var(--muted);margin:4px 0 16px}
+  .steps{display:flex;gap:6px;margin-bottom:16px}
+  .steps i{flex:1;height:3px;border-radius:2px;background:var(--line);font-style:normal}
+  .steps i.on{background:var(--accent)}
+  .fld{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+  .fld label{font:600 11px var(--sans);text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+  .fld input,.fld select{background:var(--surface2);border:1px solid var(--line);border-radius:var(--r);padding:9px 12px;font:13.5px var(--mono);color:var(--ink);width:100%}
+  .fld input:focus,.fld select:focus{outline:2px solid var(--accent);outline-offset:0;border-color:var(--accent)}
+  .frow{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .calc{display:flex;align-items:center;gap:12px;background:var(--surface2);border-radius:10px;padding:12px 14px;margin:6px 0 16px;flex-wrap:wrap}
+  .calc .g{font:600 22px var(--mono);font-variant-numeric:tabular-nums}
+  .calc .t{font:11.5px var(--mono);color:var(--muted)}
+  .modal .foot{display:flex;gap:8px;justify-content:flex-end}
+  .hint{font-size:11.5px;color:var(--muted);margin:-6px 0 12px}
+
+  /* ---------- toast ---------- */
+  .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(8px);background:var(--ink);color:var(--bg);padding:10px 18px;border-radius:10px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;z-index:60;max-width:90vw}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .toast b{font-family:var(--mono);font-weight:600}
+
+  @media (max-width:860px){
+    .frame{grid-template-columns:1fr}
+    .rail{flex-direction:row;flex-wrap:wrap;align-items:center;border-right:none;border-bottom:1px solid var(--line);padding:10px 14px}
+    .rail .grp,.rail .me{display:none}
+    .brand{padding:0 8px 0 0}
+    .nav-btn{width:auto}
+    .det{grid-template-columns:1fr}
+    .crumb{display:none}
+    .sync{display:none}
+  }
+</style>
+</head>
+<body>
+
+<div class="frame">
+  <!-- ======== NAV ======== -->
+  <aside class="rail">
+    <div class="brand"><b>itk<span>Flow</span></b> <span class="inst">TUDO</span></div>
+    <div class="grp">Produktion</div>
+    <button class="nav-btn" data-go="board" aria-current="page"><span class="ic">▦</span> Assembly-Board</button>
+    <button class="nav-btn" data-go="detail"><span class="ic">▣</span> Komponenten</button>
+    <button class="nav-btn" data-go="triage"><span class="ic">⇪</span> Test-Triage</button>
+    <button class="nav-btn" data-go="dash"><span class="ic">◔</span> Dashboard</button>
+    <div class="grp">Standort</div>
+    <button class="nav-btn dis"><span class="ic">⬡</span> Glue-Batches <span class="soon">P4</span></button>
+    <button class="nav-btn dis"><span class="ic">⛟</span> Shipments <span class="soon">P4</span></button>
+    <button class="nav-btn dis"><span class="ic">⚒</span> Werkzeuge & Jigs <span class="soon">P4</span></button>
+    <button class="nav-btn dis"><span class="ic">✉</span> Reminder <span class="soon">P4</span></button>
+    <div class="me"><span class="ava">AA</span><span>Anna Abel<br><span style="color:var(--muted);font-size:11px">Koordinatorin · TUDO</span></span></div>
+  </aside>
+
+  <!-- ======== MAIN ======== -->
+  <div class="main">
+    <header class="top">
+      <span class="crumb"><b>TUDO</b> · Endcap-Module</span>
+      <div class="scan">⌕ <input placeholder="SN / RFID / lokalen Namen scannen …" aria-label="Komponente scannen"> <kbd>F2</kbd></div>
+      <span class="mock-tag">MOCKUP</span>
+      <span class="sync"><span class="dot"></span> PDB-Sync vor 38 s · itkpd-test</span>
+    </header>
+
+    <!-- ======== SCREEN: BOARD ======== -->
+    <section class="screen active" id="board">
+      <div class="sc-head">
+        <h1>Assembly-Board</h1>
+        <span class="sub">23 Module in Arbeit · Stage-Daten live aus der PDB</span>
+        <span class="cta"><button class="btn primary" data-open-wizard>+ Schritt erfassen</button></span>
+      </div>
+      <div class="board-wrap">
+        <div class="board">
+
+          <div class="col">
+            <div class="col-h"><span class="stg">HV_TAB_ATTACHED</span><span class="n">4</span></div>
+            <div class="col-list">
+              <div class="card"><div class="nm">TUDO-R5M0-07 <span class="typ">R5M0</span></div><div class="sn">20USE5R0000151</div>
+                <div class="row"><span class="chip good"><span class="st"></span>IV n. Tabbing</span><span class="chip queued"><span class="st"></span>Outbox 1</span></div></div>
+              <div class="card"><div class="nm">TUDO-R5M1-06 <span class="typ">R5M1</span></div><div class="sn">20USE5L0000764</div>
+                <div class="row"><span class="chip serious"><span class="st"></span>VI fehlt</span></div></div>
+              <div class="card"><div class="nm">TUDO-R2-05 <span class="typ">R2</span></div><div class="sn">20USEM20000187</div>
+                <div class="row"><span class="chip good"><span class="st"></span>Reception ok</span></div></div>
+              <button class="ghost" data-open-wizard>+ Modul anlegen (Sensor scannen)</button>
+            </div>
+          </div>
+
+          <div class="col">
+            <div class="col-h"><span class="stg">GLUED</span><span class="n">6</span></div>
+            <div class="col-list">
+              <div class="card"><div class="nm">TUDO-R5M0-01 <span class="typ">R5M0</span></div><div class="sn">20USE5R0000106</div>
+                <div class="row"><span class="chip good"><span class="st"></span>Kleben 133 mg</span><span class="chip serious"><span class="st"></span>Metrologie fehlt</span></div></div>
+              <div class="card"><div class="nm">TUDO-R5M1-05 <span class="typ">R5M1</span></div><div class="sn">20USE5L0000774</div>
+                <div class="row"><span class="chip crit"><span class="st"></span>Kleber zu viel</span><span class="chip queued"><span class="st"></span>Review</span></div></div>
+              <div class="card"><div class="nm">TUDO-R2-03 <span class="typ">R2</span></div><div class="sn">20USEM20000204</div>
+                <div class="row"><span class="chip good"><span class="st"></span>Bow ✓</span><span class="chip good"><span class="st"></span>Metrologie ✓</span></div></div>
+            </div>
+          </div>
+
+          <div class="col">
+            <div class="col-h"><span class="stg">STITCH_BONDING</span><span class="n">5</span></div>
+            <div class="col-list">
+              <div class="card" style="border-color:var(--accent)"><div class="nm">TUDO-R5M1-03 <span class="typ">R5M1</span></div><div class="sn">20USE5R0000128</div>
+                <div class="row"><span class="chip warn"><span class="st"></span>Stage-Vorschlag wartet</span></div></div>
+              <div class="card"><div class="nm">TUDO-R5M0-03 <span class="typ">R5M0</span></div><div class="sn">20USE5R0000114</div>
+                <div class="row"><span class="chip good"><span class="st"></span>Sibling verknüpft</span></div></div>
+              <div class="card"><div class="nm">TUDO-R5M0-04 <span class="typ">R5M0</span></div><div class="sn">20USE5R0000113</div>
+                <div class="row"><span class="chip good"><span class="st"></span>TC ✓</span></div></div>
+            </div>
+          </div>
+
+          <div class="col">
+            <div class="col-h"><span class="stg">BONDED</span><span class="n">3</span></div>
+            <div class="col-list">
+              <div class="card"><div class="nm">TUDO-R2-01 <span class="typ">R2</span></div><div class="sn">20USEM20000195</div>
+                <div class="row"><span class="chip good"><span class="st"></span>DAQ Quick ✓</span><span class="chip serious"><span class="st"></span>IV n. Bonden fehlt</span></div></div>
+              <div class="card"><div class="nm">TUDO-R5M0-02 <span class="typ">R5M0</span></div><div class="sn">20USE5R0000145</div>
+                <div class="row"><span class="chip good"><span class="st"></span>Wirebond ✓</span></div></div>
+            </div>
+          </div>
+
+          <div class="col">
+            <div class="col-h"><span class="stg">TESTED</span><span class="n">3</span></div>
+            <div class="col-list">
+              <div class="card"><div class="nm">TUDO-R2-02 <span class="typ">R2</span></div><div class="sn">20USEM20000205</div>
+                <div class="row"><span class="chip good"><span class="st"></span>TC-IV kalt/warm ✓</span></div></div>
+              <div class="card"><div class="nm">TUDO-R5M0-05 <span class="typ">R5M0</span></div><div class="sn">20USE5R0000150</div>
+                <div class="row"><span class="chip warn"><span class="st"></span>HV-Stabilität läuft</span></div></div>
+            </div>
+          </div>
+
+          <div class="col">
+            <div class="col-h"><span class="stg">FINISHED</span><span class="n">2</span></div>
+            <div class="col-list">
+              <div class="card"><div class="nm">TUDO-R5M0-01.1 <span class="typ">R5M0</span></div><div class="sn">20USE5R0000146</div>
+                <div class="row"><span class="chip good"><span class="st"></span>Versand 19.06.</span><span class="chip mono">→ UNIFREIBURG</span></div></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== SCREEN: DETAIL ======== -->
+    <section class="screen" id="detail">
+      <div class="sc-head">
+        <h1>TUDO-R5M1-03</h1>
+        <span class="chip mono">20USE5R0000128</span>
+        <span class="chip mono">STITCH_BONDING</span>
+        <span class="chip mono">@ TUDO</span>
+        <span class="cta"><button class="btn" data-toast="PDB-Ansicht geöffnet (itkpd-test) — im Mockup nur angedeutet.">In PDB öffnen ↗</button></span>
+      </div>
+      <div class="det">
+        <div>
+          <div class="panel">
+            <h2>Stammdaten</h2>
+            <dl class="kv">
+              <dt>Typ</dt><dd>R5M1 (Halbmodul)</dd>
+              <dt>Registriert</dt><dd>2026-05-28 · via itkFlow</dd>
+              <dt>HV-Tab-Jig</dt><dd>20USERT0510902</dd>
+              <dt>Sensorgewicht</dt><dd>7,0162 g (mit Tab)</dd>
+              <dt>Sibling (M0)</dt><dd>20USE5R0000113</dd>
+            </dl>
+          </div>
+          <div class="panel">
+            <h2>Familienbaum</h2>
+            <ul class="tree">
+              <li><span class="role">Modul</span> 20USE5R0000128 <span class="ok">ready</span></li>
+              <li class="lvl1"><span class="role">Sensor</span> 20USES50001985 <span class="ok">assembliert ✓</span></li>
+              <li class="lvl1"><span class="role">Hybrid</span> 20USEHC0000212 · R5H1 <span class="ok">assembliert ✓</span></li>
+              <li class="lvl1"><span class="role">Powerboard</span> — (M1: kein PB) <span class="ok" style="color:var(--muted)">n/a</span></li>
+            </ul>
+          </div>
+          <div class="panel">
+            <h2>Outbox — letzte Aktionen</h2>
+            <ul class="tl">
+              <li><time>heute 14:02</time><span class="chip good"><span class="st"></span>bestätigt</span> GLUE_WEIGHT-Testrun in PDB angelegt</li>
+              <li><time>heute 13:58</time><span class="chip good"><span class="st"></span>bestätigt</span> Hybrid 20USEHC0000212 assembliert</li>
+              <li><time>heute 13:57</time><span class="chip queued"><span class="st"></span>wartet</span> Stage-Move → BONDED (Freigabe nötig)</li>
+              <li><time>Mo 09:41</time><span class="chip crit"><span class="st"></span>fehlgeschlagen</span> MODULE_BOW-Upload — PDB-Timeout, 3. Retry 15:00</li>
+            </ul>
+          </div>
+        </div>
+        <div>
+          <div class="panel">
+            <h2>Pflicht-Tests je Stage</h2>
+            <div style="overflow-x:auto">
+            <table class="ttable">
+              <thead><tr><th>Test</th><th>Stage</th><th style="text-align:right">Wert</th><th>Status</th></tr></thead>
+              <tbody>
+                <tr><td class="m">VISUAL_INSPECTION</td><td class="m">HV_TAB_ATT.</td><td class="num">—</td><td><span class="chip good"><span class="st"></span>passed</span></td></tr>
+                <tr><td class="m">MODULE_IV_PS_V1</td><td class="m">HV_TAB_ATT.</td><td class="num">I(−200 V) = 29,97 µA</td><td><span class="chip good"><span class="st"></span>passed</span></td></tr>
+                <tr><td class="m">GLUE_WEIGHT</td><td class="m">GLUED</td><td class="num">137 mg / 151±22</td><td><span class="chip good"><span class="st"></span>passed</span></td></tr>
+                <tr><td class="m">MODULE_BOW</td><td class="m">GLUED</td><td class="num">—</td><td><span class="chip serious"><span class="st"></span>fehlt</span></td></tr>
+                <tr><td class="m">MODULE_METROLOGY</td><td class="m">GLUED</td><td class="num">—</td><td><span class="chip serious"><span class="st"></span>fehlt</span></td></tr>
+                <tr><td class="m">MODULE_WIRE_BONDING</td><td class="m">BONDED</td><td class="num">2 148 Bonds</td><td><span class="chip good"><span class="st"></span>passed</span></td></tr>
+                <tr><td class="m">MODULE_IV_AMAC_TC</td><td class="m">TESTED</td><td class="num">—</td><td><span class="chip"><span class="st" style="background:var(--muted)"></span>offen</span></td></tr>
+              </tbody>
+            </table>
+            </div>
+            <div class="callout">
+              <span>⚖</span>
+              <span><b>Vorschlag:</b> Pflicht-Tests grün → Stage-Move nach <b>BONDED</b></span>
+              <span style="margin-left:auto;display:flex;gap:6px">
+                <button class="btn sm" data-toast="Vorschlag abgelehnt — Begründung wird im Audit-Log vermerkt.">Ablehnen</button>
+                <button class="btn sm primary" data-toast="Stage-Move → BONDED in Outbox eingereiht ⏳ (Audit: A. Abel)">Freigeben</button>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== SCREEN: TRIAGE ======== -->
+    <section class="screen" id="triage">
+      <div class="sc-head">
+        <h1>Test-Triage</h1>
+        <span class="sub">Inbox: 5 Dateien vom Messrechner (Watched Folder <span style="font-family:var(--mono)">\\labpc03\itkflow-inbox</span>)</span>
+        <span class="cta"><button class="btn" data-toast="4 validierte Dateien in Outbox eingereiht ⏳">Alle Grünen freigeben</button></span>
+      </div>
+      <div class="tbl-wrap">
+        <table class="tbl">
+          <thead><tr><th>Datei</th><th>Parser</th><th>Komponente</th><th>Vorschau</th><th>Validierung</th><th style="text-align:right">Aktion</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="m file">TUDO-R5M0-01_metrology.json</td><td>Metrologie</td>
+              <td class="m">20USE5R0000106</td><td class="m">28 Punkte · max Δz 42 µm</td>
+              <td><span class="chip good"><span class="st"></span>valide · passed</span></td>
+              <td class="acts"><button class="btn sm" data-toast="Vorschau geöffnet (Mockup)">Ansehen</button><button class="btn sm primary" data-toast="Metrologie-Testrun in Outbox eingereiht ⏳">Freigeben</button></td>
+            </tr>
+            <tr>
+              <td class="m file">SN20USEH40000294_RC_TC.json</td><td>Response Curve</td>
+              <td class="m">20USEH40000294</td><td class="m">gain 98,2 mV/fC · 0 dead</td>
+              <td><span class="chip good"><span class="st"></span>valide · passed</span></td>
+              <td class="acts"><button class="btn sm" data-toast="Vorschau geöffnet (Mockup)">Ansehen</button><button class="btn sm primary" data-toast="Testrun in Outbox eingereiht ⏳">Freigeben</button></td>
+            </tr>
+            <tr>
+              <td class="m file">TUDO-R5M1-05_bow.json</td><td>Bow</td>
+              <td class="m">20USE5L0000774</td><td class="m">bow 187 µm (Limit 150)</td>
+              <td><span class="chip crit"><span class="st"></span>valide · FAILED</span></td>
+              <td class="acts"><button class="btn sm" data-toast="Vorschau geöffnet (Mockup)">Ansehen</button><button class="btn sm primary" data-toast="FAILED-Testrun in Outbox eingereiht ⏳ — Modul wird zur Review markiert">Freigeben</button></td>
+            </tr>
+            <tr>
+              <td class="m file">pulltest_18_07_2026_wb2.json</td><td>Pulltest</td>
+              <td class="m" style="color:var(--serious)">SN nicht erkannt</td><td class="m">ø 8,4 g · min 6,1 g</td>
+              <td><span class="chip serious"><span class="st"></span>Zuordnung nötig</span></td>
+              <td class="acts"><button class="btn sm primary" data-toast="SN-Zuordnung geöffnet (Mockup)">Zuordnen</button></td>
+            </tr>
+            <tr>
+              <td class="m file">coldjig_run_0455.h5</td><td style="color:var(--muted)">unbekannt</td>
+              <td class="m" style="color:var(--muted)">—</td><td class="m" style="color:var(--muted)">kein Parser für .h5</td>
+              <td><span class="chip"><span class="st" style="background:var(--muted)"></span>ignoriert</span></td>
+              <td class="acts"><button class="btn sm" data-toast="Datei als 'kein Testoutput' markiert">Ausblenden</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ======== SCREEN: DASHBOARD ======== -->
+    <section class="screen" id="dash">
+      <div class="sc-head">
+        <h1>Produktions-Dashboard</h1>
+        <span class="sub">TUDO · Stand heute 15:12 · Quelle: PDB-Spiegel</span>
+        <span class="cta"><button class="btn" data-toast="Export erstellt: tudo-produktion-2026-07-08.xlsx">Export XLSX</button></span>
+      </div>
+      <div class="tiles">
+        <div class="tile"><div class="lbl">Module in Arbeit</div><div class="val">23</div><div class="sub up">+3 diese Woche</div></div>
+        <div class="tile"><div class="lbl">Outbox offen</div><div class="val">4</div><div class="sub warn-t">1 fehlgeschlagen · Retry 15:00</div></div>
+        <div class="tile"><div class="lbl">Tests ausstehend</div><div class="val">9</div><div class="sub">davon 5 Metrologie</div></div>
+        <div class="tile"><div class="lbl">Yield (30 Tage)</div><div class="val">87 %</div><div class="sub">2 FAILED / 15 fertig</div></div>
+      </div>
+      <div class="charts">
+        <div class="chart-card">
+          <h2>Module je Stage</h2>
+          <div class="sub">aktive Module am Standort TUDO</div>
+          <div class="bars" role="img" aria-label="Balkendiagramm: Module je Stage. HV Tab 4, Glued 6, Stitch Bonding 5, Bonded 3, Tested 3, Finished 2.">
+            <div class="bar-g"><span class="v">4</span><div class="bar" style="height:56%"></div></div>
+            <div class="bar-g"><span class="v">6</span><div class="bar" style="height:84%"></div></div>
+            <div class="bar-g"><span class="v">5</span><div class="bar" style="height:70%"></div></div>
+            <div class="bar-g"><span class="v">3</span><div class="bar" style="height:42%"></div></div>
+            <div class="bar-g"><span class="v">3</span><div class="bar" style="height:42%"></div></div>
+            <div class="bar-g"><span class="v">2</span><div class="bar" style="height:28%"></div></div>
+          </div>
+          <div class="bar-lbls"><span>HV_TAB</span><span>GLUED</span><span>STITCH</span><span>BONDED</span><span>TESTED</span><span>FINISHED</span></div>
+        </div>
+        <div class="chart-card">
+          <h2>Durchsatz — fertige Module pro Woche</h2>
+          <div class="sub">letzte 7 Wochen · Ziel: 6/Woche ab Q4</div>
+          <svg class="spark" viewBox="0 0 320 120" aria-label="Liniendiagramm Durchsatz: 2, 3, 3, 5, 4, 6, 7 Module pro Woche, steigender Trend.">
+            <line x1="8" y1="100" x2="312" y2="100" stroke="var(--axis)" stroke-width="1"/>
+            <line x1="8" y1="58" x2="312" y2="58" stroke="var(--grid)" stroke-width="1"/>
+            <line x1="8" y1="16" x2="312" y2="16" stroke="var(--grid)" stroke-width="1"/>
+            <text x="4" y="61" font-size="9" fill="#898781" font-family="Consolas,monospace" text-anchor="start">4</text>
+            <text x="4" y="19" font-size="9" fill="#898781" font-family="Consolas,monospace" text-anchor="start">8</text>
+            <polyline points="20,79 66,68 112,68 158,47 204,58 250,37 296,26" fill="none" stroke="var(--series)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+            <circle cx="296" cy="26" r="4" fill="var(--series)" stroke="var(--chart-surface)" stroke-width="2"/>
+            <text x="296" y="14" font-size="11" font-weight="600" fill="var(--ink)" font-family="Consolas,monospace" text-anchor="middle">7</text>
+            <text x="20" y="114" font-size="9" fill="#898781" font-family="Consolas,monospace" text-anchor="middle">KW21</text>
+            <text x="296" y="114" font-size="9" fill="#898781" font-family="Consolas,monospace" text-anchor="middle">KW27</text>
+          </svg>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- ======== WIZARD ======== -->
+<div class="veil" id="veil" role="dialog" aria-modal="true" aria-labelledby="wiz-h">
+  <div class="modal">
+    <h2 id="wiz-h">Schritt erfassen · Hybride kleben</h2>
+    <div class="for">TUDO-R5M0-07 · 20USE5R0000151 · Stage HV_TAB_ATTACHED</div>
+    <div class="steps"><i class="on"></i><i class="on"></i><i></i><i></i></div>
+    <div class="frow">
+      <div class="fld"><label for="w-type">Modultyp</label>
+        <select id="w-type">
+          <option value="135,20">R5M0 · Ziel 135 ± 20 mg</option>
+          <option value="151,22">R5M1 · Ziel 151 ± 22 mg</option>
+          <option value="164,25">R2 · Ziel 164 ± 25 mg</option>
+          <option value="198,30">R3M0 · Ziel 198 ± 30 mg</option>
+        </select></div>
+      <div class="fld"><label for="w-glue">Glue-Batch (scannen)</label><input id="w-glue" value="20USEGT0000098" spellcheck="false"></div>
+    </div>
+    <div class="frow">
+      <div class="fld"><label for="w-pre">Gewicht vorher [g]</label><input id="w-pre" inputmode="decimal" value="9,7522"></div>
+      <div class="fld"><label for="w-hyb">Hybride gesamt [g]</label><input id="w-hyb" inputmode="decimal" value="2,2330"></div>
+    </div>
+    <div class="fld"><label for="w-post">Gewicht nach Klebung [g]</label><input id="w-post" inputmode="decimal" placeholder="Waage ablesen …" value="12,1185"></div>
+    <p class="hint">Komma oder Punkt als Dezimaltrenner — itkFlow normalisiert beides.</p>
+    <div class="calc">
+      <div><div class="t">Klebegewicht</div><div class="g" id="w-out">—</div></div>
+      <div><div class="t">Ziel</div><div class="g" id="w-target" style="font-size:15px;color:var(--ink2)">135 ± 20 mg</div></div>
+      <span class="chip" id="w-verdict" style="margin-left:auto"><span class="st" style="background:var(--muted)"></span>—</span>
+    </div>
+    <div class="foot">
+      <button class="btn" id="w-cancel">Abbrechen</button>
+      <button class="btn primary" data-toast="GLUE_WEIGHT-Testrun in Outbox eingereiht ⏳ — Freigabe: Koordinator:in" id="w-submit">In Outbox legen</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  // ---- tabs ----
+  const screens = document.querySelectorAll('.screen');
+  document.querySelectorAll('.nav-btn[data-go]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.nav-btn[data-go]').forEach(b => b.removeAttribute('aria-current'));
+      btn.setAttribute('aria-current','page');
+      screens.forEach(s => s.classList.toggle('active', s.id === btn.dataset.go));
+    });
+  });
+  // Kanban-Karte -> Detailseite
+  document.querySelectorAll('#board .card').forEach(c => c.addEventListener('click', () => {
+    document.querySelector('[data-go="detail"]').click();
+  }));
+
+  // ---- toast ----
+  const toast = document.getElementById('toast');
+  let toastT;
+  function showToast(msg){
+    toast.innerHTML = msg;
+    toast.classList.add('show');
+    clearTimeout(toastT);
+    toastT = setTimeout(() => toast.classList.remove('show'), 3200);
+  }
+  document.addEventListener('click', e => {
+    const t = e.target.closest('[data-toast]');
+    if (t) showToast(t.dataset.toast);
+  });
+
+  // ---- wizard ----
+  const veil = document.getElementById('veil');
+  document.addEventListener('click', e => {
+    if (e.target.closest('[data-open-wizard]')) { veil.classList.add('open'); calc(); }
+  });
+  document.getElementById('w-cancel').addEventListener('click', () => veil.classList.remove('open'));
+  document.getElementById('w-submit').addEventListener('click', () => veil.classList.remove('open'));
+  veil.addEventListener('click', e => { if (e.target === veil) veil.classList.remove('open'); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') veil.classList.remove('open'); });
+
+  const num = el => parseFloat((el.value || '').replace(',', '.'));
+  function calc(){
+    const [target, tol] = document.getElementById('w-type').value.split(',').map(Number);
+    document.getElementById('w-target').textContent = target + ' ± ' + tol + ' mg';
+    const pre = num(document.getElementById('w-pre')), hyb = num(document.getElementById('w-hyb')), post = num(document.getElementById('w-post'));
+    const out = document.getElementById('w-out'), verdict = document.getElementById('w-verdict');
+    if ([pre, hyb, post].some(isNaN)) { out.textContent = '—'; verdict.innerHTML = '<span class="st" style="background:var(--muted)"></span>—'; verdict.className = 'chip'; return; }
+    const mg = Math.round((post - pre - hyb) * 1000);
+    out.textContent = mg.toLocaleString('de-DE') + ' mg';
+    if (mg < target - tol)      { verdict.className = 'chip crit';  verdict.innerHTML = '<span class="st"></span>zu wenig'; }
+    else if (mg > target + tol) { verdict.className = 'chip crit';  verdict.innerHTML = '<span class="st"></span>zu viel'; }
+    else                        { verdict.className = 'chip good';  verdict.innerHTML = '<span class="st"></span>OK — im Toleranzband'; }
+  }
+  ['w-type','w-pre','w-hyb','w-post'].forEach(id => document.getElementById(id).addEventListener('input', calc));
+
+  // Scan-Feld: Demo
+  document.querySelector('.scan input').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.value.trim()) {
+      showToast('Gefunden: <b>' + e.target.value.trim().toUpperCase() + '</b> — Detailseite (Mockup)');
+      e.target.value = '';
+      document.querySelector('[data-go="detail"]').click();
+    }
+  });
+</script>
+
+</body>
+</html>

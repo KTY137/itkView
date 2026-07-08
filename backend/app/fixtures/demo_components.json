@@ -1,0 +1,168 @@
+[
+  {
+    "sn": "20USE5M0000701",
+    "component_type": "MODULE",
+    "type_code": "R5M0",
+    "stage": "STITCH_BONDING",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "local_name": "TUDO-R5M0-07"
+  },
+  {
+    "sn": "20USE5S0000701",
+    "component_type": "SENSOR",
+    "type_code": "ATLAS18R5",
+    "stage": "FINISHED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "parent_sn": "20USE5M0000701"
+  },
+  {
+    "sn": "20USE5H0000701",
+    "component_type": "HYBRID",
+    "type_code": "R5H0",
+    "stage": "BONDED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "local_name": "TUDO-R5H0-14",
+    "parent_sn": "20USE5M0000701"
+  },
+  {
+    "sn": "20USEPB0000701",
+    "component_type": "PWB",
+    "type_code": "PBR5",
+    "stage": "FINISHED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "parent_sn": "20USE5M0000701"
+  },
+  {
+    "sn": "20USE5M0000703",
+    "component_type": "MODULE",
+    "type_code": "R5M1",
+    "stage": "GLUED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "local_name": "TUDO-R5M1-03"
+  },
+  {
+    "sn": "20USE5S0000703",
+    "component_type": "SENSOR",
+    "type_code": "ATLAS18R5",
+    "stage": "FINISHED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "parent_sn": "20USE5M0000703"
+  },
+  {
+    "sn": "20USE5H0000703",
+    "component_type": "HYBRID",
+    "type_code": "R5H1",
+    "stage": "BONDED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "local_name": "TUDO-R5H1-09",
+    "parent_sn": "20USE5M0000703"
+  },
+  {
+    "sn": "20USE2M0000704",
+    "component_type": "MODULE",
+    "type_code": "R2",
+    "stage": "TESTED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "local_name": "TUDO-R2-04"
+  },
+  {
+    "sn": "20USE2S0000704",
+    "component_type": "SENSOR",
+    "type_code": "ATLAS18R2",
+    "stage": "FINISHED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "parent_sn": "20USE2M0000704"
+  },
+  {
+    "sn": "20USE2H0000704",
+    "component_type": "HYBRID",
+    "type_code": "R2H0",
+    "stage": "TESTED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "local_name": "TUDO-R2H0-11",
+    "parent_sn": "20USE2M0000704"
+  },
+  {
+    "sn": "20USE2H0000705",
+    "component_type": "HYBRID",
+    "type_code": "R2H1",
+    "stage": "TESTED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "local_name": "TUDO-R2H1-11",
+    "parent_sn": "20USE2M0000704"
+  },
+  {
+    "sn": "20USEPB0000704",
+    "component_type": "PWB",
+    "type_code": "PBR2",
+    "stage": "FINISHED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "parent_sn": "20USE2M0000704"
+  },
+  {
+    "sn": "20USE5M0000699",
+    "component_type": "MODULE",
+    "type_code": "R5M0",
+    "stage": "FAILED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "local_name": "TUDO-R5M0-05",
+    "trashed": true
+  },
+  {
+    "sn": "20USE5S0000699",
+    "component_type": "SENSOR",
+    "type_code": "ATLAS18R5",
+    "stage": "FINISHED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "parent_sn": "20USE5M0000699"
+  },
+  {
+    "sn": "20USE5S0000720",
+    "component_type": "SENSOR",
+    "type_code": "ATLAS18R5",
+    "stage": "FINISHED",
+    "location": "TUDO",
+    "institute_code": "TUDO"
+  },
+  {
+    "sn": "20USE5H0000720",
+    "component_type": "HYBRID",
+    "type_code": "R5H0",
+    "stage": "FINISHED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "local_name": "TUDO-R5H0-21"
+  },
+  {
+    "sn": "20USEPB0000720",
+    "component_type": "PWB",
+    "type_code": "PBR5",
+    "stage": "FINISHED",
+    "location": "TUDO",
+    "institute_code": "TUDO"
+  },
+  {
+    "sn": "20USE5M0000999",
+    "component_type": "MODULE",
+    "type_code": "R5M0",
+    "stage": "HV_TAB_ATTACHED",
+    "location": "TUDO",
+    "institute_code": "TUDO",
+    "local_name": "TUDO-DUMMY-01",
+    "is_dummy": true
+  }
+]
