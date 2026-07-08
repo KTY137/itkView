@@ -1,15 +1,33 @@
 import hashlib
 import json
 from collections.abc import Iterator
+from datetime import timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app import __version__
+from app.auth import (
+    SESSION_COOKIE,
+    SESSION_TTL,
+    hash_password,
+    new_session_token,
+    session_expiry,
+    verify_password,
+)
 from app.domain.stages import DEFAULT_STAGE_ORDER
 from app.ingestion import ParsedTestRun, parse_payload
-from app.models import AuditEvent, Component, IngestFile, InstituteProfile, OutboxAction
+from app.models import (
+    AuditEvent,
+    Component,
+    IngestFile,
+    InstituteProfile,
+    OutboxAction,
+    User,
+    UserSession,
+    utcnow,
+)
 from app.outbox import (
     TERMINAL,
     InvalidTransition,
@@ -32,12 +50,17 @@ from app.schemas import (
     IngestProposalCreate,
     InstituteCreate,
     InstituteOut,
+    LoginIn,
+    MeOut,
     OutboxContractOut,
     OutboxCreate,
     OutboxOut,
     OutboxTransition,
     RequirementCheckOut,
     StageSuggestionOut,
+    UserCreate,
+    UserOut,
+    UserUpdate,
 )
 from app.stage_service import evaluate_for_component
 from app.sync import UnknownParentError, sync_components
@@ -48,7 +71,155 @@ def get_db(request: Request) -> Iterator[Session]:
         yield session
 
 
+def current_user(request: Request, db: Session = Depends(get_db)) -> User | None:
+    """Resolve the signed-in user from the session cookie, or None. Optional —
+    endpoints stay usable while auth is being rolled out (docs/06)."""
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        return None
+    session = db.scalar(select(UserSession).where(UserSession.token == token))
+    if session is None:
+        return None
+    # SQLite returns naive datetimes; treat a stored expiry as UTC to compare.
+    expires = session.expires_at
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires < utcnow():
+        return None
+    user = db.get(User, session.user_id)
+    return user if (user is not None and user.is_active) else None
+
+
+def require_user(user: User | None = Depends(current_user)) -> User:
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    return user
+
+
+def require_role(*roles: str):
+    """Dependency factory: require an authenticated user with one of `roles`."""
+
+    def dependency(user: User = Depends(require_user)) -> User:
+        if user.role not in roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"This action requires role: {', '.join(roles)}.",
+            )
+        return user
+
+    return dependency
+
+
+# Module-level singletons (FastAPI resolves these; avoids calls in arg defaults).
+require_admin = require_role("admin")
+require_operator = require_role("operator", "admin")
+
+
+def _me(user: User) -> MeOut:
+    code = user.institute.code if user.institute is not None else None
+    return MeOut(
+        id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        role=user.role,
+        institute_id=user.institute_id,
+        institute_code=code,
+    )
+
+
 router = APIRouter()
+
+
+# --------------------------------------------------------------------------
+# Auth & users (docs/06). Additive: existing endpoints remain open for now.
+# --------------------------------------------------------------------------
+
+
+@router.post("/api/auth/login", response_model=MeOut, tags=["auth"])
+def login(body: LoginIn, response: Response, db: Session = Depends(get_db)) -> MeOut:
+    user = db.scalar(select(User).where(User.email == body.email.strip().lower()))
+    if user is None or not user.is_active or not verify_password(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    token = new_session_token()
+    db.add(UserSession(token=token, user_id=user.id, expires_at=session_expiry()))
+    db.commit()
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        httponly=True,
+        samesite="lax",
+        max_age=int(SESSION_TTL.total_seconds()),
+    )
+    return _me(user)
+
+
+@router.post("/api/auth/logout", status_code=204, tags=["auth"])
+def logout(request: Request, response: Response, db: Session = Depends(get_db)) -> None:
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        session = db.scalar(select(UserSession).where(UserSession.token == token))
+        if session is not None:
+            db.delete(session)
+            db.commit()
+    response.delete_cookie(SESSION_COOKIE)
+
+
+@router.get("/api/auth/me", response_model=MeOut, tags=["auth"])
+def whoami(user: User = Depends(require_user)) -> MeOut:
+    return _me(user)
+
+
+@router.get("/api/users", response_model=list[UserOut], tags=["users"])
+def list_users(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    stmt = select(User).order_by(User.email)
+    if admin.institute_id is not None:  # per-institute admins see their own users
+        stmt = stmt.where(User.institute_id == admin.institute_id)
+    return list(db.scalars(stmt))
+
+
+@router.post("/api/users", response_model=UserOut, status_code=201, tags=["users"])
+def create_user(
+    body: UserCreate, db: Session = Depends(get_db), admin: User = Depends(require_admin)
+) -> User:
+    email = body.email.strip().lower()
+    if db.scalar(select(User).where(User.email == email)):
+        raise HTTPException(status_code=409, detail=f"A user with email '{email}' already exists.")
+    user = User(
+        email=email,
+        display_name=body.display_name,
+        role=body.role,
+        institute_id=admin.institute_id,  # new users join the admin's institute
+        password_hash=hash_password(body.password),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@router.patch("/api/users/{user_id}", response_model=UserOut, tags=["users"])
+def update_user(
+    user_id: int,
+    body: UserUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> User:
+    user = db.get(User, user_id)
+    if user is None or (
+        admin.institute_id is not None and user.institute_id != admin.institute_id
+    ):
+        raise HTTPException(status_code=404, detail=f"User {user_id} not found.")
+    if body.display_name is not None:
+        user.display_name = body.display_name
+    if body.role is not None:
+        user.role = body.role
+    if body.is_active is not None:
+        user.is_active = body.is_active
+    if body.password is not None:
+        user.password_hash = hash_password(body.password)
+    db.commit()
+    db.refresh(user)
+    return user
 
 
 def count_buckets(db: Session, column) -> list[CountBucket]:
