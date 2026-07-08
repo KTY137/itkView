@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { ApiError, getDashboardSummary } from "../api";
 import type { CountBucket, DashboardSummary } from "../api";
 import { makeDemoDashboardSummary } from "../demoData";
-import { formatTimestamp, t } from "../i18n";
+import { formatCount, formatRelative, formatTimestamp, t } from "../i18n";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -70,14 +70,15 @@ export default function DashboardScreen() {
         </div>
       )}
       <div className="metric-grid">
-        <Metric label={t.dashboard.totalComponents} value={String(summary.total_components)} />
+        <Metric label={t.dashboard.totalComponents} value={formatCount(summary.total_components)} />
         <Metric
           label={t.dashboard.lastSynced}
           value={
             summary.last_synced_at === null
               ? t.dashboard.noSyncYet
-              : formatTimestamp(summary.last_synced_at)
+              : formatRelative(summary.last_synced_at)
           }
+          title={summary.last_synced_at === null ? undefined : formatTimestamp(summary.last_synced_at)}
         />
         <Metric label={t.dashboard.submittedOutbox} value={String(summary.submitted_outbox)} />
         <Metric label={t.dashboard.failedOutbox} value={String(summary.failed_outbox)} />
@@ -132,9 +133,9 @@ function BarChart({ title, buckets }: { title: string; buckets: CountBucket[] })
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function Metric({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
-    <div className="metric-tile">
+    <div className="metric-tile" title={title}>
       <div className="field-label">{label}</div>
       <div className="metric-value">{value}</div>
     </div>

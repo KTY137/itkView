@@ -84,6 +84,7 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
   const [componentType, setComponentType] = useState("");
   const [typeOptions, setTypeOptions] = useState<string[]>([]);
   const [sortBy, setSortBy] = useState("default");
+  const [staleFilter, setStaleFilter] = useState("all");
   const [selectedSn, setSelectedSn] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [institutes, setInstitutes] = useState<Institute[]>([]);
@@ -244,6 +245,7 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
           result.created,
           result.updated,
           result.unchanged,
+          result.stale,
           result.skipped,
         ),
       );
@@ -266,7 +268,11 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
   }
 
   const displayRows = sortRows(
-    componentType === "" ? rows : rows.filter((r) => r.component_type === componentType),
+    rows
+      .filter((r) => componentType === "" || r.component_type === componentType)
+      .filter((r) =>
+        staleFilter === "all" ? true : staleFilter === "only" ? r.stale : !r.stale,
+      ),
     sortBy,
   );
 
@@ -418,6 +424,16 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
           <option value="stage">{t.components.sortStage}</option>
           <option value="type">{t.components.sortType}</option>
         </select>
+        <select
+          className="select-input"
+          value={staleFilter}
+          onChange={(e) => setStaleFilter(e.target.value)}
+          aria-label={t.components.staleFilterLabel}
+        >
+          <option value="all">{t.components.staleAll}</option>
+          <option value="hide">{t.components.staleHide}</option>
+          <option value="only">{t.components.staleOnly}</option>
+        </select>
       </form>
       {error !== null ? (
         <div className="error-banner" role="alert">
@@ -448,7 +464,9 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
               {displayRows.map((c) => (
                 <tr
                   key={c.sn}
-                  className={c.trashed ? "row-click trashed" : "row-click"}
+                  className={
+                    "row-click" + (c.trashed ? " trashed" : "") + (c.stale ? " is-stale" : "")
+                  }
                   onClick={() => setSelectedSn(c.sn)}
                 >
                   <td>
@@ -463,6 +481,11 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
                         {c.local_name ?? c.sn}
                       </button>
                       {c.is_dummy && <span className="chip muted">{t.components.dummy}</span>}
+                      {c.stale && (
+                        <span className="chip stale" title={t.components.staleHint}>
+                          {t.components.stale}
+                        </span>
+                      )}
                       {c.trashed && <span className="chip red">{t.components.trashed}</span>}
                     </div>
                   </td>

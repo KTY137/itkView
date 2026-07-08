@@ -12,6 +12,7 @@ const en = {
     triage: "Test triage",
     outbox: "Outbox",
     dashboard: "Dashboard",
+    statistics: "Statistics",
     groupProduction: "Production",
     groupSite: "Site",
     glueBatches: "Glue batches",
@@ -30,6 +31,8 @@ const en = {
     subtitle: (n: number) => `${n} modules · stage data from the PDB mirror`,
     dummy: "dummy",
     trashed: "trashed",
+    stale: "stale",
+    locationHint: "Currently located at a different institute.",
   },
   common: {
     loading: "Loading…",
@@ -58,8 +61,16 @@ const en = {
     syncSelected: "Sync selected institute",
     syncNeedsInstitute: "Select or create an institute before syncing.",
     instituteCreated: (code: string) => `Institute ${code} created.`,
-    syncComplete: (created: number, updated: number, unchanged: number, skipped: number) =>
-      `Sync complete: ${created} created, ${updated} updated, ${unchanged} unchanged, ${skipped} skipped.`,
+    syncComplete: (
+      created: number,
+      updated: number,
+      unchanged: number,
+      stale: number,
+      skipped: number,
+    ) =>
+      `Sync complete: ${created} created, ${updated} updated, ${unchanged} unchanged` +
+      (stale > 0 ? `, ${stale} now stale` : "") +
+      `, ${skipped} skipped.`,
     syncFailed: "Sync failed",
     searchLabel: "Search components",
     searchPlaceholder: "Scan or type serial number / local name…",
@@ -72,6 +83,12 @@ const en = {
     sortSerial: "Sort: serial",
     sortStage: "Sort: stage",
     sortType: "Sort: type",
+    staleFilterLabel: "Stale filter",
+    staleAll: "Incl. stale",
+    staleHide: "Hide stale",
+    staleOnly: "Only stale",
+    stale: "stale",
+    staleHint: "No longer returned by the PDB — kept for its local links.",
     loadError: "Could not load components",
     empty: "No components match the current filter.",
     colLocalName: "Local name",
@@ -126,6 +143,34 @@ const en = {
     byInstitute: "By institute",
     outboxByStatus: "Outbox by status",
     empty: "No data yet.",
+  },
+  stats: {
+    subtitle: "Production history reconstructed from the PDB stage log.",
+    stageFlow: "Assembly stage flow",
+    loadError: "Could not load statistics",
+    empty: "No stage history yet — sync an institute to reconstruct it.",
+    filterType: "Component type",
+    filterTypeCode: "Sub-type",
+    filterBucket: "Bucket",
+    allTypeCodes: "All sub-types",
+    bucketWeek: "Weekly",
+    bucketMonth: "Monthly",
+    bucketYear: "Yearly",
+    componentsTracked: "Tracked",
+    yield: "Yield",
+    yieldHint: (good: number, concluded: number, inProgress: number) =>
+      `${good}/${concluded} concluded · ${inProgress} in progress`,
+    leadTimeMedian: (stage: string) => `Median lead time → ${stage}`,
+    leadTimeSpread: "Spread (p25–p75)",
+    reworkRate: "Rework rate",
+    completed: (stage: string) => `Reached ${stage}`,
+    days: "d",
+    throughput: (stage: string) => `Throughput — components first reaching ${stage}`,
+    stageDwell: "Median time spent per stage",
+    reworkByStage: "Rework events by stage",
+    noneReached: (stage: string) => `No component has reached ${stage} yet.`,
+    noDwell: "Not enough stage transitions to measure dwell time.",
+    noRework: "No rework recorded.",
   },
   outbox: {
     subtitle: "Reviewed writes to the PDB — nothing is sent without approval.",
@@ -218,6 +263,16 @@ const en = {
     colFits: "Fits types",
     colStatus: "Status",
     hint: "Pick a module type to see only the jigs and tools that fit it.",
+    scanPlaceholder: "Scan a jig/tool RFID or code…",
+    scanLabel: "Scan jig or tool",
+    scanned: "Scanned tool",
+    scanNotFound: (code: string) => `No tool matches “${code}”.`,
+    scanClear: "Clear",
+    scanKind: "Kind",
+    scanCode: "Code",
+    scanRfid: "RFID",
+    scanFits: "Fits module types",
+    scanStatus: "Status",
   },
   placeholder: {
     shell: "Phase 0 shell — this screen arrives in phase",
@@ -228,6 +283,24 @@ const en = {
 export const t = en;
 
 export type Messages = typeof en;
+
+/** Group large counts for legibility (2655 → "2,655"). */
+export function formatCount(n: number): string {
+  return n.toLocaleString("en-GB");
+}
+
+/** Compact relative time ("just now", "12 min ago", "3 h ago", "2 d ago"). */
+export function formatRelative(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return iso;
+  const secs = Math.round((Date.now() - then) / 1000);
+  if (secs < 45) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs} h ago`;
+  return `${Math.round(hrs / 24)} d ago`;
+}
 
 /** Locale-aware timestamp formatting (English default locale). */
 export function formatTimestamp(iso: string): string {

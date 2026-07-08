@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { ApiError, getTools } from "../api";
+import type { FormEvent } from "react";
+import { ApiError, getTools, scanTool } from "../api";
 import type { Tool } from "../api";
-import { filterDemoTools } from "../demoData";
+import { filterDemoTools, scanDemoTool } from "../demoData";
 import { t } from "../i18n";
 
 function errorMessage(err: unknown): string {
@@ -32,6 +33,9 @@ export default function ToolsScreen() {
   const [demo, setDemo] = useState(false);
   const [kind, setKind] = useState("");
   const [fits, setFits] = useState("");
+  const [scanText, setScanText] = useState("");
+  const [scanned, setScanned] = useState<Tool | null>(null);
+  const [scanMiss, setScanMiss] = useState<string | null>(null);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -56,6 +60,29 @@ export default function ToolsScreen() {
     return () => ctrl.abort();
   }, [kind, fits]);
 
+  async function handleScan(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const code = scanText.trim();
+    if (code === "") return;
+    setScanMiss(null);
+    try {
+      const tool = await scanTool(code);
+      setScanned(tool);
+      setScanText("");
+    } catch (err) {
+      if (err instanceof ApiError && err.isNetwork) {
+        const hit = scanDemoTool(code);
+        if (hit) {
+          setScanned(hit);
+          setScanText("");
+          return;
+        }
+      }
+      setScanned(null);
+      setScanMiss(t.tools.scanNotFound(code));
+    }
+  }
+
   return (
     <div className="screen">
       <div className="sc-head">
@@ -63,6 +90,26 @@ export default function ToolsScreen() {
         <span className="sub">{t.tools.subtitle}</span>
         {demo && <span className="badge warn">{t.common.demoBadge}</span>}
       </div>
+      <form className="toolbar" role="search" onSubmit={(e) => void handleScan(e)}>
+        <input
+          className="search-input"
+          type="search"
+          value={scanText}
+          onChange={(e) => setScanText(e.target.value)}
+          placeholder={t.tools.scanPlaceholder}
+          aria-label={t.tools.scanLabel}
+          autoFocus
+        />
+      </form>
+      {scanMiss !== null && (
+        <div className="info-banner" role="status">
+          <span>{scanMiss}</span>
+          <button type="button" className="btn" onClick={() => setScanMiss(null)}>
+            OK
+          </button>
+        </div>
+      )}
+      {scanned !== null && <ScannedToolCard tool={scanned} onClear={() => setScanned(null)} />}
       <div className="toolbar">
         <select
           className="select-input"
@@ -138,6 +185,51 @@ export default function ToolsScreen() {
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Auto-pulled detail for a scanned jig/tool — the info that appears the moment
+ * a tag is scanned, so an operator confirms the right jig without typing. */
+function ScannedToolCard({ tool, onClear }: { tool: Tool; onClear: () => void }) {
+  return (
+    <div className="panel scanned-tool" data-status={tool.status}>
+      <div className="scanned-head">
+        <span className="field-label">{t.tools.scanned}</span>
+        <span className={statusChip(tool.status)}>{tool.status}</span>
+        <button type="button" className="btn" onClick={onClear}>
+          {t.tools.scanClear}
+        </button>
+      </div>
+      <div className="field-grid">
+        <Field label={t.tools.scanKind} value={tool.kind} />
+        <Field label={t.tools.scanCode} value={tool.code} mono />
+        <Field label={t.tools.scanRfid} value={tool.rfid ?? t.common.none} mono />
+        <Field label={t.tools.scanStatus} value={tool.status} />
+      </div>
+      <div className="scanned-fits">
+        <span className="field-label">{t.tools.scanFits}</span>
+        <div className="row-actions">
+          {tool.compatible_types.length === 0 ? (
+            <span className="muted">{t.common.none}</span>
+          ) : (
+            tool.compatible_types.map((type) => (
+              <span className="chip neutral" key={type}>
+                {type}
+              </span>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div>
+      <div className="field-label">{label}</div>
+      <div className={mono === true ? "field-value mono" : "field-value"}>{value}</div>
     </div>
   );
 }
