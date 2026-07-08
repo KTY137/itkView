@@ -142,3 +142,41 @@ class AuditEvent(Base):
     )
 
     outbox_action: Mapped[OutboxAction | None] = relationship(back_populates="audit_events")
+
+
+class User(Base):
+    """A person who uses the app. Every action is attributed to one (docs/06).
+
+    Local accounts for v1: `password_hash` is set for password login;
+    `external_subject` is reserved for a later OIDC/SSO adapter.
+    """
+
+    __tablename__ = "app_user"  # "user" is reserved in some databases
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    institute_id: Mapped[int | None] = mapped_column(
+        ForeignKey("institute_profile.id"), default=None, index=True
+    )
+    role: Mapped[str] = mapped_column(String(16), default="viewer")  # viewer|operator|admin
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    password_hash: Mapped[str | None] = mapped_column(String(200), default=None)
+    external_subject: Mapped[str | None] = mapped_column(String(200), default=None, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    institute: Mapped[InstituteProfile | None] = relationship()
+
+
+class UserSession(Base):
+    """Server-side session: an opaque cookie token bound to a user."""
+
+    __tablename__ = "user_session"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_user.id"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    user: Mapped[User] = relationship()

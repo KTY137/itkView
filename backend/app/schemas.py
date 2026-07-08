@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -190,3 +191,48 @@ class HealthOut(BaseModel):
     app: str
     version: str
     pdb_instance: str
+
+
+# --- Auth / users (docs/06) ------------------------------------------------
+
+Role = Literal["viewer", "operator", "admin"]
+
+
+class LoginIn(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class UserCreate(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    display_name: str = Field(min_length=1, max_length=120)
+    role: Role = "viewer"
+    password: str = Field(min_length=8, max_length=200)
+
+
+class UserUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    role: Role | None = None
+    is_active: bool | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=200)
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: str
+    display_name: str
+    role: str
+    is_active: bool
+    institute_id: int | None
+    created_at: datetime
+
+
+class MeOut(BaseModel):
+    id: int
+    email: str
+    display_name: str
+    role: str
+    institute_id: int | None
+    institute_code: str | None
