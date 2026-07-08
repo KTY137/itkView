@@ -259,7 +259,11 @@ def resolve_component(db: Session, parsed: ParsedTestRun) -> Component | None:
 def health(request: Request) -> HealthOut:
     settings = request.app.state.settings
     return HealthOut(
-        status="ok", app=settings.app_name, version=__version__, pdb_instance=settings.pdb_instance
+        status="ok",
+        app=settings.app_name,
+        version=__version__,
+        pdb_instance=settings.pdb_instance,
+        pdb_write_scope=settings.pdb_write_scope,
     )
 
 

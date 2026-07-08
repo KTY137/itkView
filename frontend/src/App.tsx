@@ -14,6 +14,7 @@ type Health = {
   app: string;
   version: string;
   pdb_instance: string;
+  pdb_write_scope?: string;
 };
 
 const SCREENS = [
@@ -191,11 +192,21 @@ export default function App() {
             <kbd>F2</kbd>
           </form>
           <span className="sync">
-            <span className={healthError ? "dot off" : "dot"} />
+            <span
+              className={
+                healthError
+                  ? "dot off"
+                  : health?.pdb_instance === "production"
+                    ? "dot prod"
+                    : "dot"
+              }
+            />
             {healthError
               ? t.nav.backendOffline
               : health
-                ? `${t.nav.pdb} ${health.pdb_instance} · API v${health.version}`
+                ? health.pdb_instance === "production"
+                  ? `${t.nav.pdb} production (${t.nav.dummyWritesOnly}) · API v${health.version}`
+                  : `${t.nav.pdb} ${health.pdb_instance} · API v${health.version}`
                 : t.common.loading}
           </span>
         </header>

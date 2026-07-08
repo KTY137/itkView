@@ -283,12 +283,32 @@ def test_run_worker_once_smoke(tmp_path):
     worker_main(["--once"], settings=settings)
 
 
-def test_real_submitter_is_inactive_without_access_codes(tmp_path):
+def _seed_mirror_component(session_factory, sn: str, *, is_dummy: bool) -> None:
+    from app.sync import SyncRecord
+
+    record = SyncRecord(
+        sn=sn,
+        component_type="MODULE",
+        type_code="R5M0",
+        stage="GLUED",
+        location="TUDO",
+        institute_code="TUDO",
+        local_name=None,
+        parent_sn=None,
+        is_dummy=is_dummy,
+        trashed=False,
+    )
+    with session_factory() as session:
+        sync_components(session, [record])
+        session.commit()
+
+
+def test_real_submitter_is_inactive_without_access_codes(session_factory):
     """Guard: the real PDB submitter must never write without configured codes.
 
-    This is the safety net behind 'no real itkdb writes until approved' — an
-    approved stage_move action is processed with the *real* submitter, which
-    must refuse (PdbSubmitUnavailable -> failed/transient), not reach itkdb.
+    An approved stage_move on a legitimate DUMMY target is processed with the
+    *real* submitter, which must refuse (PdbSubmitUnavailable -> transient),
+    not reach itkdb, because no access codes are configured.
     """
     from app.config import Settings
     from app.pdb_submit import make_pdb_submitter
@@ -297,12 +317,74 @@ def test_real_submitter_is_inactive_without_access_codes(tmp_path):
     assert settings.itkdb_access_code1 is None and settings.itkdb_access_code2 is None
     submitter = make_pdb_submitter(settings)
 
+    _seed_mirror_component(session_factory, "20UPGM19999999", is_dummy=True)
+
+    class _Action:
+        kind = "stage_move"
+        payload = {"sn": "20UPGM19999999", "to_stage": "BONDED"}
+
+    with session_factory() as session, pytest.raises(PdbSubmitUnavailable):
+        submitter(session, _Action())
+
+
+def test_real_submitter_rejects_stage_move_outside_dummy_scope(session_factory):
+    """Guard: with pdb_write_scope=dummy_only (default), a stage_move on a real
+    (non-dummy) component is rejected before any PDB client is even built —
+    writes to real production parts are impossible by construction."""
+    from app.config import Settings
+    from app.pdb_submit import make_pdb_submitter
+
+    settings = Settings(database_url="sqlite:///:memory:", _env_file=None)
+    assert settings.pdb_write_scope == "dummy_only"
+    submitter = make_pdb_submitter(settings)
+
+    _seed_mirror_component(session_factory, "20USE5M0000701", is_dummy=False)
+
     class _Action:
         kind = "stage_move"
         payload = {"sn": "20USE5M0000701", "to_stage": "BONDED"}
 
-    with pytest.raises(PdbSubmitUnavailable):
-        submitter(None, _Action())
+    with session_factory() as session:
+        outcome = submitter(session, _Action())
+    assert not outcome.is_confirmed
+    assert "DUMMY" in (outcome.rejected_reason or "")
+
+
+def test_real_submitter_rejects_upload_outside_dummy_scope(session_factory):
+    """Same guard for test-run uploads: the ingest file targets a real SN, so
+    the real submitter rejects it without touching the network."""
+    from app.config import Settings
+    from app.models import IngestFile
+    from app.pdb_submit import make_pdb_submitter
+
+    _seed_mirror_component(session_factory, "20USE5M0000701", is_dummy=False)
+    with session_factory() as session:
+        ingest = IngestFile(
+            filename="metrology.json",
+            sha256="0" * 64,
+            size_bytes=10,
+            status="proposed",
+            component_sn="20USE5M0000701",
+            test_type="MODULE_METROLOGY",
+            parser="metrology",
+            payload=valid_payload(),
+            uploaded_by="tests",
+        )
+        session.add(ingest)
+        session.commit()
+        ingest_id = ingest.id
+
+    settings = Settings(database_url="sqlite:///:memory:", _env_file=None)
+    submitter = make_pdb_submitter(settings)
+
+    class _Action:
+        kind = "upload_test_run"
+        payload = {"ingest_file_id": ingest_id}
+
+    with session_factory() as session:
+        outcome = submitter(session, _Action())
+    assert not outcome.is_confirmed
+    assert "DUMMY" in (outcome.rejected_reason or "")
 
 
 # --------------------------------------------------------------------------

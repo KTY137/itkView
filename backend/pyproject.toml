@@ -31,11 +31,14 @@ app = ["fixtures/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# PDB sandbox integration tests need a token for the PDB *test* instance and
-# are excluded from the default run. Enable with: pytest -m pdb_sandbox
-addopts = "-m 'not pdb_sandbox'"
+# PDB integration tests need production access codes and explicit opt-ins;
+# both flavours are excluded from the default run (docs/09):
+#   read-only smoke : pytest -m pdb_sandbox
+#   DUMMY write E2E : pytest -m pdb_write   (additionally ITKFLOW_ALLOW_PDB_WRITES=true)
+addopts = "-m 'not pdb_sandbox and not pdb_write'"
 markers = [
-    "pdb_sandbox: integration tests against the PDB test instance (require ITKDB access codes)",
+    "pdb_sandbox: read-only smoke tests against the production PDB (require access codes)",
+    "pdb_write: DUMMY-scope write E2E against the production PDB (opt-in via env)",
 ]
 
 [tool.ruff]

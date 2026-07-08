@@ -1,0 +1,37 @@
+# ADR 003: PDB-Writes nur gegen eigene DUMMY-Testkomponenten
+
+Status: akzeptiert (2026-07-08)
+
+## Kontext
+
+Die PDB-Testinstanz, auf der das ursprüngliche Sicherheitsmodell basierte
+(ADR 002 setzte sie für Worker-Writes voraus), existiert nicht mehr. Der
+Supervisor hat den für Strips sanktionierten Weg benannt: Testteile werden in
+der **produktiven** PDB über den `DUMMY`-Batch-Präfix von der Produktion
+getrennt; Hybride/Module dürfen dafür frei registriert werden, Sensoren/ASICs
+niemals (keine Dummy-SN-Vergabe).
+
+## Entscheidung
+
+1. itkFlow spricht die produktive PDB an: Reads hinter dem bestehenden
+   doppelten Env-Opt-in, Writes zusätzlich hinter
+   `pdb_write_scope=dummy_only` (Default).
+2. Das Write-Gate ist das Mirror-Flag `is_dummy`: der reale Submitter lehnt
+   jede Aktion ab, deren Ziel-SN nicht als DUMMY-Komponente gespiegelt ist
+   (`app/pdb_scope.py`). Das Flag entsteht nur durch itkFlow-eigene
+   Registrierung (`register_dummy_component`, Allowlist Module/Hybride,
+   Batch `DUMMY_<Institut>`) oder durch `dummy=true` aus der PDB selbst.
+3. `unrestricted` bleibt unimplementiert; echte Produktions-Writes erfordern
+   eine spätere, eigene Freigabestufe.
+4. Verifikation dreistufig: Offline-Suite (Fakes), `pdb_sandbox` (read-only
+   Smoke), `pdb_write` (DUMMY-E2E, nur mit `ITKFLOW_ALLOW_PDB_WRITES=true`).
+
+## Konsequenzen
+
+- Die Worker-/Outbox-Architektur aus ADR 002 bleibt unverändert; nur die
+  Submitter-Vorbedingungen wurden verschärft (Scope-Check vor Client-Aufbau,
+  Ablehnung als fachliche Rejection ohne Retry).
+- Harte Regel #2 in CLAUDE.md wurde neu gefasst; Details in
+  `docs/09-pdb-production-strategy.md`.
+- Der Sync darf produktive Daten lesen; damit läuft das komplette lokale
+  Cockpit (Board/Detail/Stage-Engine) erstmals mit echten Instituts-Daten.
