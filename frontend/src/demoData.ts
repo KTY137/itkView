@@ -6,6 +6,8 @@ import type {
   DashboardSummary,
   IngestFile,
   OutboxAction,
+  ProductionStats,
+  StatsDimensions,
   Tool,
 } from "./api";
 
@@ -29,6 +31,7 @@ export const DEMO_COMPONENTS: ComponentOut[] = [
     parent_sn: null,
     is_dummy: false,
     trashed: false,
+    stale: false,
     synced_at: SYNCED,
   },
   {
@@ -42,6 +45,7 @@ export const DEMO_COMPONENTS: ComponentOut[] = [
     parent_sn: "20USBML0000101",
     is_dummy: false,
     trashed: false,
+    stale: false,
     synced_at: SYNCED,
   },
   {
@@ -55,6 +59,7 @@ export const DEMO_COMPONENTS: ComponentOut[] = [
     parent_sn: "20USBML0000101",
     is_dummy: false,
     trashed: false,
+    stale: false,
     synced_at: SYNCED,
   },
   {
@@ -68,6 +73,7 @@ export const DEMO_COMPONENTS: ComponentOut[] = [
     parent_sn: "20USBML0000101",
     is_dummy: false,
     trashed: false,
+    stale: false,
     synced_at: SYNCED,
   },
   {
@@ -81,6 +87,7 @@ export const DEMO_COMPONENTS: ComponentOut[] = [
     parent_sn: null,
     is_dummy: false,
     trashed: false,
+    stale: false,
     synced_at: SYNCED,
   },
   {
@@ -94,6 +101,7 @@ export const DEMO_COMPONENTS: ComponentOut[] = [
     parent_sn: "20USBML0000102",
     is_dummy: false,
     trashed: false,
+    stale: false,
     synced_at: SYNCED,
   },
   {
@@ -107,6 +115,7 @@ export const DEMO_COMPONENTS: ComponentOut[] = [
     parent_sn: "20USBML0000102",
     is_dummy: false,
     trashed: false,
+    stale: false,
     synced_at: SYNCED,
   },
   {
@@ -120,6 +129,7 @@ export const DEMO_COMPONENTS: ComponentOut[] = [
     parent_sn: null,
     is_dummy: false,
     trashed: false,
+    stale: false,
     synced_at: SYNCED,
   },
   {
@@ -133,6 +143,7 @@ export const DEMO_COMPONENTS: ComponentOut[] = [
     parent_sn: null,
     is_dummy: true,
     trashed: false,
+    stale: false,
     synced_at: SYNCED,
   },
   {
@@ -146,6 +157,7 @@ export const DEMO_COMPONENTS: ComponentOut[] = [
     parent_sn: null,
     is_dummy: false,
     trashed: true,
+    stale: false,
     synced_at: SYNCED,
   },
 ];
@@ -329,6 +341,17 @@ export function filterDemoTools(kind: string, fits: string): Tool[] {
   );
 }
 
+/** Offline equivalent of GET /api/tools/scan — match by code or RFID. */
+export function scanDemoTool(code: string): Tool | null {
+  const needle = code.trim().toUpperCase();
+  return (
+    DEMO_TOOLS.find(
+      (tool) =>
+        tool.code.toUpperCase() === needle || (tool.rfid ?? "").toUpperCase() === needle,
+    ) ?? null
+  );
+}
+
 function buckets(values: string[]): CountBucket[] {
   const counts = new Map<string, number>();
   for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
@@ -354,6 +377,55 @@ function orderBuckets(items: CountBucket[], order: string[]): CountBucket[] {
     return i === -1 ? order.length : i;
   };
   return [...items].sort((a, b) => rank(a.label) - rank(b.label) || a.label.localeCompare(b.label));
+}
+
+export function makeDemoStatsDimensions(): StatsDimensions {
+  return {
+    component_types: ["MODULE", "HYBRID", "SENSOR"],
+    type_codes: ["R0", "R2", "R5"],
+    institutes: ["TUDO"],
+  };
+}
+
+/** Plausible offline statistics, shaped like a real reconstructed history. */
+export function makeDemoProductionStats(): ProductionStats {
+  return {
+    component_type: "MODULE",
+    type_code: null,
+    institute: "TUDO",
+    target_stage: "FINISHED",
+    bucket: "month",
+    components_tracked: 42,
+    stage_order: DEMO_STAGE_ORDER,
+    throughput: [
+      { period: "2026-02", count: 2 },
+      { period: "2026-03", count: 5 },
+      { period: "2026-04", count: 4 },
+      { period: "2026-05", count: 9 },
+      { period: "2026-06", count: 6 },
+      { period: "2026-07", count: 3 },
+    ],
+    lead_time: { count: 29, median_days: 41.5, p25_days: 22.0, p75_days: 88.0 },
+    stage_dwell: [
+      { stage: "HV_TAB_ATTACHED", median_days: 6.2, count: 40 },
+      { stage: "GLUED", median_days: 3.1, count: 38 },
+      { stage: "STITCH_BONDING", median_days: 1.4, count: 33 },
+      { stage: "BONDED", median_days: 2.8, count: 31 },
+      { stage: "TESTED", median_days: 5.0, count: 29 },
+      { stage: "FINISHED", median_days: 12.0, count: 20 },
+    ],
+    rework: {
+      rate: 0.12,
+      reworked_components: 5,
+      total_components: 42,
+      by_stage: [
+        { stage: "GLUED", count: 3 },
+        { stage: "BONDED", count: 2 },
+        { stage: "TESTED", count: 1 },
+      ],
+    },
+    yield_: { good: 29, failed: 4, concluded: 33, in_progress: 9, rate: 0.879 },
+  };
 }
 
 export function makeDemoDashboardSummary(): DashboardSummary {

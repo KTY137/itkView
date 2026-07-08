@@ -18,6 +18,16 @@
   --crit: #d03b3b;
   --serious: #ec835a;
   --series: #2a78d6;
+  /* Ordered stage ramp: a cool→green "ripening" sequence for the assembly
+     flow. Green (--good) and red (--crit) stay reserved for FINISHED and
+     FAILED/TRASHED and are deliberately NOT part of the ramp. Lightness rises
+     monotonically toward the end so progress reads at a glance and survives
+     colour-vision deficiency. */
+  --stage-hv: #3f6fb3; /* HV-Tab Attached — blue (start) */
+  --stage-glue: #1f83b0; /* Glued — sky/cyan */
+  --stage-stitch: #0e8f96; /* Stitch bonding — cyan-teal */
+  --stage-bonded: #10997a; /* Bonded — teal */
+  --stage-tested: #1aa15e; /* Tested — teal-green (almost done) */
   --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
   --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --shadow: 0 1px 2px rgba(15, 18, 24, 0.06), 0 4px 14px rgba(15, 18, 24, 0.06);
@@ -39,6 +49,11 @@
     --warn: #d0a437;
     --warn-text: #e0bb55;
     --series: #3987e5;
+    --stage-hv: #6ba3e2;
+    --stage-glue: #46a7cf;
+    --stage-stitch: #33b3b8;
+    --stage-bonded: #35b892;
+    --stage-tested: #45bd77;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 4px 16px rgba(0, 0, 0, 0.3);
   }
 }
@@ -481,6 +496,27 @@ code {
   color: var(--good-text);
   border-color: var(--good);
 }
+/* Ordered assembly-stage ramp (blue → teal-green → [green = FINISHED]). */
+.chip.st-hv {
+  color: var(--stage-hv);
+  border-color: var(--stage-hv);
+}
+.chip.st-glue {
+  color: var(--stage-glue);
+  border-color: var(--stage-glue);
+}
+.chip.st-stitch {
+  color: var(--stage-stitch);
+  border-color: var(--stage-stitch);
+}
+.chip.st-bonded {
+  color: var(--stage-bonded);
+  border-color: var(--stage-bonded);
+}
+.chip.st-tested {
+  color: var(--stage-tested);
+  border-color: var(--stage-tested);
+}
 .chip.red {
   color: var(--crit);
   border-color: var(--crit);
@@ -488,6 +524,16 @@ code {
 .chip.muted {
   color: var(--muted);
   border-style: dashed;
+}
+.chip.stale {
+  color: var(--muted);
+  border-color: var(--muted);
+  border-style: dashed;
+}
+/* Stale rows (component gone from the PDB) read as faded, but their chips
+   keep full colour so the "stale" flag stays legible. */
+.row-click.is-stale td {
+  color: var(--muted);
 }
 .badge.warn {
   color: var(--warn-text);
@@ -829,9 +875,21 @@ code {
   gap: 8px;
   font-weight: 650;
   font-size: 13.5px;
+  min-width: 0; /* let the label shrink instead of pushing the badge out */
+}
+.card .nm-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .card .typ {
-  margin-left: auto;
+  flex: 0 0 auto; /* never shrink or overflow the frame */
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font: 600 10px var(--mono);
   color: var(--accent-hi);
   background: var(--accent-soft);
@@ -938,10 +996,116 @@ code {
   white-space: nowrap;
 }
 
+/* Statistics panel */
+.stats-filters .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.stage-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+.legend-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.legend-arrow {
+  color: var(--muted);
+  font: 12px var(--mono);
+}
+.legend-sep {
+  color: var(--line);
+  padding: 0 4px;
+}
+
+/* Scanned jig/tool auto-pull card */
+.scanned-tool {
+  border-left: 3px solid var(--accent);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.scanned-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.scanned-head .btn {
+  margin-left: auto;
+}
+.scanned-fits {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.metric-hint {
+  font: 11px var(--mono);
+  color: var(--muted);
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.hbars {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.hbar-row {
+  display: grid;
+  grid-template-columns: 150px 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+.hbar-track {
+  background: var(--track, rgba(127, 127, 127, 0.14));
+  border-radius: 5px;
+  height: 12px;
+  overflow: hidden;
+}
+.hbar-fill {
+  height: 100%;
+  min-width: 2px;
+  background: var(--series);
+  border-radius: 5px;
+}
+.hbar-val {
+  font: 600 11.5px var(--mono);
+  color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.hbar-n {
+  color: var(--muted);
+  font-weight: 400;
+}
+
 /* Stage tone accents (board cards + column headers) */
 .card[data-tone="good"] { border-left: 3px solid var(--good); }
 .card[data-tone="warn"] { border-left: 3px solid var(--warn); }
 .card[data-tone="crit"] { border-left: 3px solid var(--crit); }
+.card[data-tone="hv"] { border-left: 3px solid var(--stage-hv); }
+.card[data-tone="glue"] { border-left: 3px solid var(--stage-glue); }
+.card[data-tone="stitch"] { border-left: 3px solid var(--stage-stitch); }
+.card[data-tone="bonded"] { border-left: 3px solid var(--stage-bonded); }
+.card[data-tone="tested"] { border-left: 3px solid var(--stage-tested); }
 .col-h[data-tone="good"] .stg { color: var(--good-text); }
 .col-h[data-tone="warn"] .stg { color: var(--warn-text); }
 .col-h[data-tone="crit"] .stg { color: var(--crit); }
+.col-h[data-tone="hv"] .stg { color: var(--stage-hv); }
+.col-h[data-tone="glue"] .stg { color: var(--stage-glue); }
+.col-h[data-tone="stitch"] .stg { color: var(--stage-stitch); }
+.col-h[data-tone="bonded"] .stg { color: var(--stage-bonded); }
+.col-h[data-tone="tested"] .stg { color: var(--stage-tested); }

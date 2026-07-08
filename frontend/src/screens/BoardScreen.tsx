@@ -89,27 +89,47 @@ export default function BoardScreen({ onOpen }: { onOpen: (sn: string) => void }
                   <span className="n">{byStage(stage).length}</span>
                 </div>
                 <div className="col-list">
-                  {byStage(stage).map((m) => (
-                    <button
-                      type="button"
-                      className={m.trashed ? "card trashed" : "card"}
-                      data-tone={m.trashed ? "crit" : stageTone(stage)}
-                      key={m.sn}
-                      onClick={() => onOpen(m.sn)}
-                    >
-                      <div className="nm">
-                        {m.local_name ?? m.sn}
-                        <span className="typ">{m.type_code}</span>
-                      </div>
-                      <div className="sn">{m.sn}</div>
-                      {(m.is_dummy || m.trashed) && (
-                        <div className="row">
-                          {m.is_dummy && <span className="chip muted">{t.board.dummy}</span>}
-                          {m.trashed && <span className="chip red">{t.board.trashed}</span>}
+                  {byStage(stage).map((m) => {
+                    const movedAway = m.location !== "" && m.location !== m.institute_code;
+                    const hasFlags = m.is_dummy || m.stale || m.trashed || movedAway;
+                    return (
+                      <button
+                        type="button"
+                        className={
+                          "card" + (m.trashed ? " trashed" : "") + (m.stale ? " is-stale" : "")
+                        }
+                        data-tone={m.trashed ? "crit" : stageTone(stage)}
+                        key={m.sn}
+                        onClick={() => onOpen(m.sn)}
+                      >
+                        <div className="nm">
+                          <span className="nm-label" title={m.local_name ?? m.sn}>
+                            {m.local_name ?? m.sn}
+                          </span>
+                          <span className="typ" title={m.type_code}>
+                            {m.type_code}
+                          </span>
                         </div>
-                      )}
-                    </button>
-                  ))}
+                        <div className="sn">{m.sn}</div>
+                        {hasFlags && (
+                          <div className="row">
+                            {movedAway && (
+                              <span className="chip neutral" title={t.board.locationHint}>
+                                @{m.location}
+                              </span>
+                            )}
+                            {m.is_dummy && <span className="chip muted">{t.board.dummy}</span>}
+                            {m.stale && (
+                              <span className="chip stale" title={t.components.staleHint}>
+                                {t.board.stale}
+                              </span>
+                            )}
+                            {m.trashed && <span className="chip red">{t.board.trashed}</span>}
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             ))}

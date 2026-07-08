@@ -6,6 +6,7 @@ import BoardScreen from "./screens/BoardScreen";
 import ComponentsScreen from "./screens/ComponentsScreen";
 import DashboardScreen from "./screens/DashboardScreen";
 import OutboxScreen from "./screens/OutboxScreen";
+import StatisticsScreen from "./screens/StatisticsScreen";
 import ToolsScreen from "./screens/ToolsScreen";
 import TriageScreen from "./screens/TriageScreen";
 
@@ -23,6 +24,7 @@ const SCREENS = [
   { id: "triage", label: t.nav.triage, icon: "⇪" },
   { id: "outbox", label: t.nav.outbox, icon: "⇅" },
   { id: "dashboard", label: t.nav.dashboard, icon: "◔" },
+  { id: "statistics", label: t.nav.statistics, icon: "📈" },
 ] as const;
 
 const SITE_SCREENS = [{ id: "tools", label: t.nav.tools, icon: "⚒" }] as const;
@@ -222,6 +224,8 @@ export default function App() {
             <OutboxScreen />
           ) : screen === "tools" ? (
             <ToolsScreen />
+          ) : screen === "statistics" ? (
+            <StatisticsScreen />
           ) : (
             <DashboardScreen />
           )}

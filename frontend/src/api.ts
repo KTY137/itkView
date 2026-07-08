@@ -20,6 +20,7 @@ export type ComponentOut = {
   parent_sn: string | null;
   is_dummy: boolean;
   trashed: boolean;
+  stale: boolean;
   synced_at: string;
 };
 
@@ -50,6 +51,7 @@ export type ComponentSyncResult = {
   created: number;
   updated: number;
   unchanged: number;
+  stale: number;
   total: number;
 };
 
@@ -87,6 +89,63 @@ export type DashboardSummary = {
   by_component_type: CountBucket[];
   by_institute: CountBucket[];
   outbox_by_status: CountBucket[];
+};
+
+// ---- Statistics shapes ------------------------------------------------------
+
+export type ThroughputPoint = { period: string; count: number };
+
+export type LeadTime = {
+  count: number;
+  median_days: number | null;
+  p25_days: number | null;
+  p75_days: number | null;
+};
+
+export type StageDwell = { stage: string; median_days: number; count: number };
+
+export type Rework = {
+  rate: number;
+  reworked_components: number;
+  total_components: number;
+  by_stage: { stage: string; count: number }[];
+};
+
+export type Yield = {
+  good: number;
+  failed: number;
+  concluded: number;
+  in_progress: number;
+  rate: number | null;
+};
+
+export type ProductionStats = {
+  component_type: string | null;
+  type_code: string | null;
+  institute: string | null;
+  target_stage: string;
+  bucket: string;
+  components_tracked: number;
+  stage_order: string[];
+  throughput: ThroughputPoint[];
+  lead_time: LeadTime;
+  stage_dwell: StageDwell[];
+  rework: Rework;
+  yield_: Yield;
+};
+
+export type StatsDimensions = {
+  component_types: string[];
+  type_codes: string[];
+  institutes: string[];
+};
+
+export type ProductionStatsQuery = {
+  component_type?: string;
+  type_code?: string;
+  institute?: string;
+  target_stage?: string;
+  bucket?: string;
 };
 
 // ---- Outbox shapes -----------------------------------------------------------
@@ -334,8 +393,24 @@ export function getDashboardSummary(signal?: AbortSignal): Promise<DashboardSumm
   return request<DashboardSummary>("/api/dashboard/summary", { signal });
 }
 
+export function getProductionStats(
+  query: ProductionStatsQuery = {},
+  signal?: AbortSignal,
+): Promise<ProductionStats> {
+  return request<ProductionStats>(`/api/stats/production${queryString(query)}`, { signal });
+}
+
+export function getStatsDimensions(signal?: AbortSignal): Promise<StatsDimensions> {
+  return request<StatsDimensions>("/api/stats/dimensions", { signal });
+}
+
 export function getTools(query: ToolQuery = {}, signal?: AbortSignal): Promise<Tool[]> {
   return request<Tool[]>(`/api/tools${queryString(query)}`, { signal });
+}
+
+/** Resolve a scanned RFID or printed code to a single tool (404 if unknown). */
+export function scanTool(code: string, signal?: AbortSignal): Promise<Tool> {
+  return request<Tool>(`/api/tools/scan${queryString({ code })}`, { signal });
 }
 
 export function getOutboxContract(signal?: AbortSignal): Promise<OutboxContract> {
