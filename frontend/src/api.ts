@@ -387,6 +387,22 @@ export function getComponentStaged(sn: string, signal?: AbortSignal): Promise<Ou
   return request<OutboxAction[]>(`/api/components/${encodeURIComponent(sn)}/staged`, { signal });
 }
 
+export type EvidenceSyncResult = {
+  component_sn: string;
+  created: number;
+  updated: number;
+  unchanged: number;
+  total: number;
+};
+
+/** Mirror this component's PDB test-run results into local evidence. */
+export function postComponentSyncEvidence(sn: string): Promise<EvidenceSyncResult> {
+  return request<EvidenceSyncResult>(
+    `/api/components/${encodeURIComponent(sn)}/sync-evidence`,
+    { method: "POST" },
+  );
+}
+
 export function getStageSuggestion(sn: string, signal?: AbortSignal): Promise<StageSuggestion> {
   return request<StageSuggestion>(
     `/api/components/${encodeURIComponent(sn)}/stage-suggestion`,
