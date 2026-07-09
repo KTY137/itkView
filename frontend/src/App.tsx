@@ -96,6 +96,14 @@ export default function App() {
     setScreen("components");
   }
 
+  /** Primary/site nav click. Selecting "Components" also sends an empty nav
+   * intent so the screen drops any open component detail and shows the list —
+   * clicking the nav item that you're already on still resets it. */
+  function goToScreen(id: ScreenId) {
+    if (id === "components") setNav((prev) => ({ token: prev.token + 1 }));
+    setScreen(id);
+  }
+
   function handleScan(e: React.FormEvent) {
     e.preventDefault();
     const value = scanText.trim();
@@ -126,7 +134,7 @@ export default function App() {
               type="button"
               className="nav-btn"
               aria-current={screen === s.id ? "page" : undefined}
-              onClick={() => setScreen(s.id)}
+              onClick={() => goToScreen(s.id)}
             >
               <span className="ic" aria-hidden="true">
                 {s.icon}
@@ -142,7 +150,7 @@ export default function App() {
             type="button"
             className="nav-btn"
             aria-current={screen === s.id ? "page" : undefined}
-            onClick={() => setScreen(s.id)}
+            onClick={() => goToScreen(s.id)}
           >
             <span className="ic" aria-hidden="true">
               {s.icon}
