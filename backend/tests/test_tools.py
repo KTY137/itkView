@@ -6,7 +6,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth import hash_password
 from app.db import make_engine, make_session_factory
-from app.models import Tool, User
+from app.models import InstituteProfile, Tool, User
+from app.pdb_sync import FetchResult
+from app.sync import SyncRecord, sync_components
+from app.tool_sync import sync_tools_from_components
 
 
 def add_tool(session_factory: sessionmaker[Session], **kwargs) -> int:
@@ -33,6 +36,28 @@ def add_operator(session_factory, institute_id: int) -> tuple[str, str]:
         )
         session.commit()
     return email, password
+
+
+def tool_component(
+    sn: str = "20USERT0605004",
+    *,
+    local_name: str | None = "Glue_Stencil_R5H0_5004",
+    stage: str = "PRODUCED",
+    location: str = "TUDO",
+    institute_code: str = "FZU",
+) -> SyncRecord:
+    return SyncRecord(
+        sn=sn,
+        component_type="TOOLS",
+        type_code="UNKNOWN",
+        stage=stage,
+        location=location,
+        institute_code=institute_code,
+        local_name=local_name,
+        parent_sn=None,
+        is_dummy=False,
+        trashed=False,
+    )
 
 
 def test_list_tools_filters_by_kind_and_fitting_type(client: TestClient, session_factory):
@@ -64,14 +89,24 @@ def test_tool_by_rfid(client: TestClient, session_factory):
     assert client.get("/api/tools/by-rfid/UNKNOWN").status_code == 404
 
 
-def test_scan_tool_matches_rfid_or_code_case_insensitively(client: TestClient, session_factory):
-    add_tool(session_factory, kind="jig", code="HV-TAB-JIG-R5", rfid="E280-AA", compatible_types=[])
+def test_scan_tool_matches_rfid_code_or_label_case_insensitively(
+    client: TestClient, session_factory
+):
+    add_tool(
+        session_factory,
+        kind="jig",
+        code="HV-TAB-JIG-R5",
+        label="Glue_Stencil_R5H0_5004",
+        rfid="E280-AA",
+        compatible_types=[],
+    )
 
     def scan(code: str):
         return client.get("/api/tools/scan", params={"code": code})
 
     assert scan("e280-aa").json()["code"] == "HV-TAB-JIG-R5"  # by RFID
     assert scan("hv-tab-jig-r5").json()["rfid"] == "E280-AA"  # by printed code
+    assert scan("glue_stencil_r5h0_5004").json()["code"] == "HV-TAB-JIG-R5"  # label
     assert scan("nope").status_code == 404
     assert scan("  ").status_code == 422
 
@@ -97,6 +132,103 @@ def test_update_tool_can_blacklist(client: TestClient, session_factory, tudo):
     resp = client.patch(f"/api/tools/{tool_id}", json={"status": "blacklisted"})
     assert resp.status_code == 200
     assert resp.json()["status"] == "blacklisted"
+
+
+def test_tool_sync_imports_pdb_tools_from_component_mirror(client, session_factory, tudo):
+    with session_factory() as session:
+        sync_components(session, [tool_component()])
+        institute = session.get(InstituteProfile, tudo["id"])
+        stats = sync_tools_from_components(session, institute)
+        session.commit()
+
+    assert (stats.created, stats.updated, stats.unchanged, stats.skipped) == (1, 0, 0, 0)
+    tools = client.get("/api/tools", params={"kind": "jig", "fits": "R5H0"}).json()
+    assert len(tools) == 1
+    assert tools[0]["code"] == "20USERT0605004"
+    assert tools[0]["label"] == "Glue_Stencil_R5H0_5004"
+    assert tools[0]["status"] == "active"
+    assert tools[0]["institute_id"] == tudo["id"]
+
+
+def test_tool_sync_endpoint_uses_existing_mirror(client: TestClient, session_factory, tudo):
+    with session_factory() as session:
+        sync_components(
+            session,
+            [
+                tool_component("20USERT0607040", local_name="Test_Jig_7040"),
+                SyncRecord(
+                    sn="20USEM00000001",
+                    component_type="MODULE",
+                    type_code="R5M0",
+                    stage="GLUED",
+                    location="TUDO",
+                    institute_code="TUDO",
+                    local_name="TUDO-R5",
+                ),
+            ],
+        )
+        session.commit()
+
+    body = client.post("/api/sync/tools/TUDO").json()
+    assert body == {
+        "institute_code": "TUDO",
+        "created": 1,
+        "updated": 0,
+        "unchanged": 0,
+        "skipped": 0,
+        "total": 1,
+    }
+    assert client.get("/api/tools/scan", params={"code": "20USERT0607040"}).json()[
+        "kind"
+    ] == "jig"
+
+
+def test_tool_sync_extracts_side_suffixed_r_types(client: TestClient, session_factory, tudo):
+    with session_factory() as session:
+        sync_components(
+            session,
+            [tool_component("20USERT0205003", local_name="R2H0S_Module_Jig_01-003")],
+        )
+        institute = session.get(InstituteProfile, tudo["id"])
+        sync_tools_from_components(session, institute)
+        session.commit()
+
+    tool = client.get("/api/tools/scan", params={"code": "20USERT0205003"}).json()
+    assert tool["compatible_types"] == ["R2H0S"]
+
+
+def test_component_sync_auto_refreshes_tool_registry(client: TestClient, tudo):
+    client.app.state.component_fetcher = lambda settings, institute: FetchResult(
+        records=[tool_component("20USERT0606117", local_name="Bond_Jig_Large_6117")],
+        skipped=0,
+    )
+
+    resp = client.post("/api/sync/components/TUDO")
+    assert resp.status_code == 200, resp.text
+    tools = client.get("/api/tools", params={"kind": "jig"}).json()
+    assert {tool["code"] for tool in tools} == {"20USERT0606117"}
+
+
+def test_tool_sync_preserves_manual_blacklist(client: TestClient, session_factory, tudo):
+    add_tool(
+        session_factory,
+        kind="jig",
+        code="20USERT0605004",
+        label="old",
+        compatible_types=[],
+        institute_id=tudo["id"],
+        status="blacklisted",
+    )
+    with session_factory() as session:
+        sync_components(session, [tool_component()])
+        institute = session.get(InstituteProfile, tudo["id"])
+        sync_tools_from_components(session, institute)
+        session.commit()
+
+    tool = client.get("/api/tools/scan", params={"code": "20USERT0605004"}).json()
+    assert tool["label"] == "Glue_Stencil_R5H0_5004"
+    assert tool["compatible_types"] == ["R5H0"]
+    assert tool["status"] == "blacklisted"
 
 
 def test_seed_creates_type_tagged_demo_tools(tmp_path):

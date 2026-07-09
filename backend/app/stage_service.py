@@ -9,18 +9,28 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.stages import StageEvaluation, evaluate_stage, stage_model_from_settings
-from app.models import Component, InstituteProfile, OutboxAction
+from app.models import Component, InstituteProfile, OutboxAction, TestRunEvidence
 from app.outbox import OutboxStatus
 
 
 def satisfied_test_results(session: Session, sn: str) -> dict[str, bool]:
     """Map each test type uploaded for a component to whether it passed.
 
-    Source of truth is itkFlow's own confirmed uploads: every `upload_test_run`
-    outbox action that reached `confirmed`. Later runs of the same test type
-    win. A richer source (a PDB test-run mirror) can replace this without
-    touching the suggestion engine.
+    Sources are mirrored test-run evidence plus itkFlow's own confirmed
+    uploads. Confirmed local uploads are applied after external evidence, so a
+    freshly confirmed outbox action can satisfy the workflow immediately even
+    before the next PDB mirror sync.
     """
+    results: dict[str, bool] = {}
+    evidence_rows = session.scalars(
+        select(TestRunEvidence)
+        .where(TestRunEvidence.component_sn == sn)
+        .order_by(TestRunEvidence.measured_at, TestRunEvidence.synced_at, TestRunEvidence.id)
+    )
+    for row in evidence_rows:
+        if row.test_type:
+            results[row.test_type] = bool(row.passed)
+
     actions = session.scalars(
         select(OutboxAction)
         .where(
@@ -29,7 +39,6 @@ def satisfied_test_results(session: Session, sn: str) -> dict[str, bool]:
         )
         .order_by(OutboxAction.updated_at, OutboxAction.id)
     )
-    results: dict[str, bool] = {}
     for action in actions:
         payload = action.payload or {}
         if payload.get("component_sn") != sn:

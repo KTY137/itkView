@@ -57,6 +57,15 @@ class ComponentSyncOut(BaseModel):
     total: int
 
 
+class ToolSyncOut(BaseModel):
+    institute_code: str
+    created: int
+    updated: int
+    unchanged: int
+    skipped: int
+    total: int
+
+
 class RequirementCheckOut(BaseModel):
     stage: str
     test_type: str
@@ -81,7 +90,14 @@ class CountBucket(BaseModel):
 class DashboardSummaryOut(BaseModel):
     total_components: int
     last_synced_at: datetime | None
+    oldest_synced_at: datetime | None
+    stale_components: int
+    trashed_components: int
+    required_test_gaps: int
+    components_with_test_gaps: int
     submitted_outbox: int
+    approved_outbox: int
+    review_outbox: int
     failed_outbox: int
     by_stage: list[CountBucket]
     by_component_type: list[CountBucket]

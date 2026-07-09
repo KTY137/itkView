@@ -17,16 +17,28 @@ from app.outbox_worker import Submitter, WorkerStats, process_due_actions
 from app.pdb_submit import make_pdb_submitter
 
 
-def run_once(session_factory, submitter: Submitter) -> WorkerStats:
+def run_once(
+    session_factory,
+    submitter: Submitter,
+    *,
+    max_attempts: int = 5,
+    retry_backoff_seconds: int = 60,
+) -> WorkerStats:
     with session_factory() as session:
-        return process_due_actions(session, submitter)
+        return process_due_actions(
+            session,
+            submitter,
+            max_attempts=max_attempts,
+            retry_backoff_seconds=retry_backoff_seconds,
+        )
 
 
 def _log(stats: WorkerStats) -> None:
     if stats.total:
         print(
             f"[outbox-worker] confirmed={stats.confirmed} rejected={stats.rejected} "
-            f"unavailable={stats.unavailable} revalidation_failed={stats.revalidation_failed}",
+            f"unavailable={stats.unavailable} revalidation_failed={stats.revalidation_failed} "
+            f"attempt_limit_reached={stats.attempt_limit_reached}",
             flush=True,
         )
 
@@ -46,7 +58,14 @@ def main(argv: list[str] | None = None, settings: Settings | None = None) -> Non
     submitter = make_pdb_submitter(settings)
 
     if args.once:
-        _log(run_once(session_factory, submitter))
+        _log(
+            run_once(
+                session_factory,
+                submitter,
+                max_attempts=settings.worker_max_attempts,
+                retry_backoff_seconds=settings.worker_retry_backoff_seconds,
+            )
+        )
         return
 
     print(
@@ -55,7 +74,14 @@ def main(argv: list[str] | None = None, settings: Settings | None = None) -> Non
         flush=True,
     )
     while True:
-        _log(run_once(session_factory, submitter))
+        _log(
+            run_once(
+                session_factory,
+                submitter,
+                max_attempts=settings.worker_max_attempts,
+                retry_backoff_seconds=settings.worker_retry_backoff_seconds,
+            )
+        )
         time.sleep(settings.worker_poll_seconds)
 
 

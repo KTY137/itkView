@@ -27,3 +27,6 @@ references/
 # OS / editor noise
 .DS_Store
 Thumbs.db
+
+# Dev-server logs
+*.log

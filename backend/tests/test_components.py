@@ -308,7 +308,14 @@ def test_dashboard_summary_empty(client: TestClient):
     assert body == {
         "total_components": 0,
         "last_synced_at": None,
+        "oldest_synced_at": None,
+        "stale_components": 0,
+        "trashed_components": 0,
+        "required_test_gaps": 0,
+        "components_with_test_gaps": 0,
         "submitted_outbox": 0,
+        "approved_outbox": 0,
+        "review_outbox": 0,
         "failed_outbox": 0,
         "by_stage": [],
         "by_component_type": [],
@@ -353,7 +360,14 @@ def test_dashboard_summary_counts_components_and_outbox(
 
     assert body["total_components"] == 18
     assert body["last_synced_at"] is not None
+    assert body["oldest_synced_at"] is not None
+    assert body["stale_components"] == 0
+    assert body["trashed_components"] == 1
+    assert body["required_test_gaps"] == 19
+    assert body["components_with_test_gaps"] == 4
     assert body["submitted_outbox"] == 0
+    assert body["approved_outbox"] == 0
+    assert body["review_outbox"] == 2
     assert body["failed_outbox"] == 1
     assert {"label": "TUDO", "count": 18} in body["by_institute"]
     assert {"label": "MODULE", "count": 5} in body["by_component_type"]
