@@ -3,7 +3,9 @@ import type { FormEvent } from "react";
 import type { NavIntent, ScreenId } from "../App";
 import {
   ApiError,
+  componentImageUrl,
   getComponent,
+  getComponentImages,
   getComponents,
   getInstitutes,
   getStageSuggestion,
@@ -13,6 +15,7 @@ import {
 } from "../api";
 import type {
   ComponentDetail,
+  ComponentImage,
   ComponentOut,
   Institute,
   RequirementCheck,
@@ -707,9 +710,73 @@ function ComponentDetailPanel({
               </div>
             </>
           )}
+          <ImagesSection sn={detail.sn} />
         </div>
       </div>
     </div>
+  );
+}
+
+/** Metrology / visual-inspection images for a component, pulled from the PDB.
+ * Best-effort: shows a thumbnail grid with a click-to-enlarge lightbox, an
+ * empty state, and a gentle offline hint when the backend is not reachable. */
+function ImagesSection({ sn }: { sn: string }) {
+  const [images, setImages] = useState<ComponentImage[]>([]);
+  const [offline, setOffline] = useState(false);
+  const [lightbox, setLightbox] = useState<ComponentImage | null>(null);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setImages([]);
+    setOffline(false);
+    setLightbox(null);
+    getComponentImages(sn, ctrl.signal)
+      .then(setImages)
+      .catch((err: unknown) => {
+        if (ctrl.signal.aborted) return;
+        if (err instanceof ApiError && err.isNetwork) setOffline(true);
+      });
+    return () => ctrl.abort();
+  }, [sn]);
+
+  return (
+    <>
+      <h3 className="section-title">{t.images.title}</h3>
+      <div className="panel">
+        {offline ? (
+          <p className="state-note">{t.images.offlineHint}</p>
+        ) : images.length === 0 ? (
+          <p className="state-note">{t.images.empty}</p>
+        ) : (
+          <div className="img-grid">
+            {images.map((img) => (
+              <button
+                type="button"
+                className="img-thumb"
+                key={img.id}
+                title={img.test_type ?? img.title}
+                onClick={() => setLightbox(img)}
+              >
+                <img src={componentImageUrl(sn, img.id)} alt={img.title || t.images.untitled} />
+                {img.test_type !== null && <span className="img-tag">{img.test_type}</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {lightbox !== null && (
+        <div className="img-lightbox" role="dialog" aria-modal="true" onClick={() => setLightbox(null)}>
+          <button type="button" className="img-lightbox-close" aria-label={t.images.close}>
+            ×
+          </button>
+          <img src={componentImageUrl(sn, lightbox.id)} alt={lightbox.title || t.images.untitled} />
+          <div className="img-lightbox-cap">
+            {lightbox.test_type ? `${lightbox.test_type} · ` : ""}
+            {lightbox.filename ?? lightbox.title}
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

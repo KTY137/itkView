@@ -352,3 +352,14 @@ class StatsDimensionsOut(BaseModel):
     component_types: list[str]
     type_codes: list[str]
     institutes: list[str]
+
+
+# --- Component image attachments (metrology / VI, read-only) ----------------
+
+
+class ComponentImageOut(BaseModel):
+    id: str
+    title: str
+    test_type: str | None
+    filename: str | None
+    content_type: str | None
