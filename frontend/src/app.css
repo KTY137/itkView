@@ -1041,6 +1041,20 @@ code {
   border-radius: 2px;
   background: #fff;
 }
+.hbar-icon {
+  flex: 0 0 32px;
+  width: 32px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  color: var(--accent-hi);
+  font: 700 9px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
 /* Bars take their category tone (stage ramp / status); default = series hue. */
 .hbar-fill[data-tone="good"] { background: var(--good); }
 .hbar-fill[data-tone="warn"] { background: var(--warn); }
@@ -1053,6 +1067,7 @@ code {
 /* Metric tile accent (e.g. failed outbox draws a red edge) */
 .metric-tile[data-tone="crit"] { border-left: 3px solid var(--crit); }
 .metric-tile[data-tone="good"] { border-left: 3px solid var(--good); }
+.metric-tile[data-tone="warn"] { border-left: 3px solid var(--warn); }
 .legend-row {
   display: flex;
   flex-wrap: wrap;

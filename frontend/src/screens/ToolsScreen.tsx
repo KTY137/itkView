@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { ApiError, getTools, scanTool } from "../api";
-import type { Tool } from "../api";
+import { ApiError, getInstitutes, getTools, postToolSync, scanTool } from "../api";
+import type { Institute, Tool } from "../api";
 import { filterDemoTools, scanDemoTool } from "../demoData";
 import { t } from "../i18n";
 
@@ -36,6 +36,25 @@ export default function ToolsScreen() {
   const [scanText, setScanText] = useState("");
   const [scanned, setScanned] = useState<Tool | null>(null);
   const [scanMiss, setScanMiss] = useState<string | null>(null);
+  const [institutes, setInstitutes] = useState<Institute[]>([]);
+  const [selectedInstitute, setSelectedInstitute] = useState("");
+  const [syncing, setSyncing] = useState(false);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    getInstitutes(ctrl.signal)
+      .then((data) => {
+        setInstitutes(data);
+        setSelectedInstitute((current) => {
+          if (current !== "" && data.some((i) => i.code === current)) return current;
+          return data[0]?.code ?? "";
+        });
+      })
+      .catch(() => setInstitutes([]));
+    return () => ctrl.abort();
+  }, []);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -58,7 +77,7 @@ export default function ToolsScreen() {
         setLoading(false);
       });
     return () => ctrl.abort();
-  }, [kind, fits]);
+  }, [kind, fits, reloadKey]);
 
   async function handleScan(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -82,6 +101,37 @@ export default function ToolsScreen() {
       setScanMiss(t.tools.scanNotFound(code));
     }
   }
+
+  async function handleMirrorSync() {
+    if (selectedInstitute === "") {
+      setSyncNotice(t.tools.syncNeedsInstitute);
+      return;
+    }
+    setSyncing(true);
+    setSyncNotice(null);
+    try {
+      const result = await postToolSync(selectedInstitute);
+      setSyncNotice(
+        t.tools.syncComplete(
+          result.institute_code,
+          result.created,
+          result.updated,
+          result.unchanged,
+          result.skipped,
+        ),
+      );
+      setReloadKey((key) => key + 1);
+    } catch (err) {
+      setSyncNotice(`${t.tools.syncFailed}: ${errorMessage(err)}`);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  const kindOptions = [...new Set([...KINDS, ...tools.map((tool) => tool.kind)])].sort();
+  const typeOptions = [
+    ...new Set([...MODULE_TYPES, ...tools.flatMap((tool) => tool.compatible_types)]),
+  ].sort();
 
   return (
     <div className="screen">
@@ -110,6 +160,47 @@ export default function ToolsScreen() {
         </div>
       )}
       {scanned !== null && <ScannedToolCard tool={scanned} onClear={() => setScanned(null)} />}
+      {!demo && (
+        <div className="panel compact-panel">
+          <div className="toolbar">
+            <label className="control-label" htmlFor="tool-sync-institute">
+              {t.tools.instituteLabel}
+            </label>
+            <select
+              id="tool-sync-institute"
+              className="select-input"
+              value={selectedInstitute}
+              onChange={(e) => setSelectedInstitute(e.target.value)}
+            >
+              {institutes.length === 0 ? (
+                <option value="">{t.tools.noInstitutes}</option>
+              ) : (
+                institutes.map((institute) => (
+                  <option key={institute.code} value={institute.code}>
+                    {institute.code} - {institute.name}
+                  </option>
+                ))
+              )}
+            </select>
+            <button
+              type="button"
+              className="btn"
+              disabled={syncing || selectedInstitute === ""}
+              onClick={() => void handleMirrorSync()}
+            >
+              {syncing ? t.common.loading : t.tools.syncFromMirror}
+            </button>
+          </div>
+          {syncNotice !== null && (
+            <div className="info-banner" role="status">
+              <span>{syncNotice}</span>
+              <button type="button" className="btn" onClick={() => setSyncNotice(null)}>
+                OK
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       <div className="toolbar">
         <select
           className="select-input"
@@ -118,7 +209,7 @@ export default function ToolsScreen() {
           aria-label={t.tools.kindLabel}
         >
           <option value="">{t.tools.allKinds}</option>
-          {KINDS.map((k) => (
+          {kindOptions.map((k) => (
             <option key={k} value={k}>
               {k}
             </option>
@@ -131,7 +222,7 @@ export default function ToolsScreen() {
           aria-label={t.tools.fitsLabel}
         >
           <option value="">{t.tools.allTypes}</option>
-          {MODULE_TYPES.map((m) => (
+          {typeOptions.map((m) => (
             <option key={m} value={m}>
               {t.tools.fitsLabel}: {m}
             </option>
@@ -156,6 +247,7 @@ export default function ToolsScreen() {
               <tr>
                 <th scope="col">{t.tools.colKind}</th>
                 <th scope="col">{t.tools.colCode}</th>
+                <th scope="col">{t.tools.colLabel}</th>
                 <th scope="col">{t.tools.colRfid}</th>
                 <th scope="col">{t.tools.colFits}</th>
                 <th scope="col">{t.tools.colStatus}</th>
@@ -166,6 +258,7 @@ export default function ToolsScreen() {
                 <tr key={tool.id}>
                   <td>{tool.kind}</td>
                   <td className="mono">{tool.code}</td>
+                  <td>{tool.label ?? t.common.none}</td>
                   <td className="mono muted">{tool.rfid ?? t.common.none}</td>
                   <td>
                     <div className="row-actions">
@@ -204,6 +297,7 @@ function ScannedToolCard({ tool, onClear }: { tool: Tool; onClear: () => void })
       <div className="field-grid">
         <Field label={t.tools.scanKind} value={tool.kind} />
         <Field label={t.tools.scanCode} value={tool.code} mono />
+        <Field label={t.tools.scanLabelText} value={tool.label ?? t.common.none} />
         <Field label={t.tools.scanRfid} value={tool.rfid ?? t.common.none} mono />
         <Field label={t.tools.scanStatus} value={tool.status} />
       </div>
