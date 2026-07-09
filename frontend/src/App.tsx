@@ -35,12 +35,12 @@ const SOON = [
   { label: t.nav.reminders, icon: "✉" },
 ] as const;
 
-type ScreenId =
+export type ScreenId =
   | (typeof SCREENS)[number]["id"]
   | (typeof SITE_SCREENS)[number]["id"];
 
 /** Cross-screen navigation intent (open a component, or seed the search). */
-export type NavIntent = { token: number; sn?: string; q?: string };
+export type NavIntent = { token: number; sn?: string; q?: string; returnTo?: ScreenId };
 
 export default function App() {
   const [screen, setScreen] = useState<ScreenId>("board");
@@ -215,9 +215,9 @@ export default function App() {
 
         <div className="content">
           {screen === "board" ? (
-            <BoardScreen onOpen={(sn) => navigateTo({ sn })} />
+            <BoardScreen onOpen={(sn) => navigateTo({ sn, returnTo: "board" })} />
           ) : screen === "components" ? (
-            <ComponentsScreen nav={nav} />
+            <ComponentsScreen nav={nav} onNavigate={(target) => setScreen(target)} />
           ) : screen === "triage" ? (
             <TriageScreen />
           ) : screen === "outbox" ? (

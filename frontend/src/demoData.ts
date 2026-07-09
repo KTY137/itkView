@@ -320,11 +320,11 @@ export function makeDemoIngestFiles(): IngestFile[] {
 }
 
 const DEMO_TOOLS: Tool[] = [
-  { kind: "jig", code: "HV-TAB-JIG-R5", rfid: "E28011700000000000000001", compatible_types: ["R5M0", "R5M1"] },
-  { kind: "jig", code: "HV-TAB-JIG-R2", rfid: "E28011700000000000000002", compatible_types: ["R2"] },
-  { kind: "pickup_tool", code: "PICKUP-R5", rfid: "E28011700000000000000003", compatible_types: ["R5M0", "R5M1"] },
-  { kind: "pickup_tool", code: "PICKUP-R2", rfid: "E28011700000000000000004", compatible_types: ["R2"] },
-  { kind: "panel", code: "GLUE-PANEL-R5-01", rfid: null, compatible_types: ["R5M0", "R5M1"] },
+  { kind: "jig", code: "HV-TAB-JIG-R5", label: "HV tab jig R5", rfid: "E28011700000000000000001", compatible_types: ["R5M0", "R5M1"] },
+  { kind: "jig", code: "HV-TAB-JIG-R2", label: "HV tab jig R2", rfid: "E28011700000000000000002", compatible_types: ["R2"] },
+  { kind: "pickup_tool", code: "PICKUP-R5", label: "Pickup R5", rfid: "E28011700000000000000003", compatible_types: ["R5M0", "R5M1"] },
+  { kind: "pickup_tool", code: "PICKUP-R2", label: "Pickup R2", rfid: "E28011700000000000000004", compatible_types: ["R2"] },
+  { kind: "panel", code: "GLUE-PANEL-R5-01", label: "Glue panel R5", rfid: null, compatible_types: ["R5M0", "R5M1"] },
 ].map((spec, index) => ({
   id: 900 + index,
   institute_id: 1,
@@ -433,7 +433,14 @@ export function makeDemoDashboardSummary(): DashboardSummary {
   return {
     total_components: DEMO_COMPONENTS.length,
     last_synced_at: SYNCED,
+    oldest_synced_at: "2026-07-08T05:22:00Z",
+    stale_components: DEMO_COMPONENTS.filter((c) => c.stale).length,
+    trashed_components: DEMO_COMPONENTS.filter((c) => c.trashed).length,
+    required_test_gaps: 8,
+    components_with_test_gaps: 3,
     submitted_outbox: outbox.filter((a) => a.status === "submitted").length,
+    approved_outbox: outbox.filter((a) => a.status === "approved").length,
+    review_outbox: outbox.filter((a) => a.status === "draft" || a.status === "validated").length,
     failed_outbox: outbox.filter((a) => a.status === "failed").length,
     by_stage: orderBuckets(buckets(DEMO_COMPONENTS.map((c) => c.stage)), DEMO_STAGE_ORDER),
     by_component_type: buckets(DEMO_COMPONENTS.map((c) => c.component_type)),

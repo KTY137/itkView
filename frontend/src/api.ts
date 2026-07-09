@@ -83,7 +83,14 @@ export type CountBucket = {
 export type DashboardSummary = {
   total_components: number;
   last_synced_at: string | null;
+  oldest_synced_at: string | null;
+  stale_components: number;
+  trashed_components: number;
+  required_test_gaps: number;
+  components_with_test_gaps: number;
   submitted_outbox: number;
+  approved_outbox: number;
+  review_outbox: number;
   failed_outbox: number;
   by_stage: CountBucket[];
   by_component_type: CountBucket[];
@@ -265,6 +272,7 @@ export type Tool = {
   id: number;
   kind: string;
   code: string;
+  label: string | null;
   rfid: string | null;
   compatible_types: string[];
   institute_id: number | null;
@@ -273,6 +281,15 @@ export type Tool = {
 };
 
 export type ToolQuery = { kind?: string; fits?: string; status?: string };
+
+export type ToolSyncResult = {
+  institute_code: string;
+  created: number;
+  updated: number;
+  unchanged: number;
+  skipped: number;
+  total: number;
+};
 
 // ---- Error handling ----------------------------------------------------------
 
@@ -411,6 +428,12 @@ export function getTools(query: ToolQuery = {}, signal?: AbortSignal): Promise<T
 /** Resolve a scanned RFID or printed code to a single tool (404 if unknown). */
 export function scanTool(code: string, signal?: AbortSignal): Promise<Tool> {
   return request<Tool>(`/api/tools/scan${queryString({ code })}`, { signal });
+}
+
+export function postToolSync(instituteCode: string): Promise<ToolSyncResult> {
+  return request<ToolSyncResult>(`/api/sync/tools/${encodeURIComponent(instituteCode)}`, {
+    method: "POST",
+  });
 }
 
 export function getOutboxContract(signal?: AbortSignal): Promise<OutboxContract> {

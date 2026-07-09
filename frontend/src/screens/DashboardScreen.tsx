@@ -11,7 +11,8 @@ function errorMessage(err: unknown): string {
 }
 
 type Tone = string;
-type Row = { label: string; count: number; tone?: Tone; logo?: string };
+type InstituteBrand = { logo?: string; icon: string };
+type Row = { label: string; count: number; tone?: Tone; logo?: string; icon?: string };
 
 export default function DashboardScreen() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -19,22 +20,32 @@ export default function DashboardScreen() {
   const [error, setError] = useState<string | null>(null);
   const [demo, setDemo] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const [logos, setLogos] = useState<Record<string, string>>({});
+  const [instituteBrands, setInstituteBrands] = useState<Record<string, InstituteBrand>>({});
 
-  // Institute logos are profile data (hard rule #4) — map each code to its
-  // configured logo_url so the "by institute" bars can carry the branding.
+  // Institute branding is profile data (hard rule #4).
+  // logo_url or compact icon text; otherwise the code becomes a neutral badge.
   useEffect(() => {
     const ctrl = new AbortController();
     getInstitutes(ctrl.signal)
       .then((list) => {
-        const map: Record<string, string> = {};
+        const map: Record<string, InstituteBrand> = {};
         for (const inst of list) {
-          const url = inst.settings?.logo_url;
-          if (typeof url === "string" && url !== "") map[inst.code] = url;
+          map[inst.code] = {
+            logo: stringSetting(inst.settings, "logo_url", "logoUrl"),
+            icon: normalizeInstituteIcon(
+              stringSetting(
+                inst.settings,
+                "dashboard_icon",
+                "icon_text",
+                "short_code",
+                "icon",
+              ) ?? inst.code,
+            ),
+          };
         }
-        setLogos(map);
+        setInstituteBrands(map);
       })
-      .catch(() => setLogos({}));
+      .catch(() => setInstituteBrands({}));
     return () => ctrl.abort();
   }, []);
 
@@ -115,7 +126,49 @@ export default function DashboardScreen() {
             summary.last_synced_at === null ? undefined : formatTimestamp(summary.last_synced_at)
           }
         />
-        <Metric label={t.dashboard.submittedOutbox} value={formatCount(summary.submitted_outbox)} />
+        <Metric
+          label={t.dashboard.oldestSync}
+          value={
+            summary.oldest_synced_at === null
+              ? t.dashboard.noSyncYet
+              : formatRelative(summary.oldest_synced_at)
+          }
+          title={
+            summary.oldest_synced_at === null ? undefined : formatTimestamp(summary.oldest_synced_at)
+          }
+          tone={summary.stale_components > 0 ? "warn" : undefined}
+        />
+        <Metric
+          label={t.dashboard.requiredTestGaps}
+          value={formatCount(summary.required_test_gaps)}
+          hint={t.dashboard.requiredTestGapHint(summary.components_with_test_gaps)}
+          tone={summary.required_test_gaps > 0 ? "warn" : undefined}
+        />
+        <Metric
+          label={t.dashboard.staleComponents}
+          value={formatCount(summary.stale_components)}
+          tone={summary.stale_components > 0 ? "warn" : undefined}
+        />
+        <Metric
+          label={t.dashboard.trashedComponents}
+          value={formatCount(summary.trashed_components)}
+          tone={summary.trashed_components > 0 ? "crit" : undefined}
+        />
+        <Metric
+          label={t.dashboard.reviewOutbox}
+          value={formatCount(summary.review_outbox)}
+          tone={summary.review_outbox > 0 ? "warn" : undefined}
+        />
+        <Metric
+          label={t.dashboard.approvedOutbox}
+          value={formatCount(summary.approved_outbox)}
+          tone={summary.approved_outbox > 0 ? "warn" : undefined}
+        />
+        <Metric
+          label={t.dashboard.submittedOutbox}
+          value={formatCount(summary.submitted_outbox)}
+          tone={summary.submitted_outbox > 0 ? "warn" : undefined}
+        />
         <Metric
           label={t.dashboard.failedOutbox}
           value={formatCount(summary.failed_outbox)}
@@ -143,7 +196,11 @@ export default function DashboardScreen() {
         <section className="chart-card">
           <h2>{t.dashboard.byInstitute}</h2>
           <ToneBars
-            rows={summary.by_institute.map((b) => ({ ...b, logo: logos[b.label] }))}
+            rows={summary.by_institute.map((b) => ({
+              ...b,
+              logo: instituteBrands[b.label]?.logo,
+              icon: instituteBrands[b.label]?.icon ?? normalizeInstituteIcon(b.label),
+            }))}
             empty={t.dashboard.empty}
           />
         </section>
@@ -159,11 +216,42 @@ function topN(buckets: CountBucket[], n: number): Row[] {
   return rest > 0 ? [...head, { label: `+${buckets.length - n} other`, count: rest }] : head;
 }
 
-function Metric({ label, value, title, tone }: { label: string; value: string; title?: string; tone?: string }) {
+function stringSetting(settings: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = settings[key];
+    if (typeof value === "string" && value.trim() !== "") return value.trim();
+  }
+  return undefined;
+}
+
+function normalizeInstituteIcon(value: string): string {
+  const clean = value.trim().toUpperCase();
+  if (clean === "") return "?";
+  if (clean.length <= 5) return clean;
+  const parts = clean.split(/[^A-Z0-9]+/).filter(Boolean);
+  if (parts.length > 1) return parts.map((part) => part[0]).join("").slice(0, 5);
+  const compact = clean.replace(/[^A-Z0-9]/g, "");
+  return compact === "" ? "?" : compact.slice(0, 5);
+}
+
+function Metric({
+  label,
+  value,
+  title,
+  tone,
+  hint,
+}: {
+  label: string;
+  value: string;
+  title?: string;
+  tone?: string;
+  hint?: string;
+}) {
   return (
     <div className="metric-tile" data-tone={tone} title={title}>
       <div className="field-label">{label}</div>
       <div className="metric-value">{value}</div>
+      {hint !== undefined && <div className="metric-hint">{hint}</div>}
     </div>
   );
 }
@@ -184,7 +272,15 @@ function ToneBars({ rows, empty }: { rows: Row[]; empty: string }) {
       {rows.map((r) => (
         <div className="hbar-row" key={r.label}>
           <span className="hbar-cat" title={r.label}>
-            {r.logo !== undefined && <img className="hbar-logo" src={r.logo} alt="" />}
+            {r.logo !== undefined ? (
+              <img className="hbar-logo" src={r.logo} alt="" />
+            ) : (
+              r.icon !== undefined && (
+                <span className="hbar-icon" aria-hidden="true">
+                  {r.icon}
+                </span>
+              )
+            )}
             <span className="hbar-cat-text">{r.label}</span>
           </span>
           <div className="hbar-track">

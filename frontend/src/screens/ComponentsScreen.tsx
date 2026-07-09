@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import type { NavIntent } from "../App";
+import type { NavIntent, ScreenId } from "../App";
 import {
   ApiError,
   getComponent,
@@ -73,7 +73,13 @@ function pickScanTarget(rows: ComponentOut[], needle: string): ComponentOut | un
   return exact ?? (rows.length === 1 ? rows[0] : undefined);
 }
 
-export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
+export default function ComponentsScreen({
+  nav,
+  onNavigate,
+}: {
+  nav?: NavIntent;
+  onNavigate?: (screen: ScreenId) => void;
+}) {
   const [q, setQ] = useState("");
   const [stage, setStage] = useState("");
   const [rows, setRows] = useState<ComponentOut[]>([]);
@@ -86,6 +92,7 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
   const [sortBy, setSortBy] = useState("default");
   const [staleFilter, setStaleFilter] = useState("all");
   const [selectedSn, setSelectedSn] = useState<string | null>(null);
+  const [detailReturnTo, setDetailReturnTo] = useState<ScreenId | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [institutes, setInstitutes] = useState<Institute[]>([]);
   const [selectedInstitute, setSelectedInstitute] = useState("");
@@ -106,8 +113,10 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
     if (navToken === 0 || nav === undefined) return;
     if (nav.sn !== undefined) {
       setSelectedSn(nav.sn);
+      setDetailReturnTo(nav.returnTo ?? null);
     } else if (nav.q !== undefined) {
       setSelectedSn(null);
+      setDetailReturnTo(null);
       setQ(nav.q);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -186,15 +195,29 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
         institute: selectedInstitute || undefined,
       });
       const target = pickScanTarget(data, needle);
-      if (target !== undefined) setSelectedSn(target.sn);
+      if (target !== undefined) openFromList(target.sn);
     } catch (err) {
       if (err instanceof ApiError && err.isNetwork) {
         const target = pickScanTarget(
           filterDemoComponents(needle, stage, selectedInstitute),
           needle,
         );
-        if (target !== undefined) setSelectedSn(target.sn);
+        if (target !== undefined) openFromList(target.sn);
       }
+    }
+  }
+
+  function openFromList(sn: string) {
+    setDetailReturnTo(null);
+    setSelectedSn(sn);
+  }
+
+  function handleDetailBack() {
+    const target = detailReturnTo;
+    setSelectedSn(null);
+    setDetailReturnTo(null);
+    if (target !== null && target !== "components" && onNavigate !== undefined) {
+      onNavigate(target);
     }
   }
 
@@ -261,7 +284,10 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
     return (
       <ComponentDetailPanel
         sn={selectedSn}
-        onBack={() => setSelectedSn(null)}
+        backLabel={
+          detailReturnTo === "board" ? t.components.backToBoard : t.components.backToList
+        }
+        onBack={handleDetailBack}
         onOpen={setSelectedSn}
       />
     );
@@ -467,7 +493,7 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
                   className={
                     "row-click" + (c.trashed ? " trashed" : "") + (c.stale ? " is-stale" : "")
                   }
-                  onClick={() => setSelectedSn(c.sn)}
+                  onClick={() => openFromList(c.sn)}
                 >
                   <td>
                     <div className="tree-row">
@@ -475,7 +501,7 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
                         className="link-btn"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setSelectedSn(c.sn);
+                          openFromList(c.sn);
                         }}
                       >
                         {c.local_name ?? c.sn}
@@ -507,10 +533,12 @@ export default function ComponentsScreen({ nav }: { nav?: NavIntent }) {
 
 function ComponentDetailPanel({
   sn,
+  backLabel,
   onBack,
   onOpen,
 }: {
   sn: string;
+  backLabel: string;
   onBack: () => void;
   onOpen: (sn: string) => void;
 }) {
@@ -568,7 +596,7 @@ function ComponentDetailPanel({
   const toolbar = (
     <div className="toolbar">
       <button className="btn" onClick={onBack}>
-        {t.components.backToList}
+        {backLabel}
       </button>
       {demo && <span className="badge warn">{t.common.demoBadge}</span>}
     </div>
