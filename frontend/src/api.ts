@@ -365,6 +365,23 @@ export function getComponent(sn: string, signal?: AbortSignal): Promise<Componen
   return request<ComponentDetail>(`/api/components/${encodeURIComponent(sn)}`, { signal });
 }
 
+export type ComponentImage = {
+  id: string;
+  title: string;
+  test_type: string | null;
+  filename: string | null;
+  content_type: string | null;
+};
+
+export function getComponentImages(sn: string, signal?: AbortSignal): Promise<ComponentImage[]> {
+  return request<ComponentImage[]>(`/api/components/${encodeURIComponent(sn)}/images`, { signal });
+}
+
+/** URL of one image's binary (streamed by the backend from the PDB). */
+export function componentImageUrl(sn: string, id: string): string {
+  return `/api/components/${encodeURIComponent(sn)}/images/${encodeURIComponent(id)}`;
+}
+
 export function getStageSuggestion(sn: string, signal?: AbortSignal): Promise<StageSuggestion> {
   return request<StageSuggestion>(
     `/api/components/${encodeURIComponent(sn)}/stage-suggestion`,

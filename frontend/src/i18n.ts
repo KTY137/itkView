@@ -258,6 +258,13 @@ const en = {
     previewWarnings: "Warnings",
     previewResults: "Results",
   },
+  images: {
+    title: "Metrology & inspection images",
+    empty: "No images for this component.",
+    offlineHint: "Images load from the PDB when the backend is connected.",
+    untitled: "image",
+    close: "Close",
+  },
   tools: {
     loadError: "Could not load the tool registry",
     empty: "No tools match the current filter.",

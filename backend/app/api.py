@@ -41,6 +41,7 @@ from app.pdb_sync import PdbSyncUnavailable
 from app.schemas import (
     AuditOut,
     ComponentDetailOut,
+    ComponentImageOut,
     ComponentOut,
     ComponentSyncOut,
     CountBucket,
@@ -966,3 +967,40 @@ def list_audit(limit: int = 100, db: Session = Depends(get_db)) -> list[AuditEve
         .limit(min(limit, 500))
     )
     return list(db.scalars(stmt))
+
+
+# --------------------------------------------------------------------------
+# Component images (metrology / VI attachments, read-only PDB fetch)
+# --------------------------------------------------------------------------
+
+
+def _pdb_gateway(request: Request):
+    """The PDB gateway for read-only fetches; tests may inject a fake on app.state."""
+    from app.pdb_gateway import PdbGateway
+
+    injected = getattr(request.app.state, "pdb_gateway", None)
+    return injected if injected is not None else PdbGateway(request.app.state.settings)
+
+
+@router.get(
+    "/api/components/{sn}/images",
+    response_model=list[ComponentImageOut],
+    tags=["components"],
+)
+def component_images(sn: str, request: Request) -> list[dict]:
+    """List a component's metrology/VI image attachments (empty when offline)."""
+    from app.pdb_attachments import list_component_images
+
+    return list_component_images(_pdb_gateway(request), sn)
+
+
+@router.get("/api/components/{sn}/images/{attachment_id}", tags=["components"])
+def component_image_binary(sn: str, attachment_id: str, request: Request) -> Response:
+    """Stream one image attachment's bytes from the PDB binary store."""
+    from app.pdb_attachments import fetch_image_binary
+
+    result = fetch_image_binary(_pdb_gateway(request), sn, attachment_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Image not available.")
+    content_type, data = result
+    return Response(content=data, media_type=content_type)
