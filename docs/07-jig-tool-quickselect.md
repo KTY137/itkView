@@ -1,8 +1,13 @@
 # Plan: Jig-/Tool-Registry und typ-gefilterter Quick-Select
 
-> Planungsdokument (noch nicht umgesetzt). Legt fest, wie Attachment-Properties
+> Planungsdokument mit Umsetzungsstand. Legt fest, wie Attachment-Properties
 > (Jigs, Pickup-Tools, Glue-Batches) im Assembly-Wizard **abhaengig vom
 > Modultyp per Quick-Select** ausgewaehlt werden statt per Handeingabe.
+>
+> Stand 2026-07-08: Basis umgesetzt fuer lokale `Tool`-Registry, Tools-Screen,
+> Scanner-Aufloesung und read-only Import aus bereits gespiegelten
+> PDB-`TOOLS`-Komponenten (`POST /api/sync/tools/{institute}`). Glue-Batches
+> und direkte Assembly-Wizard-Integration sind noch offen.
 
 ## Problem / Motivation
 
@@ -48,6 +53,10 @@ Institut-Profil — statt fixer Felder im Wizard.
 - `GET /api/tools/by-rfid/{rfid}` — Scanner: RFID -> Tool aufloesen.
 - `POST/PATCH /api/tools` (operator/admin) — Registry pflegen, flaggen,
   blacklisten (auditiert ueber die Outbox-/Audit-Spur).
+
+Umgesetzt zusaetzlich: `POST /api/sync/tools/{institute}` aktualisiert die
+lokale Registry aus bereits gespiegelten PDB-`TOOLS`-Komponenten, ohne die PDB
+erneut anzufragen.
 
 ## Frontend (Assembly-Wizard)
 

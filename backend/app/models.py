@@ -142,6 +142,31 @@ class IngestFile(Base):
     outbox_action: Mapped[OutboxAction | None] = relationship()
 
 
+class TestRunEvidence(Base):
+    """Mirrored evidence that a component has a test run result.
+
+    This is read-side evidence, not a write intent. It can be fed by a future
+    PDB test-run mirror, zFlow reconciliation, or local sync job, and is merged
+    with confirmed itkFlow uploads by `app.stage_service`.
+    """
+
+    __tablename__ = "test_run_evidence"
+    __test__ = False
+    __table_args__ = (
+        UniqueConstraint("source", "external_ref", name="uq_test_run_evidence_source_ref"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    component_sn: Mapped[str] = mapped_column(String(20), index=True)
+    test_type: Mapped[str] = mapped_column(String(64), index=True)
+    passed: Mapped[bool] = mapped_column(Boolean)
+    source: Mapped[str] = mapped_column(String(24), default="pdb", index=True)
+    external_ref: Mapped[str | None] = mapped_column(String(64), default=None)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    measured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class AuditEvent(Base):
     """Append-only trail: who did what, when, to which subject."""
 

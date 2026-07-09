@@ -177,6 +177,87 @@ def test_worker_marks_transient_unavailable_distinctly(client, session_factory):
         assert failed_event.detail["transient"] is True
 
 
+def test_worker_waits_before_retrying_transient_failure(client, session_factory):
+    action_id = seed_upload_action(client, session_factory)
+    with session_factory() as session:
+        process_due_actions(session, unavailable("connection refused"))
+
+    with session_factory() as session:
+        stats = process_due_actions(
+            session,
+            never_called,
+            retry_backoff_seconds=3600,
+        )
+
+    assert stats.total == 0
+    action = load_action(session_factory, action_id)
+    assert action.status == OutboxStatus.FAILED.value
+    assert action.attempts == 1
+    assert action.error.startswith("PDB unavailable")
+
+
+def test_worker_retries_transient_failure_after_backoff(client, session_factory):
+    action_id = seed_upload_action(client, session_factory)
+    with session_factory() as session:
+        process_due_actions(session, unavailable("connection refused"))
+
+    with session_factory() as session:
+        stats = process_due_actions(
+            session,
+            confirming("PDB-RUN-RETRY"),
+            retry_backoff_seconds=0,
+        )
+
+    assert stats.confirmed == 1
+    action = load_action(session_factory, action_id)
+    assert action.status == OutboxStatus.CONFIRMED.value
+    assert action.external_ref == "PDB-RUN-RETRY"
+    assert action.attempts == 2
+    assert audit_actions(session_factory, action_id) == [
+        "ingest.outbox_proposed",
+        "outbox.submitting",
+        "outbox.failed",
+        "outbox.retrying",
+        "outbox.confirmed",
+    ]
+
+
+def test_worker_stops_transient_retry_at_max_attempts(client, session_factory):
+    action_id = seed_upload_action(client, session_factory)
+    with session_factory() as session:
+        process_due_actions(session, unavailable("connection refused"), max_attempts=1)
+
+    with session_factory() as session:
+        stats = process_due_actions(
+            session,
+            never_called,
+            max_attempts=1,
+            retry_backoff_seconds=0,
+        )
+
+    assert stats.attempt_limit_reached == 1
+    action = load_action(session_factory, action_id)
+    assert action.status == OutboxStatus.FAILED.value
+    assert action.error.startswith("Maximum attempts reached")
+    assert "outbox.retry_exhausted" in audit_actions(session_factory, action_id)
+
+
+def test_worker_fails_submitted_action_at_max_attempts(client, session_factory):
+    action_id = seed_upload_action(client, session_factory, status=OutboxStatus.SUBMITTED)
+    with session_factory() as session:
+        action = session.get(OutboxAction, action_id)
+        action.attempts = 2
+        session.commit()
+
+    with session_factory() as session:
+        stats = process_due_actions(session, never_called, max_attempts=2)
+
+    assert stats.attempt_limit_reached == 1
+    action = load_action(session_factory, action_id)
+    assert action.status == OutboxStatus.FAILED.value
+    assert action.error == "Maximum attempts reached (2/2)."
+
+
 def test_worker_blocks_on_revalidation_without_submitting(client, session_factory):
     action_id = seed_upload_action(client, session_factory)
     # Corrupt the stored payload after approval so the dry-run now fails.
@@ -388,7 +469,100 @@ def test_real_submitter_rejects_upload_outside_dummy_scope(session_factory):
 
 
 # --------------------------------------------------------------------------
-# stage_move actions (fake submitter only — never touches itkdb)
+# real submitter payload conversion (fake PDB client)
+# --------------------------------------------------------------------------
+
+
+def test_real_submitter_upload_uses_normalized_payload(session_factory, client, monkeypatch):
+    """A local-name instrument file must become a serial-number PDB upload."""
+    from app.config import Settings
+    from app.models import IngestFile
+    from app.pdb_submit import make_pdb_submitter
+    from app.sync import SyncRecord
+
+    institute = client.post(
+        "/api/institutes",
+        json={"code": "TUDO", "name": "TU Dortmund", "local_name_prefix": "TUDO-"},
+    ).json()
+    with session_factory() as session:
+        sync_components(
+            session,
+            [
+                SyncRecord(
+                    sn="20UPGM19999999",
+                    component_type="MODULE",
+                    type_code="R5M0",
+                    stage="GLUED",
+                    location="TUDO",
+                    institute_code="TUDO",
+                    local_name="TUDO-R5M0-DUMMY",
+                    parent_sn=None,
+                    is_dummy=True,
+                    trashed=False,
+                )
+            ],
+        )
+        ingest = IngestFile(
+            filename="metrology-local.json",
+            sha256="1" * 64,
+            size_bytes=10,
+            status="proposed",
+            component_sn="20UPGM19999999",
+            test_type="MODULE_METROLOGY",
+            parser="pdb-test-run-v1",
+            payload=valid_payload(component="TUDO-R5M0-DUMMY"),
+            uploaded_by="tests",
+        )
+        session.add(ingest)
+        session.flush()
+        action = OutboxAction(
+            institute_id=institute["id"],
+            kind="upload_test_run",
+            status=OutboxStatus.APPROVED.value,
+            created_by="tests",
+            payload={"ingest_file_id": ingest.id},
+        )
+        session.add(action)
+        session.commit()
+        action_id = action.id
+
+    posts = []
+
+    class _Client:
+        def post(self, endpoint, json):
+            posts.append((endpoint, json))
+            return {"testRun": {"id": "RUN-NORMALIZED"}}
+
+    class _Gateway:
+        is_configured = True
+
+        def __init__(self, settings):
+            self.settings = settings
+
+        def client(self):
+            return _Client()
+
+    monkeypatch.setattr("app.pdb_submit.PdbGateway", _Gateway)
+    settings = Settings(
+        itkdb_access_code1="one",
+        itkdb_access_code2="two",
+        _env_file=None,
+    )
+    submitter = make_pdb_submitter(settings)
+
+    with session_factory() as session:
+        outcome = submitter(session, session.get(OutboxAction, action_id))
+
+    assert outcome.is_confirmed
+    assert outcome.external_ref == "RUN-NORMALIZED"
+    assert posts[0][0] == "uploadTestRunResults"
+    assert posts[0][1]["component"] == "20UPGM19999999"
+    assert posts[0][1]["testType"] == "MODULE_METROLOGY"
+    assert posts[0][1]["results"] == {"BOW": 12.5}
+
+
+# --------------------------------------------------------------------------
+# stage_move actions (fake submitter only - never touches itkdb)
 # --------------------------------------------------------------------------
 
 
@@ -401,8 +575,8 @@ def seed_stage_move(
     all_passed: bool = True,
     status: OutboxStatus = OutboxStatus.APPROVED,
 ) -> int:
-    """Mirror components, confirm the GLUED requirements (so the move is
-    endorsed), and create a stage_move action in the requested status."""
+    """Mirror components, confirm the requirements through GLUED (so the move
+    is endorsed), and create a stage_move action in the requested status."""
     tudo = client.post(
         "/api/institutes",
         json={"code": "TUDO", "name": "TU Dortmund", "local_name_prefix": "TUDO-"},
@@ -410,7 +584,13 @@ def seed_stage_move(
     with session_factory() as session:
         sync_components(session, load_fixture_records(DEMO_FIXTURE_PATH))
         session.commit()
-    for test_type in ("GLUE_WEIGHT", "MODULE_BOW", "MODULE_METROLOGY"):
+    for test_type in (
+        "VISUAL_INSPECTION",
+        "MODULE_IV_PS_V1",
+        "GLUE_WEIGHT",
+        "MODULE_BOW",
+        "MODULE_METROLOGY",
+    ):
         with session_factory() as session:
             session.add(
                 OutboxAction(

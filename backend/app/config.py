@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     worker_poll_seconds: int = 5
     # Give up auto-processing an action after this many attempts (safety cap).
     worker_max_attempts: int = 5
+    # Base retry delay for transient PDB outages; the worker doubles it after
+    # each unavailable attempt until worker_max_attempts is reached.
+    worker_retry_backoff_seconds: int = 60
 
     @model_validator(mode="after")
     def _guard_production(self) -> "Settings":

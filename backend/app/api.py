@@ -64,6 +64,7 @@ from app.schemas import (
     StatsDimensionsOut,
     ToolCreate,
     ToolOut,
+    ToolSyncOut,
     ToolUpdate,
     UserCreate,
     UserOut,
@@ -72,6 +73,7 @@ from app.schemas import (
 from app.stage_service import evaluate_for_component
 from app.stats import production_stats
 from app.sync import UnknownParentError, sync_components
+from app.tool_sync import sync_tools_from_components
 
 
 def get_db(request: Request) -> Iterator[Session]:
@@ -246,6 +248,32 @@ def order_buckets(
     return sorted(buckets, key=lambda b: (rank.get(b.label, len(rank)), b.label))
 
 
+def active_module_requirement_gaps(db: Session) -> tuple[int, int]:
+    """Required-test gaps for active modules, using the same engine as detail.
+
+    Until a PDB test-run mirror exists, this measures local evidence gaps:
+    confirmed itkFlow uploads are counted as satisfied, everything else remains
+    missing. Terminal/trashed/stale modules are excluded so old production
+    history does not dominate the daily dashboard.
+    """
+
+    modules = db.scalars(
+        select(Component)
+        .where(Component.component_type == "MODULE")
+        .where(Component.stale.is_(False))
+        .where(Component.trashed.is_(False))
+        .where(~Component.stage.in_(("FINISHED", "FAILED", "TRASHED", "ABANDONED")))
+    )
+    components_with_gaps = 0
+    total_gaps = 0
+    for component in modules:
+        gaps = len(evaluate_for_component(db, component).blocking)
+        if gaps:
+            components_with_gaps += 1
+            total_gaps += gaps
+    return total_gaps, components_with_gaps
+
+
 def canonical_json_bytes(payload: dict) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -340,6 +368,7 @@ def scan_tool(code: str, db: Session = Depends(get_db)) -> Tool:
             or_(
                 func.lower(Tool.rfid) == needle.lower(),
                 func.lower(Tool.code) == needle.lower(),
+                func.lower(Tool.label) == needle.lower(),
             )
         )
     )
@@ -483,6 +512,7 @@ def sync_components_for_institute(
         fetched = fetcher(request.app.state.settings, institute)
         # A full institute fetch is authoritative, so prune rows that vanished.
         stats = sync_components(db, fetched.records, prune_scope=institute.code)
+        sync_tools_from_components(db, institute)
     except PdbSyncUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except UnknownParentError as exc:
@@ -501,6 +531,33 @@ def sync_components_for_institute(
     )
 
 
+@router.post(
+    "/api/sync/tools/{institute_code}",
+    response_model=ToolSyncOut,
+    tags=["tools", "sync"],
+)
+def sync_tools_for_institute(
+    institute_code: str,
+    db: Session = Depends(get_db),
+) -> ToolSyncOut:
+    """Rebuild the local tool registry from already mirrored PDB tool components."""
+
+    institute = db.scalar(select(InstituteProfile).where(InstituteProfile.code == institute_code))
+    if institute is None:
+        raise HTTPException(status_code=404, detail=f"Institute '{institute_code}' not found.")
+
+    stats = sync_tools_from_components(db, institute)
+    db.commit()
+    return ToolSyncOut(
+        institute_code=institute.code,
+        created=stats.created,
+        updated=stats.updated,
+        unchanged=stats.unchanged,
+        skipped=stats.skipped,
+        total=stats.total,
+    )
+
+
 # --------------------------------------------------------------------------
 # Dashboard
 # --------------------------------------------------------------------------
@@ -510,10 +567,36 @@ def sync_components_for_institute(
 def dashboard_summary(db: Session = Depends(get_db)) -> DashboardSummaryOut:
     total_components = db.scalar(select(func.count(Component.id))) or 0
     last_synced_at = db.scalar(select(func.max(Component.synced_at)))
+    oldest_synced_at = db.scalar(select(func.min(Component.synced_at)))
+    stale_components = (
+        db.scalar(select(func.count(Component.id)).where(Component.stale.is_(True))) or 0
+    )
+    trashed_components = (
+        db.scalar(select(func.count(Component.id)).where(Component.trashed.is_(True))) or 0
+    )
+    required_test_gaps, components_with_test_gaps = active_module_requirement_gaps(db)
     submitted_outbox = (
         db.scalar(
             select(func.count(OutboxAction.id)).where(
                 OutboxAction.status == OutboxStatus.SUBMITTED.value
+            )
+        )
+        or 0
+    )
+    approved_outbox = (
+        db.scalar(
+            select(func.count(OutboxAction.id)).where(
+                OutboxAction.status == OutboxStatus.APPROVED.value
+            )
+        )
+        or 0
+    )
+    review_outbox = (
+        db.scalar(
+            select(func.count(OutboxAction.id)).where(
+                OutboxAction.status.in_(
+                    [OutboxStatus.DRAFT.value, OutboxStatus.VALIDATED.value]
+                )
             )
         )
         or 0
@@ -529,7 +612,14 @@ def dashboard_summary(db: Session = Depends(get_db)) -> DashboardSummaryOut:
     return DashboardSummaryOut(
         total_components=total_components,
         last_synced_at=last_synced_at,
+        oldest_synced_at=oldest_synced_at,
+        stale_components=stale_components,
+        trashed_components=trashed_components,
+        required_test_gaps=required_test_gaps,
+        components_with_test_gaps=components_with_test_gaps,
         submitted_outbox=submitted_outbox,
+        approved_outbox=approved_outbox,
+        review_outbox=review_outbox,
         failed_outbox=failed_outbox,
         # Stages read left-to-right in production order (…→ TESTED → FINISHED),
         # and outbox statuses in their lifecycle order — not by frequency.

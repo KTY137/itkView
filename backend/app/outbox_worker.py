@@ -21,6 +21,7 @@ Safety properties:
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -28,14 +29,15 @@ from sqlalchemy.orm import Session
 from app.ingestion import parse_payload
 from app.models import AuditEvent, Component, IngestFile, OutboxAction
 from app.outbox import OutboxStatus, assert_transition
+from app.pdb_upload import UploadPayloadError, build_upload_test_run_payload
 from app.stage_service import evaluate_for_component
 
 WORKER_ACTOR = "outbox-worker"
 
-# Statuses the worker will pick up. `approved` = freshly signed off; `submitted`
-# = a prior attempt that never resolved (crash) or a manual `failed → submitted`
-# retry. Terminal and pre-review statuses are ignored.
-DUE_STATUSES = (OutboxStatus.APPROVED, OutboxStatus.SUBMITTED)
+# Statuses the worker considers. Failed rows are retried only when they are
+# transient PDB-unavailable failures whose backoff has elapsed.
+DUE_STATUSES = (OutboxStatus.APPROVED, OutboxStatus.SUBMITTED, OutboxStatus.FAILED)
+TRANSIENT_UNAVAILABLE_PREFIX = "PDB unavailable:"
 
 
 class PdbSubmitUnavailable(RuntimeError):
@@ -78,10 +80,52 @@ class WorkerStats:
     rejected: int = 0
     unavailable: int = 0
     revalidation_failed: int = 0
+    attempt_limit_reached: int = 0
 
     @property
     def total(self) -> int:
-        return self.confirmed + self.rejected + self.unavailable + self.revalidation_failed
+        return (
+            self.confirmed
+            + self.rejected
+            + self.unavailable
+            + self.revalidation_failed
+            + self.attempt_limit_reached
+        )
+
+
+def _as_utc(value: datetime | None) -> datetime:
+    if value is None:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def is_transient_failure(action: OutboxAction) -> bool:
+    """True when an action failed before a PDB write could be attempted."""
+    return (
+        OutboxStatus(action.status) is OutboxStatus.FAILED
+        and action.error is not None
+        and action.error.startswith(TRANSIENT_UNAVAILABLE_PREFIX)
+    )
+
+
+def retry_ready(
+    action: OutboxAction,
+    *,
+    now: datetime,
+    retry_backoff_seconds: int,
+    max_attempts: int,
+) -> bool:
+    """Return whether a transient failure should be picked up this batch."""
+    if not is_transient_failure(action):
+        return False
+    if action.attempts >= max_attempts:
+        return True
+    delay = timedelta(
+        seconds=max(0, retry_backoff_seconds) * (2 ** max(0, action.attempts - 1))
+    )
+    return _as_utc(action.updated_at) + delay <= _as_utc(now)
 
 
 def revalidate(session: Session, action: OutboxAction) -> list[str]:
@@ -117,6 +161,15 @@ def revalidate_upload(session: Session, action: OutboxAction) -> list[str]:
         )
     if component is None:
         issues.append("Component is no longer in the local mirror; re-sync before submitting.")
+    elif not issues:
+        try:
+            build_upload_test_run_payload(
+                ingest.payload,
+                component_sn=component.sn,
+                institute_code=component.institute_code,
+            )
+        except UploadPayloadError as exc:
+            issues.append(str(exc))
     return issues
 
 
@@ -176,15 +229,63 @@ def _fail(session: Session, action: OutboxAction, reason: str, *, transient: boo
     )
 
 
-def _process_one(session: Session, submitter: Submitter, action: OutboxAction) -> str:
+def _mark_attempt_limit_reached(
+    session: Session, action: OutboxAction, *, max_attempts: int
+) -> None:
+    reason = f"Maximum attempts reached ({action.attempts}/{max_attempts})."
+    status = OutboxStatus(action.status)
+    if status is OutboxStatus.FAILED:
+        action.error = f"{reason} Last error: {action.error}" if action.error else reason
+        _audit(
+            session,
+            action,
+            "outbox.retry_exhausted",
+            {"attempts": action.attempts, "max_attempts": max_attempts},
+        )
+        return
+
+    if status is OutboxStatus.APPROVED:
+        _move(session, action, OutboxStatus.SUBMITTED)
+    _fail(session, action, reason, transient=False)
+
+
+def _process_one(
+    session: Session, submitter: Submitter, action: OutboxAction, *, max_attempts: int
+) -> str:
     """Drive one due action through a single submission attempt.
 
     Returns a short outcome tag for the caller's stats.
     """
-    if OutboxStatus(action.status) is OutboxStatus.APPROVED:
+    status = OutboxStatus(action.status)
+    if status is OutboxStatus.SUBMITTED and action.external_ref:
+        _move(session, action, OutboxStatus.CONFIRMED)
+        _audit(
+            session,
+            action,
+            "outbox.confirmed",
+            {"external_ref": action.external_ref, "note": "already written"},
+        )
+        return "confirmed"
+    if status is OutboxStatus.SUBMITTED and action.attempts >= max_attempts:
+        _mark_attempt_limit_reached(session, action, max_attempts=max_attempts)
+        return "attempt_limit_reached"
+
+    if status is OutboxStatus.APPROVED:
+        if action.attempts >= max_attempts:
+            _mark_attempt_limit_reached(session, action, max_attempts=max_attempts)
+            return "attempt_limit_reached"
         _move(session, action, OutboxStatus.SUBMITTED)
         action.attempts += 1
+        action.error = None
         _audit(session, action, "outbox.submitting", {"attempts": action.attempts})
+    elif status is OutboxStatus.FAILED:
+        if action.attempts >= max_attempts:
+            _mark_attempt_limit_reached(session, action, max_attempts=max_attempts)
+            return "attempt_limit_reached"
+        _move(session, action, OutboxStatus.SUBMITTED)
+        action.attempts += 1
+        action.error = None
+        _audit(session, action, "outbox.retrying", {"attempts": action.attempts})
 
     # Idempotency: a recorded external_ref means the write already happened.
     if action.external_ref:
@@ -220,21 +321,39 @@ def _process_one(session: Session, submitter: Submitter, action: OutboxAction) -
 
 
 def process_due_actions(
-    session: Session, submitter: Submitter, *, limit: int = 20
+    session: Session,
+    submitter: Submitter,
+    *,
+    limit: int = 20,
+    max_attempts: int = 5,
+    retry_backoff_seconds: int = 60,
+    now: datetime | None = None,
 ) -> WorkerStats:
     """Process one batch of due outbox actions. Commits after each action so a
     crash mid-batch leaves the queue in a consistent, resumable state."""
     stats = WorkerStats()
+    if limit <= 0:
+        return stats
+    max_attempts = max(1, max_attempts)
+    now = now or datetime.now(timezone.utc)
     actions = list(
         session.scalars(
             select(OutboxAction)
             .where(OutboxAction.status.in_([s.value for s in DUE_STATUSES]))
             .order_by(OutboxAction.id)
-            .limit(limit)
         )
     )
     for action in actions:
-        tag = _process_one(session, submitter, action)
+        if stats.total >= limit:
+            break
+        if OutboxStatus(action.status) is OutboxStatus.FAILED and not retry_ready(
+            action,
+            now=now,
+            retry_backoff_seconds=retry_backoff_seconds,
+            max_attempts=max_attempts,
+        ):
+            continue
+        tag = _process_one(session, submitter, action, max_attempts=max_attempts)
         session.commit()
         setattr(stats, tag, getattr(stats, tag) + 1)
     return stats

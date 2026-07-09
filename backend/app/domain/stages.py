@@ -1,9 +1,9 @@
 """Stage-move suggestion engine — pure domain logic, institute-agnostic.
 
-A component may advance to the next production stage once every test its
-*current* stage requires has been recorded as passed. This module answers, for
-one component: which required tests are passed / failed / still missing, and
-whether a stage move is therefore suggested.
+A component may advance to the next production stage once every required test
+up to and including its current stage has been recorded as passed. This module
+answers, for one component: which required tests are passed / failed / still
+missing, and whether a stage move is therefore suggested.
 
 Everything site-specific — the stage order and the required tests per stage —
 is *profile data*, never hardcoded per institute (hard rule #4). The constants
@@ -115,8 +115,8 @@ class StageEvaluation:
     current_stage: str
     next_stage: str | None
     checks: list[RequirementCheck]  # requirements up to and including current stage
-    blocking: list[RequirementCheck]  # failed/missing at the *current* stage
-    move_suggested: bool  # every current-stage requirement passed and a next stage exists
+    blocking: list[RequirementCheck]  # failed/missing checks shown to the operator
+    move_suggested: bool  # every shown requirement passed and a next stage exists
 
     @property
     def suggested_stage(self) -> str | None:
@@ -135,18 +135,14 @@ def evaluate_stage(
     """Evaluate one component's stage-move readiness.
 
     `results` maps a test type to whether its latest run passed. A stage move
-    is suggested only when *every* test the current stage requires is passed
-    and a next stage exists.
+    is suggested only when *every* required test up to and including the
+    current stage is passed and a next stage exists.
     """
     checks = [
         RequirementCheck(stage=stage, test_type=test, status=_status(results, test))
         for stage, test in model.requirements_through(current_stage)
     ]
-    blocking = [
-        check
-        for check in checks
-        if check.stage == current_stage and check.status is not RequirementStatus.PASSED
-    ]
+    blocking = [check for check in checks if check.status is not RequirementStatus.PASSED]
     next_stage = model.next_stage(current_stage)
     move_suggested = not blocking and next_stage is not None
     return StageEvaluation(

@@ -28,6 +28,7 @@ from app.models import Component, IngestFile, InstituteProfile, OutboxAction, ut
 from app.outbox_worker import PdbSubmitUnavailable, SubmitOutcome, Submitter
 from app.pdb_gateway import PdbGateway
 from app.pdb_scope import dummy_batch_name, is_dummy_target, is_registrable_type
+from app.pdb_upload import UploadPayloadError, build_upload_test_run_payload
 
 
 def _extract_run_ref(response: Any) -> str:
@@ -77,12 +78,34 @@ def make_pdb_submitter(settings: Settings) -> Submitter:
         ingest = session.get(IngestFile, ingest_id) if ingest_id is not None else None
         if ingest is None:
             return SubmitOutcome.rejected("The ingest file backing this action no longer exists.")
-        sn = ingest.component_sn or (ingest.payload or {}).get("component")
+        component = (
+            session.scalar(select(Component).where(Component.sn == ingest.component_sn))
+            if ingest.component_sn
+            else None
+        )
+        action_institute_id = getattr(action, "institute_id", None)
+        institute = (
+            session.get(InstituteProfile, action_institute_id)
+            if action_institute_id is not None
+            else None
+        )
+        institute_code = component.institute_code if component is not None else None
+        if institute_code is None and institute is not None:
+            institute_code = institute.code
+        try:
+            upload_payload = build_upload_test_run_payload(
+                ingest.payload,
+                component_sn=ingest.component_sn,
+                institute_code=institute_code,
+            )
+        except UploadPayloadError as exc:
+            return SubmitOutcome.rejected(f"Upload payload is not PDB-ready: {exc}")
+        sn = upload_payload["component"]
         if not is_dummy_target(session, sn):
             return _scope_rejection(sn)
         client = _client()
         try:
-            response = client.post("uploadTestRunResults", json=ingest.payload)
+            response = client.post("uploadTestRunResults", json=upload_payload)
         except Exception as exc:
             # Reachable but refused (validation/stage/permissions) — a rejection.
             return SubmitOutcome.rejected(f"PDB rejected the upload: {exc}")

@@ -46,12 +46,24 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   PULL_STRENGTH/PULL_GRADE-Arrays, NUMBER_WIRES-Abgleich). `GET
   /api/ingest/files/{id}/preview` liefert den Dry-Run (auch im Triage-UI),
   und `propose-outbox` blockt bei Dry-Run-Issues mit 409.
+- PDB-Upload-Converter (Phase-2/Worker-Schnitt): `app/pdb_upload.py` baut aus
+  dem geprueften Ingest-Payload einen kanonischen `uploadTestRunResults`-Body.
+  Der Worker revalidiert mit demselben Converter direkt vor dem Submit; der
+  reale Submitter postet nie mehr das rohe Instrument-JSON, sondern die
+  normalisierte SN/TestType/Results-Form (lokale Namen werden zur Mirror-SN).
+- Test-Run-Evidence-Mirror (Phase-1/3-Basis): `TestRunEvidence` +
+  `app/test_run_evidence.py` koennen externe/PDB-Testlaufresultate lokal
+  idempotent spiegeln. `stage_service.satisfied_test_results` mischt diese
+  Evidence mit confirmed itkFlow-Uploads; Stage-Suggestions und Dashboard-Gaps
+  koennen damit bereits aus Mirror-Evidence gespeist werden.
 - Stage-Move-Suggestion-Engine (Phase-3-Kickoff): reine Domain-Logik in
   `app/domain/stages.py` (Pflicht-Tests je Stage, institutsneutral via
   `InstituteProfile.settings`, Seed-Default aus der UI-Design-Referenz).
   `GET /api/components/{sn}/stage-suggestion` wertet bestaetigte Uploads
   (confirmed `upload_test_run`) zu passed/failed/missing aus und schlaegt den
-  naechsten Stage-Move vor, wenn alle Pflicht-Tests der aktuellen Stage passen.
+  naechsten Stage-Move nur vor, wenn alle angezeigten Pflicht-Tests bis
+  einschliesslich der aktuellen Stage passen; fehlende/fruehere Tests blocken
+  konservativ, bis der PDB-Test-Run-Mirror als zusaetzliche Quelle steht.
   Das Detail-UI zeigt die Pflicht-Tests-Tabelle + Vorschlag-Callout, und
   „Propose stage move" legt einen auditierten `stage_move`-Draft in die Outbox.
 - Async-Outbox-Worker: eigenstaendiger Prozess (`app/run_worker.py`,
@@ -61,7 +73,9 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   Submitter schreibt `uploadTestRunResults`/`setComponentStage`, ist ohne
   Access-Codes inaktiv und lehnt jedes Ziel ab, das keine eigene
   DUMMY-Testkomponente ist (`pdb_write_scope=dummy_only`, ADR 003).
-  Idempotenz ueber `external_ref`. Details: ADR 002.
+  Idempotenz ueber `external_ref`; transiente `PdbSubmitUnavailable`-Fehler
+  werden nach exponentiellem Backoff automatisch bis `worker_max_attempts`
+  erneut versucht. Details: ADR 002.
 - Watched-Folder-Agent ist bisher nur als Phase-2-Platzhalter dokumentiert.
 - **Gegen echte Produktions-PDB validiert (2026-07-08):** Voller TUDO-Sync
   laeuft (read-only), reale Mapping-/Pagination-/Schema-Bugs gefixt, Prune
@@ -76,26 +90,41 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 - **Stage-Farbsystem:** geordneter Ramp kuehl→gruen (Fortschritt); Gruen nur
   FINISHED, Rot nur FAILED/TRASHED (CVD-sicher, `ui.ts`/`app.css`).
 
+- **Jig-/Tool-Registry (Phase-3/4-Basis):** lokale Registry + Tools-Screen
+  stehen; `POST /api/sync/tools/{institute}` spiegelt bereits gesyncte
+  PDB-`TOOLS`-Komponenten read-only in die Registry (Code=SN, Label=lokaler
+  Name, kompatible Typen aus Profil-Regeln oder generischem R-Type-Parsing).
+  Komponenten-Sync triggert diesen Registry-Refresh automatisch; lokale
+  RFID-/Blacklist-Informationen werden nicht durch normale Syncs
+  heruntergestuft.
+
 ## Naechste Arbeitspakete
 
 1. **Stage-Move-Strecke schliessen** (`domain-modeler`, `backend-dev`,
    `pdb-gateway-dev`): Suggestion-Engine, `stage_move`-Draft und realer
    Submitter (setComponentStage, DUMMY-Scope) stehen (2026-07-08). Offen: die
-   „satisfied tests"-Quelle perspektivisch aus einem PDB-Test-Run-Mirror statt
-   nur aus confirmed itkFlow-Uploads speisen (fuer Parallelbetrieb mit zFlow).
-2. **Dashboard ausbauen** (`frontend-dev`, `backend-dev`): Summary um offene
-   Tests, Sync-Alter und auffaellige Stage-/Outbox-Zustaende erweitern.
+   reale PDB-Test-Run-Fetchstrecke an den lokalen `TestRunEvidence`-Mirror
+   anbinden (fuer Parallelbetrieb mit zFlow).
+2. **Dashboard ausbauen** (`frontend-dev`, `backend-dev`): Summary erweitert
+   (2026-07-08): `/api/dashboard/summary` liefert Required-Test-Gaps fuer
+   aktive Module, Sync-Alter (neueste/aelteste Mirror-Zeile), stale/trashed
+   Mirror-Zeilen sowie Review-/Approved-/Submitted-/Failed-Outbox-Zaehler; das
+   Dashboard zeigt diese als kompakte KPI-Tiles und die Institutsverteilung mit
+   profilbasierten Logos bzw. generischen Code-Icons. Required-Test-Gaps nutzen
+   denselben Evidence-Service wie Stage-Suggestions; offen ist der echte
+   PDB-Test-Run-Fetcher in diesen Mirror.
 3. **Outbox-Worker haerten** (`backend-dev`, `pdb-gateway-dev`, `qa-engineer`):
-   Async-Worker steht (2026-07-08, ADR 002). Offen: automatischer Retry mit
-   Backoff fuer transiente Fehler, `worker_max_attempts` durchsetzen, und die
-   reale Idempotenz-Pruefung gegen die Testinstanz, bevor der
+   Async-Worker steht (2026-07-08, ADR 002); automatischer Retry mit Backoff
+   fuer transiente Fehler und `worker_max_attempts` sind durchgesetzt. Offen:
+   die reale Idempotenz-Pruefung gegen die Testinstanz, bevor der
    `submitted`-Recovery-Pfad mit echten Tokens scharf geschaltet wird.
 4. **Upload-Converter und Worker-Schnitt** (`ingestion-dev`, `architect`,
    `backend-dev`): Registry, Preview und Dry-Run-Gate stehen inkl. Glue-Weight-,
-   IV-, Pulltest- und generischem Parser (2026-07-08). Als Naechstes den
-   Uebergang `ParsedTestRun` → PDB-Uploadcall im Outbox-Worker definieren
-   (Wer submittet? Wie wird der Dry-Run vor dem echten Upload wiederholt?),
-   plus optional Metrologie-Rohformat-Parser.
+   IV-, Pulltest- und generischem Parser (2026-07-08). Der Uebergang
+   `ParsedTestRun`/Ingest-Payload -> PDB-Uploadcall ist ueber den reinen
+   Converter `app/pdb_upload.py` definiert; Worker-Revalidierung und realer
+   Submitter nutzen denselben kanonischen Payload-Build. Offen: optional
+   Metrologie-Rohformat-Parser und weitere instrumentspezifische Converter.
 5. **Produktions-Reads + DUMMY-Write-E2E validieren** (`pdb-gateway-dev`,
    `qa-engineer`): Read-Smoke gegen Produktion und **voller TUDO-Sync
    validiert** (2026-07-08): 3628 Payloads → ~2655 Mirror-Zeilen. Dabei mehrere
@@ -116,9 +145,9 @@ Dokument:
   Accounts fuer v1, OIDC/CERN-SSO als spaeterer Adapter. **Fundament fuer echte
   Nachvollziehbarkeit — sollte vor Remote-Zugriff stehen.**
 - **Jig-/Tool-Registry + typ-gefilterter Quick-Select** —
-  `docs/07-jig-tool-quickselect.md`. Jigs/Tools/Glue-Batches im Assembly-Wizard
-  nach Modultyp vorfiltern statt per Hand eintippen; Kompatibilitaet als
-  Config/Registry (Regel #4). Phase 3/4.
+  `docs/07-jig-tool-quickselect.md`. Basis-Registry, Tools-Screen und
+  PDB-`TOOLS`-Mirror-Import stehen (2026-07-08). Offen: Glue-Batches und die
+  direkte Einbindung in den Assembly-Wizard.
 - **Remote-Zugriff / Tunneling** — `docs/08-remote-access.md`. Zugriff von
   zuhause; Empfehlung Tailscale/WireGuard (spaeter Cloudflare Tunnel).
   **Abhaengigkeit:** erst nach dem Auth-Fundament scharf schalten.
