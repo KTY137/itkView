@@ -568,3 +568,30 @@ def test_stale_filter_on_component_list(client: TestClient, tudo: dict):
     assert {c["sn"] for c in stale_only} == {"20USE5M0000802"}
     live_only = client.get("/api/components", params={"stale": "false"}).json()
     assert {c["sn"] for c in live_only} == {"20USE5M0000801"}
+
+
+def test_component_staged_changes_lists_open_actions_for_the_component(
+    client: TestClient, tudo: dict
+):
+    mine = client.post(
+        "/api/outbox",
+        json={
+            "institute_code": "TUDO",
+            "kind": "stage_move",
+            "payload": {"sn": "20USE5M0000801", "to_stage": "BONDED"},
+            "created_by": "op",
+        },
+    ).json()
+    # A staged action for a different component must not leak in.
+    client.post(
+        "/api/outbox",
+        json={
+            "institute_code": "TUDO",
+            "kind": "stage_move",
+            "payload": {"sn": "20USE5M0009999"},
+            "created_by": "op",
+        },
+    )
+    staged = client.get("/api/components/20USE5M0000801/staged").json()
+    assert [s["id"] for s in staged] == [mine["id"]]
+    assert staged[0]["status"] == "draft"

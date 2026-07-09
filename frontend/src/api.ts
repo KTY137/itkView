@@ -382,6 +382,11 @@ export function componentImageUrl(sn: string, id: string): string {
   return `/api/components/${encodeURIComponent(sn)}/images/${encodeURIComponent(id)}`;
 }
 
+/** Open (not yet confirmed/cancelled) outbox actions targeting this component. */
+export function getComponentStaged(sn: string, signal?: AbortSignal): Promise<OutboxAction[]> {
+  return request<OutboxAction[]>(`/api/components/${encodeURIComponent(sn)}/staged`, { signal });
+}
+
 export function getStageSuggestion(sn: string, signal?: AbortSignal): Promise<StageSuggestion> {
   return request<StageSuggestion>(
     `/api/components/${encodeURIComponent(sn)}/stage-suggestion`,

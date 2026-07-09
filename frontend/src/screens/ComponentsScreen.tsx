@@ -7,6 +7,7 @@ import {
   getComponent,
   getComponentImages,
   getComponents,
+  getComponentStaged,
   getInstitutes,
   getStageSuggestion,
   postComponentSync,
@@ -18,6 +19,7 @@ import type {
   ComponentImage,
   ComponentOut,
   Institute,
+  OutboxAction,
   RequirementCheck,
   StageSuggestion,
 } from "../api";
@@ -697,6 +699,7 @@ function ComponentDetailPanel({
           </div>
         </div>
         <div className="det-col">
+          <StagedChangesSection sn={detail.sn} />
           {suggestion !== null ? (
             <StageSuggestionSection
               suggestion={suggestion}
@@ -715,6 +718,63 @@ function ComponentDetailPanel({
       </div>
     </div>
   );
+}
+
+/** Ghost layer: outbox actions staged for this component but not yet pushed to
+ * the PDB. Closes the loop with "Propose stage move" — a proposal appears here
+ * immediately, rendered as a dashed "ghost" row, until it is confirmed. */
+function StagedChangesSection({ sn }: { sn: string }) {
+  const [staged, setStaged] = useState<OutboxAction[] | null>(null);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setStaged(null);
+    getComponentStaged(sn, ctrl.signal)
+      .then(setStaged)
+      .catch(() => setStaged([])); // offline / none: show the empty state
+    return () => ctrl.abort();
+  }, [sn]);
+
+  function summarize(action: OutboxAction): string {
+    const p = action.payload ?? {};
+    if (action.kind === "stage_move" && typeof p.to_stage === "string") {
+      return t.components.stagedTo(p.to_stage);
+    }
+    if (action.kind === "upload_test_run" && typeof p.test_type === "string") {
+      return p.test_type;
+    }
+    return action.kind;
+  }
+
+  return (
+    <>
+      <h3 className="section-title">{t.components.stagedTitle}</h3>
+      <div className="panel">
+        {staged === null ? (
+          <p className="state-note">{t.common.loading}</p>
+        ) : staged.length === 0 ? (
+          <p className="state-note">{t.components.stagedEmpty}</p>
+        ) : (
+          <ul className="ghost-list" title={t.components.stagedGhostHint}>
+            {staged.map((action) => (
+              <li className="ghost-row" key={action.id}>
+                <span className="chip stage">{action.kind}</span>
+                <span className="ghost-summary">{summarize(action)}</span>
+                <span className={statusChip(action.status)}>{action.status}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
+  );
+}
+
+function statusChip(status: string): string {
+  if (status === "confirmed") return "chip green";
+  if (status === "failed") return "chip red";
+  if (status === "cancelled") return "chip muted";
+  return "chip amber"; // draft / validated / approved / submitted are in-flight
 }
 
 /** Metrology / visual-inspection images for a component, pulled from the PDB.
