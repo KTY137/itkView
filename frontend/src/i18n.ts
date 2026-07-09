@@ -93,6 +93,11 @@ const en = {
     stagedEmpty: "No staged changes — edits you propose appear here before upload.",
     stagedGhostHint: "Proposed, not yet pushed to the PDB.",
     stagedTo: (stage: string) => `→ ${stage}`,
+    syncEvidence: "Sync test evidence",
+    syncingEvidence: "Syncing…",
+    syncEvidenceDone: (created: number, total: number) =>
+      `Test evidence synced: ${created} new, ${total} total.`,
+    syncEvidenceFailed: "Could not sync test evidence",
     loadError: "Could not load components",
     empty: "No components match the current filter.",
     colLocalName: "Local name",

@@ -11,6 +11,7 @@ import {
   getInstitutes,
   getStageSuggestion,
   postComponentSync,
+  postComponentSyncEvidence,
   postInstitute,
   postOutboxAction,
 } from "../api";
@@ -553,6 +554,22 @@ function ComponentDetailPanel({
   const [demo, setDemo] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [suggestion, setSuggestion] = useState<StageSuggestion | null>(null);
+  const [evidenceSyncing, setEvidenceSyncing] = useState(false);
+  const [evidenceNotice, setEvidenceNotice] = useState<string | null>(null);
+
+  async function handleSyncEvidence() {
+    setEvidenceSyncing(true);
+    setEvidenceNotice(null);
+    try {
+      const result = await postComponentSyncEvidence(sn);
+      setEvidenceNotice(t.components.syncEvidenceDone(result.created, result.total));
+      setReloadKey((k) => k + 1); // re-evaluate the stage suggestion with new evidence
+    } catch (err) {
+      setEvidenceNotice(`${t.components.syncEvidenceFailed}: ${errorMessage(err)}`);
+    } finally {
+      setEvidenceSyncing(false);
+    }
+  }
 
   // Stage suggestion is a best-effort extra: hide the section when the backend
   // is offline or has no data for this component, without disturbing the detail.
@@ -699,6 +716,24 @@ function ComponentDetailPanel({
           </div>
         </div>
         <div className="det-col">
+          <div className="toolbar">
+            <button
+              type="button"
+              className="btn"
+              disabled={evidenceSyncing}
+              onClick={() => void handleSyncEvidence()}
+            >
+              {evidenceSyncing ? t.components.syncingEvidence : t.components.syncEvidence}
+            </button>
+          </div>
+          {evidenceNotice !== null && (
+            <div className="info-banner" role="status">
+              <span>{evidenceNotice}</span>
+              <button type="button" className="btn" onClick={() => setEvidenceNotice(null)}>
+                OK
+              </button>
+            </div>
+          )}
           <StagedChangesSection sn={detail.sn} />
           {suggestion !== null ? (
             <StageSuggestionSection

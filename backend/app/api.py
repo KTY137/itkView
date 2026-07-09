@@ -46,6 +46,7 @@ from app.schemas import (
     ComponentSyncOut,
     CountBucket,
     DashboardSummaryOut,
+    EvidenceSyncOut,
     HealthOut,
     IngestFileCreate,
     IngestFileOut,
@@ -1028,3 +1029,29 @@ def component_staged_changes(sn: str, db: Session = Depends(get_db)) -> list[Out
         if payload.get("sn") == sn or payload.get("component_sn") == sn:
             result.append(action)
     return result
+
+
+@router.post(
+    "/api/components/{sn}/sync-evidence",
+    response_model=EvidenceSyncOut,
+    tags=["components", "workflow"],
+)
+def component_sync_evidence(
+    sn: str, request: Request, db: Session = Depends(get_db)
+) -> EvidenceSyncOut:
+    """Mirror this component's PDB test-run results into local evidence, so the
+    stage engine knows which required tests really passed (not just itkFlow
+    uploads). Read-only against the PDB; no-op counts when not configured."""
+    from app.pdb_test_evidence import fetch_test_run_evidence
+    from app.test_run_evidence import upsert_test_run_evidence
+
+    records = fetch_test_run_evidence(_pdb_gateway(request), sn)
+    stats = upsert_test_run_evidence(db, records)
+    db.commit()
+    return EvidenceSyncOut(
+        component_sn=sn,
+        created=stats.created,
+        updated=stats.updated,
+        unchanged=stats.unchanged,
+        total=stats.total,
+    )

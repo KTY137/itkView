@@ -363,3 +363,11 @@ class ComponentImageOut(BaseModel):
     test_type: str | None
     filename: str | None
     content_type: str | None
+
+
+class EvidenceSyncOut(BaseModel):
+    component_sn: str
+    created: int
+    updated: int
+    unchanged: int
+    total: int
