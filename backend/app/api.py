@@ -1004,3 +1004,27 @@ def component_image_binary(sn: str, attachment_id: str, request: Request) -> Res
         raise HTTPException(status_code=404, detail="Image not available.")
     content_type, data = result
     return Response(content=data, media_type=content_type)
+
+
+@router.get(
+    "/api/components/{sn}/staged",
+    response_model=list[OutboxOut],
+    tags=["components", "outbox"],
+)
+def component_staged_changes(sn: str, db: Session = Depends(get_db)) -> list[OutboxAction]:
+    """Outbox actions targeting this component that are not yet confirmed/cancelled.
+
+    This is the 'ghost' layer for a module: everything staged for it but not
+    pushed to the PDB, newest first. Actions reference the component by `sn`
+    (stage moves) or `component_sn` (test uploads)."""
+    open_actions = db.scalars(
+        select(OutboxAction)
+        .where(OutboxAction.status.not_in([status.value for status in TERMINAL]))
+        .order_by(OutboxAction.created_at.desc(), OutboxAction.id.desc())
+    )
+    result = []
+    for action in open_actions:
+        payload = action.payload or {}
+        if payload.get("sn") == sn or payload.get("component_sn") == sn:
+            result.append(action)
+    return result
