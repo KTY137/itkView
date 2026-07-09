@@ -403,6 +403,23 @@ export function postComponentSyncEvidence(sn: string): Promise<EvidenceSyncResul
   );
 }
 
+export type InstituteEvidenceSyncResult = {
+  institute_code: string;
+  components_processed: number;
+  created: number;
+  updated: number;
+  unchanged: number;
+  total: number;
+};
+
+/** Mirror PDB test-run evidence for every live component of an institute. */
+export function postInstituteEvidenceSync(code: string): Promise<InstituteEvidenceSyncResult> {
+  return request<InstituteEvidenceSyncResult>(
+    `/api/sync/evidence/${encodeURIComponent(code)}`,
+    { method: "POST" },
+  );
+}
+
 export function getStageSuggestion(sn: string, signal?: AbortSignal): Promise<StageSuggestion> {
   return request<StageSuggestion>(
     `/api/components/${encodeURIComponent(sn)}/stage-suggestion`,

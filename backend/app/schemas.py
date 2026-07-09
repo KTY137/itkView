@@ -371,3 +371,12 @@ class EvidenceSyncOut(BaseModel):
     updated: int
     unchanged: int
     total: int
+
+
+class InstituteEvidenceSyncOut(BaseModel):
+    institute_code: str
+    components_processed: int
+    created: int
+    updated: int
+    unchanged: int
+    total: int

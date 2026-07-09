@@ -13,6 +13,7 @@ import {
   postComponentSync,
   postComponentSyncEvidence,
   postInstitute,
+  postInstituteEvidenceSync,
   postOutboxAction,
 } from "../api";
 import type {
@@ -286,6 +287,25 @@ export default function ComponentsScreen({
     }
   }
 
+  async function handleSyncInstituteEvidence() {
+    if (selectedInstitute === "") {
+      setSyncNotice(t.components.syncNeedsInstitute);
+      return;
+    }
+    setSyncing(true);
+    setSyncNotice(null);
+    try {
+      const result = await postInstituteEvidenceSync(selectedInstitute);
+      setSyncNotice(
+        t.components.syncEvidenceInstituteDone(result.created, result.components_processed),
+      );
+    } catch (err) {
+      setSyncNotice(`${t.components.syncFailed}: ${errorMessage(err)}`);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   if (selectedSn !== null) {
     return (
       <ComponentDetailPanel
@@ -340,6 +360,7 @@ export default function ComponentsScreen({
               ))}
             </select>
             <button
+              type="button"
               className="btn"
               disabled={syncing || selectedInstitute === ""}
               onClick={() => void handleSyncSelectedInstitute()}
@@ -347,6 +368,15 @@ export default function ComponentsScreen({
               {syncing ? t.common.loading : t.components.syncSelected}
             </button>
             <button
+              type="button"
+              className="btn"
+              disabled={syncing || selectedInstitute === ""}
+              onClick={() => void handleSyncInstituteEvidence()}
+            >
+              {t.components.syncEvidenceInstitute}
+            </button>
+            <button
+              type="button"
               className="btn"
               onClick={() => setShowCreateInstitute((visible) => !visible)}
             >

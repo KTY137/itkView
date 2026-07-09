@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from app.models import Component
 from app.pdb_test_evidence import fetch_test_run_evidence
 from app.stage_service import satisfied_test_results
 
@@ -74,3 +75,57 @@ def test_sync_evidence_endpoint_populates_and_feeds_stage_engine(
 def test_sync_evidence_endpoint_noop_without_pdb(client: TestClient):
     body = client.post("/api/components/20USEM00000001/sync-evidence").json()
     assert body["created"] == 0 and body["total"] == 0
+
+
+class _MultiClient:
+    def __init__(self, by_sn):
+        self._by_sn = by_sn
+
+    def get(self, action, json=None):
+        assert action == "getComponent"
+        return self._by_sn.get(json["component"], {})
+
+
+class _MultiGateway:
+    def __init__(self, by_sn):
+        self.is_configured = True
+        self._client = _MultiClient(by_sn)
+
+    def client(self):
+        return self._client
+
+
+def _module(sn: str) -> Component:
+    return Component(
+        sn=sn, component_type="MODULE", type_code="R0", stage="GLUED",
+        location="TUDO", institute_code="TUDO",
+    )
+
+
+def test_institute_evidence_sync_covers_only_live_modules(client: TestClient, session_factory):
+    with session_factory() as session:
+        session.add(_module("20USEM00000001"))
+        session.add(_module("20USEM00000002"))
+        trashed = _module("20USEM00000003")
+        trashed.trashed = True
+        session.add(trashed)  # skipped
+        session.add(  # non-module skipped
+            Component(sn="20USES00000001", component_type="SENSOR", type_code="X",
+                      stage="X", location="TUDO", institute_code="TUDO")
+        )
+        session.commit()
+
+    by_sn = {
+        "20USEM00000001": {"tests": [{"testType": {"code": "MODULE_BOW"},
+                                      "testRuns": [{"id": "a", "passed": True}]}]},
+        "20USEM00000002": {"tests": [{"testType": {"code": "MODULE_BOW"},
+                                      "testRuns": [{"id": "b", "passed": True}]}]},
+    }
+    client.app.state.pdb_gateway = _MultiGateway(by_sn)
+    resp = client.post("/api/sync/evidence/TUDO").json()
+    assert resp["components_processed"] == 2  # only the two live modules
+    assert resp["created"] == 2
+
+    with session_factory() as session:
+        assert satisfied_test_results(session, "20USEM00000001")["MODULE_BOW"] is True
+        assert satisfied_test_results(session, "20USEM00000002")["MODULE_BOW"] is True

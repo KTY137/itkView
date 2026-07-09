@@ -59,6 +59,9 @@ const en = {
     instituteNamePlaceholder: "e.g. TU Dortmund",
     institutePrefixPlaceholder: "e.g. TUDO-",
     syncSelected: "Sync selected institute",
+    syncEvidenceInstitute: "Sync test evidence",
+    syncEvidenceInstituteDone: (created: number, processed: number) =>
+      `Test evidence synced: ${created} new across ${processed} components.`,
     syncNeedsInstitute: "Select or create an institute before syncing.",
     instituteCreated: (code: string) => `Institute ${code} created.`,
     syncComplete: (
