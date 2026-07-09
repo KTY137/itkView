@@ -125,6 +125,11 @@ export default function ComponentsScreen({
       setSelectedSn(null);
       setDetailReturnTo(null);
       setQ(nav.q);
+    } else {
+      // Empty intent (e.g. clicking the "Components" nav while a detail is
+      // open): drop the detail and return to the list.
+      setSelectedSn(null);
+      setDetailReturnTo(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navToken]);
