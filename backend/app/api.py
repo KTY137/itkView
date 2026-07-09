@@ -53,6 +53,7 @@ from app.schemas import (
     IngestPreviewOut,
     IngestProposalCreate,
     InstituteCreate,
+    InstituteEvidenceSyncOut,
     InstituteOut,
     LoginIn,
     MeOut,
@@ -1050,6 +1051,49 @@ def component_sync_evidence(
     db.commit()
     return EvidenceSyncOut(
         component_sn=sn,
+        created=stats.created,
+        updated=stats.updated,
+        unchanged=stats.unchanged,
+        total=stats.total,
+    )
+
+
+@router.post(
+    "/api/sync/evidence/{institute_code}",
+    response_model=InstituteEvidenceSyncOut,
+    tags=["components", "workflow"],
+)
+def sync_institute_evidence(
+    institute_code: str,
+    request: Request,
+    component_type: str = "MODULE",
+    db: Session = Depends(get_db),
+) -> InstituteEvidenceSyncOut:
+    """Mirror PDB test-run evidence for every live component of one type at an
+    institute, so the dashboard's required-test gaps and stage suggestions
+    reflect real PDB results. One PDB read per component; a no-op when the
+    gateway is not configured."""
+    from app.pdb_test_evidence import fetch_test_run_evidence
+    from app.test_run_evidence import upsert_test_run_evidence
+
+    gateway = _pdb_gateway(request)
+    components = db.scalars(
+        select(Component).where(
+            Component.institute_code == institute_code,
+            Component.component_type == component_type,
+            Component.trashed.is_(False),
+        )
+    )
+    records = []
+    processed = 0
+    for component in components:
+        records.extend(fetch_test_run_evidence(gateway, component.sn))
+        processed += 1
+    stats = upsert_test_run_evidence(db, records)
+    db.commit()
+    return InstituteEvidenceSyncOut(
+        institute_code=institute_code,
+        components_processed=processed,
         created=stats.created,
         updated=stats.updated,
         unchanged=stats.unchanged,
