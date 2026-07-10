@@ -84,6 +84,16 @@ Komponentenliste, Detail-Stammdaten, Family-Tree und Board-Card-Tooltip.
 Beispiel: `R5M0` → „Module · Endcap R5, pos 0", `ATLAS18R5` → „Sensor ATLAS18,
 Endcap R5". Unbekannte Codes fallen sauber auf den Rohwert zurueck.
 
+Ebenso **Stage-Codes**: `stageLabel()` humanisiert `SNAKE_CASE`-Stages
+(`HV_TAB_ATTACHED` → „HV Tab Attached", `STITCH_BONDING` → „Stitch Bonding") —
+nur Unterstrich-Split + Title-Case, ITk-Akronyme (HV/IV/QC/PWB/…) bleiben
+gross; kein institutsspezifisches Mapping (Regel #4). Verdrahtet in
+Board-Spaltenkoepfe (Klartext + Rohcode als Mono-Unterzeile), Stage-Chips
+(Klartext, Rohcode im `title`), Stage-Vorschlag-Texte und Statistik-Balken. Der
+Rohcode bleibt ueberall als kanonische technische Referenz sichtbar (z. B. das
+Stammdaten-Feld `Stage`). Test-Typ-Codes (`MODULE_IV_PS_V1`) bleiben bewusst roh
+(echte technische Identifier).
+
 ## 4. Produktionsablauf: Modul von Anfang bis Ende
 
 Grobschritte der Strip-Modul-Assembly, gemappt auf die PDB-Stages und das

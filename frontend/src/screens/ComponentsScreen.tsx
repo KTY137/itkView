@@ -28,7 +28,7 @@ import type {
 import { useAuth } from "../auth";
 import { filterDemoComponents, getDemoComponent } from "../demoData";
 import { formatTimestamp, t } from "../i18n";
-import { describeComponent, roleLabel, stageChipClass } from "../ui";
+import { describeComponent, roleLabel, stageChipClass, stageLabel } from "../ui";
 import RegisterModuleForm from "./RegisterModuleForm";
 
 function errorMessage(err: unknown): string {
@@ -575,7 +575,9 @@ export default function ComponentsScreen({
                   <td className="mono">{c.sn}</td>
                   <td title={c.type_code}>{describeComponent(c)}</td>
                   <td>
-                    <span className={stageChipClass(c.stage)}>{c.stage}</span>
+                    <span className={stageChipClass(c.stage)} title={c.stage}>
+                      {stageLabel(c.stage)}
+                    </span>
                   </td>
                   <td>{c.location}</td>
                 </tr>
@@ -709,7 +711,9 @@ function ComponentDetailPanel({
       <div className="detail-head">
         <h2 className="detail-title">{detail.local_name ?? detail.sn}</h2>
         <span className="mono muted">{detail.sn}</span>
-        <span className={stageChipClass(detail.stage)}>{detail.stage}</span>
+        <span className={stageChipClass(detail.stage)} title={detail.stage}>
+          {stageLabel(detail.stage)}
+        </span>
         {detail.is_dummy && <span className="chip muted">{t.components.dummy}</span>}
         {detail.trashed && <span className="chip red">{t.components.trashed}</span>}
       </div>
@@ -741,7 +745,9 @@ function ComponentDetailPanel({
                 <span className="role">{roleLabel(detail.component_type)}</span>
                 <strong>{detail.local_name ?? detail.sn}</strong>
                 <span className="mono muted">{detail.sn}</span>
-                <span className={stageChipClass(detail.stage)}>{detail.stage}</span>
+                <span className={stageChipClass(detail.stage)} title={detail.stage}>
+                  {stageLabel(detail.stage)}
+                </span>
                 <span className="ok is-muted">{t.components.thisComponent}</span>
               </li>
               {detail.children.map((child) => (
@@ -973,7 +979,7 @@ function StageSuggestionSection({
         created_by: user?.email ?? "ui-user",
       });
       setProposed(true);
-      setNotice(t.components.stageProposed(action.id, suggestion.suggested_stage));
+      setNotice(t.components.stageProposed(action.id, stageLabel(suggestion.suggested_stage)));
     } catch (err) {
       setNotice(`${t.components.stageProposeFailed}: ${errorMessage(err)}`);
     } finally {
@@ -1001,7 +1007,9 @@ function StageSuggestionSection({
                 <tr key={`${check.stage}:${check.test_type}`}>
                   <td className="mono">{check.test_type}</td>
                   <td>
-                    <span className={stageChipClass(check.stage)}>{check.stage}</span>
+                    <span className={stageChipClass(check.stage)} title={check.stage}>
+                      {stageLabel(check.stage)}
+                    </span>
                   </td>
                   <td>
                     <span className={STATUS_CHIP[check.status]}>{STATUS_LABEL[check.status]}</span>
@@ -1014,7 +1022,7 @@ function StageSuggestionSection({
         <div className={suggestion.move_suggested ? "callout ok" : "callout"}>
           <span>
             {suggestion.move_suggested && suggestion.suggested_stage !== null
-              ? t.components.stageSuggestion(suggestion.suggested_stage)
+              ? t.components.stageSuggestion(stageLabel(suggestion.suggested_stage))
               : suggestion.next_stage === null
                 ? t.components.stageNoNext
                 : t.components.stageBlocked}
@@ -1028,7 +1036,7 @@ function StageSuggestionSection({
             >
               {proposing
                 ? t.components.stageProposing
-                : t.components.stageProposeMove(suggestion.suggested_stage)}
+                : t.components.stageProposeMove(stageLabel(suggestion.suggested_stage))}
             </button>
           )}
         </div>

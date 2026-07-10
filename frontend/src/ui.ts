@@ -67,6 +67,36 @@ export function stageTone(stage: string): StageTone {
   return stageToneOf(stage);
 }
 
+/**
+ * Collaboration-wide ITk acronyms that must stay upper-cased when a SNAKE_CASE
+ * stage/test code is humanised (docs/10-itk-domain-reference.md). This is shared
+ * ITk vocabulary, not institute config — so it is safe to keep fixed (rule #4).
+ */
+const ITK_ACRONYMS = new Set([
+  "HV", "IV", "LV", "VI", "QC", "PWB", "DAQ", "AMAC", "ABC", "HCC", "TC", "ID", "SN",
+]);
+
+/**
+ * Human-readable label for a SNAKE_CASE stage/test code, e.g.
+ * `HV_TAB_ATTACHED` → "HV Tab Attached", `STITCH_BONDING` → "Stitch Bonding".
+ * Institute-agnostic: it only splits on underscores and Title-Cases words,
+ * preserving known ITk acronyms. The raw code stays the canonical technical
+ * label — callers keep showing it (tooltip / mono sub-label) alongside this.
+ */
+export function stageLabel(stage: string | null | undefined): string {
+  if (!stage) return "";
+  return stage
+    .trim()
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((word) => {
+      const upper = word.toUpperCase();
+      if (ITK_ACRONYMS.has(upper)) return upper;
+      return upper.charAt(0) + word.slice(1).toLowerCase();
+    })
+    .join(" ");
+}
+
 /** Tone for an outbox status — green when confirmed, red on failure, muted
  * when cancelled, neutral while in the review pipeline. */
 export function statusTone(status: string): "good" | "crit" | "none" {

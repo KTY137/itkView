@@ -4,7 +4,7 @@ import type { ProductionStats, ProductionStatsQuery, StatsDimensions } from "../
 import { makeDemoProductionStats, makeDemoStatsDimensions } from "../demoData";
 import { formatCount, t } from "../i18n";
 import StageLegend from "../StageLegend";
-import { stageChipClass } from "../ui";
+import { stageChipClass, stageLabel } from "../ui";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -259,7 +259,7 @@ function HorizontalBars({
       {rows.map((r) => (
         <div className="hbar-row" key={r.label}>
           <span className={stageChipClass(r.label)} title={r.label}>
-            {r.label}
+            {stageLabel(r.label)}
           </span>
           <div className="hbar-track">
             <div className="hbar-fill" style={{ width: `${(r.value / max) * 100}%` }} />
