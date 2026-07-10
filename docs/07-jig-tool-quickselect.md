@@ -8,6 +8,12 @@
 > Scanner-Aufloesung und read-only Import aus bereits gespiegelten
 > PDB-`TOOLS`-Komponenten (`POST /api/sync/tools/{institute}`). Glue-Batches
 > und direkte Assembly-Wizard-Integration sind noch offen.
+>
+> Stand 2026-07-10: **Pflicht-Property-Pruefung beim Upload** umgesetzt —
+> `InstituteProfile.settings['required_properties']` = `{test_type: [key, …]}`
+> (z. B. `{"GLUE_WEIGHT": ["JIG"]}`); der Ingest-Dry-Run (`preview` +
+> `propose-outbox`) blockt, wenn eine Pflicht-Property (z. B. das benutzte Jig)
+> in `payload['properties']` fehlt. Institutskonfiguriert (Regel #4), Default leer.
 
 ## Problem / Motivation
 

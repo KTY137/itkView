@@ -101,7 +101,8 @@ ueberschreibbar) ✓:
    kontrolliert. App-Pflichttests: `GLUE_WEIGHT`, `MODULE_BOW`,
    `MODULE_METROLOGY`. ✓
    → **Genau hier braucht der PDB-Upload das benutzte Jig als Attachment-Property,
-   sonst blockt er.** Aktuell nicht erzwungen (siehe §5).
+   sonst blockt er.** Seit 2026-07-10 vom Ingest-Dry-Run erzwungen, sobald das
+   Institut es konfiguriert (§5).
 4. **`STITCH_BONDING` → `BONDED` — Wire-Bonding** — ASIC-Kanaele auf die
    Sensorstreifen bonden (Stitch-Bonds), Hybrid↔Powerboard. App-Pflichttest bei
    `BONDED`: `MODULE_WIRE_BONDING` (inkl. Pull-Test). ✓
@@ -124,12 +125,13 @@ mit anderem Ablauf (Barrel) ueberschreibt sie im Profil — **kein Hardcoding**.
   Frontend: `RegisterModuleForm` bei den Komponenten (`canWrite`). Der eigentliche
   PDB-Write passiert nie direkt — nur ueber die genehmigte Outbox-Aktion. **Nie
   SENSOR/ASIC** (Guard an beiden Enden).
-- **Jig-Pflicht beim Upload**: Nicht abgedeckt. `pdb_upload.build_upload_test_run_payload`
-  reicht `properties` nur durch ✓; `stages.py` kennt nur `required_tests`, **keine
-  required Attachment-Properties**. Loesung: pro Stage/Testtyp konfigurierbare
-  Pflicht-Properties (institutsneutral wie `required_tests`), die der Dry-Run
-  blockt, wenn das Jig fehlt — plus Quick-Select aus der `Tool`-Registry
-  (`docs/07`).
+- **Jig-Pflicht beim Upload**: **Umgesetzt (2026-07-10).** Institutskonfigurierbare
+  Pflicht-Properties pro Testtyp (`InstituteProfile.settings['required_properties']`,
+  z. B. `{"GLUE_WEIGHT": ["JIG"]}`, Regel-#4-safe, Default leer);
+  `ingestion.missing_required_properties` speist den Ingest-Dry-Run — `preview` +
+  `propose-outbox` blocken, wenn das benutzte Jig in `payload['properties']`
+  fehlt. Offen: Quick-Select aus der `Tool`-Registry im Wizard (`docs/07`) und
+  der exakte PDB-Property-Key (§6).
 
 ## 6. Offene Fragen (gegen Live-PDB verifizieren)
 

@@ -322,3 +322,29 @@ def parse_payload(payload: dict) -> ParsedTestRun:
         if parser.sniff(payload):
             return parser.parse(payload)
     raise AssertionError("unreachable: the generic parser accepts every payload")
+
+
+def missing_required_properties(
+    payload_properties: Any, institute_settings: Any, test_type: str | None
+) -> list[str]:
+    """Institute-required property keys absent from an upload's `properties`.
+
+    Some steps (e.g. hybrid gluing) require the used jig recorded on the upload
+    or the PDB rejects it. The required keys per test type are institute config,
+    not code (hard rule #4): `settings['required_properties'][test_type]`. An
+    empty or missing config means no requirement. See docs/07.
+    """
+    if test_type is None or not isinstance(institute_settings, dict):
+        return []
+    mapping = institute_settings.get("required_properties")
+    if not isinstance(mapping, dict):
+        return []
+    required = mapping.get(test_type)
+    if not isinstance(required, list):
+        return []
+    props = payload_properties if isinstance(payload_properties, dict) else {}
+    return [
+        key
+        for key in required
+        if isinstance(key, str) and key and (key not in props or props.get(key) in (None, ""))
+    ]
