@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { getInstitutes } from "./api";
 import type { Institute } from "./api";
-import { t } from "./i18n";
+import { useAuth } from "./auth";
+import { roleName, t } from "./i18n";
 import BoardScreen from "./screens/BoardScreen";
 import ComponentsScreen from "./screens/ComponentsScreen";
 import DashboardScreen from "./screens/DashboardScreen";
+import LoginScreen from "./screens/LoginScreen";
 import OutboxScreen from "./screens/OutboxScreen";
 import StatisticsScreen from "./screens/StatisticsScreen";
 import ToolsScreen from "./screens/ToolsScreen";
@@ -42,7 +44,35 @@ export type ScreenId =
 /** Cross-screen navigation intent (open a component, or seed the search). */
 export type NavIntent = { token: number; sn?: string; q?: string; returnTo?: ScreenId };
 
+/** Auth gate: session probe → splash, no session → login, otherwise the shell.
+ * Demo mode (backend unreachable) renders the shell too, so the app stays
+ * usable offline instead of trapping the user on a dead login screen. */
 export default function App() {
+  const { status } = useAuth();
+  if (status === "loading") {
+    return (
+      <div className="auth-splash">
+        <div className="login-brand">
+          itk<span>Flow</span>
+        </div>
+        <p className="muted">{t.auth.checkingSession}</p>
+      </div>
+    );
+  }
+  if (status === "unauthenticated") return <LoginScreen />;
+  return <AppShell />;
+}
+
+/** Initials for the rail avatar, e.g. "Anna Abel" → "AA". */
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+function AppShell() {
+  const { user, demo, logout } = useAuth();
   const [screen, setScreen] = useState<ScreenId>("board");
   const [health, setHealth] = useState<Health | null>(null);
   const [healthError, setHealthError] = useState(false);
@@ -113,10 +143,13 @@ export default function App() {
   }
 
   const activeLabel = [...SCREENS, ...SITE_SCREENS].find((s) => s.id === screen)?.label ?? "";
-  const instituteCode = institutes[0]?.code;
+  // A signed-in user's home institute wins for branding; fall back to the first
+  // synced institute (e.g. in demo mode there is no user).
+  const brandCode = user?.institute_code ?? institutes[0]?.code;
+  const brandInstitute = institutes.find((i) => i.code === brandCode) ?? institutes[0];
   // Institute branding is profile data (hard rule #4: never hardcode an
   // institute) — the logo comes from the selected institute's settings.
-  const rawLogo = institutes[0]?.settings?.logo_url;
+  const rawLogo = brandInstitute?.settings?.logo_url;
   const logoUrl = typeof rawLogo === "string" && rawLogo !== "" ? rawLogo : null;
 
   return (
@@ -124,7 +157,7 @@ export default function App() {
       <aside className="rail">
         <div className="brand">
           itk<span>Flow</span>
-          {instituteCode && <span className="inst">{instituteCode}</span>}
+          {brandCode && <span className="inst">{brandCode}</span>}
         </div>
         <div className="grp">{t.nav.groupProduction}</div>
         <nav aria-label="Main navigation">
@@ -169,19 +202,38 @@ export default function App() {
         <div className="rail-bottom">
           {logoUrl !== null && (
             <div className="rail-logo">
-              <img src={logoUrl} alt={instituteCode ? `${instituteCode} logo` : "Institute logo"} />
+              <img src={logoUrl} alt={brandCode ? `${brandCode} logo` : "Institute logo"} />
             </div>
           )}
-          <div className="me">
-            <span className="ava">it</span>
-            <span>
-              itkFlow
-              <br />
-              <span className="role">
-                {instituteCode ? `${t.nav.operator} · ${instituteCode}` : t.nav.operator}
+          {user !== null ? (
+            <div className="me" title={t.auth.signedInAs}>
+              <span className="ava">{initials(user.display_name)}</span>
+              <span className="me-id">
+                <span className="me-name">{user.display_name}</span>
+                <span className="role">
+                  {roleName(user.role)}
+                  {user.institute_code ? ` · ${user.institute_code}` : ""}
+                </span>
               </span>
-            </span>
-          </div>
+              <button
+                type="button"
+                className="logout-btn"
+                onClick={() => void logout()}
+                title={t.auth.signOut}
+                aria-label={t.auth.signOut}
+              >
+                ⏻
+              </button>
+            </div>
+          ) : (
+            <div className="me" title={demo ? t.auth.demoHint : undefined}>
+              <span className="ava">D</span>
+              <span className="me-id">
+                <span className="me-name">{t.auth.demoUser}</span>
+                <span className="role">{t.auth.demoRole}</span>
+              </span>
+            </div>
+          )}
         </div>
       </aside>
 

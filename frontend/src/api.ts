@@ -291,6 +291,24 @@ export type ToolSyncResult = {
   total: number;
 };
 
+// ---- Auth shapes ------------------------------------------------------------
+
+export type Role = "viewer" | "operator" | "admin";
+
+/** The signed-in user, as returned by `/api/auth/login` and `/api/auth/me`.
+ * `institute_*` are nullable: a global admin (docs/06) has no home institute. */
+export type MeOut = {
+  id: number;
+  email: string;
+  display_name: string;
+  role: Role;
+  institute_id: number | null;
+  institute_code: string | null;
+  csrf_token: string;
+};
+
+export type LoginBody = { email: string; password: string };
+
 // ---- Error handling ----------------------------------------------------------
 
 export class ApiError extends Error {
@@ -311,16 +329,80 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+// ---- Auth / session plumbing -------------------------------------------------
+//
+// The whole app is cookie-authenticated: every call sends the httpOnly session
+// cookie (`credentials: "include"`), and every state-changing call carries the
+// CSRF token in the `X-CSRF-Token` header. The token is populated from
+// `MeOut.csrf_token` after login/session-probe (`setCsrfToken`) and, as a
+// belt-and-suspenders fallback, read from the readable `itkflow_csrf` cookie.
+//
+// Two cross-cutting signals are dispatched to the auth layer so a dead session
+// or a role violation is handled once, centrally: a non-auth `401` drops the
+// user to the login screen, a non-auth `403` raises a toast. Auth endpoints
+// (`/api/auth/*`) are exempt — their 401 is the normal "not signed in" answer
+// and is handled inline by the caller.
+
+const AUTH_PATH_PREFIX = "/api/auth/";
+
+let csrfToken: string | null = null;
+let unauthorizedHandler: (() => void) | null = null;
+let forbiddenHandler: (() => void) | null = null;
+
+/** Keep the CSRF token the fetch layer attaches to writes in sync with the
+ * signed-in session (call with the token from `MeOut`, or null on logout). */
+export function setCsrfToken(token: string | null): void {
+  csrfToken = token;
+}
+
+/** Register a handler fired on a non-auth `401` (session gone → login screen). */
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
+
+/** Register a handler fired on a non-auth `403` (wrong role → toast). */
+export function setForbiddenHandler(handler: (() => void) | null): void {
+  forbiddenHandler = handler;
+}
+
+function readCookie(name: string): string | null {
+  if (typeof document === "undefined") return null;
+  const prefix = `${name}=`;
+  for (const part of document.cookie.split(";")) {
+    const entry = part.trim();
+    if (entry.startsWith(prefix)) return decodeURIComponent(entry.slice(prefix.length));
+  }
+  return null;
+}
+
+function currentCsrfToken(): string | null {
+  return csrfToken ?? readCookie("itkflow_csrf");
+}
+
+/** Shared fetch: cookies always, CSRF header on writes, and central dispatch of
+ * the auth signals. Returns the raw `Response` for the JSON/void wrappers. */
+async function rawFetch(path: string, init?: RequestInit): Promise<Response> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  const headers = new Headers(init?.headers);
+  if (method !== "GET" && method !== "HEAD") {
+    const token = currentCsrfToken();
+    if (token !== null && !headers.has("X-CSRF-Token")) headers.set("X-CSRF-Token", token);
+  }
+
   let res: Response;
   try {
-    res = await fetch(path, init);
+    res = await fetch(path, { ...init, credentials: "include", headers });
   } catch (err) {
     // Keep aborts distinguishable from real network failures.
     if (err instanceof DOMException && err.name === "AbortError") throw err;
     throw new ApiError("Backend not reachable", 0);
   }
+
   if (!res.ok) {
+    if (!path.startsWith(AUTH_PATH_PREFIX)) {
+      if (res.status === 401) unauthorizedHandler?.();
+      else if (res.status === 403) forbiddenHandler?.();
+    }
     let detail: string | null = null;
     try {
       const body: unknown = await res.json();
@@ -333,7 +415,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(detail ?? `${res.status} ${res.statusText}`, res.status, detail);
   }
+  return res;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await rawFetch(path, init);
   return (await res.json()) as T;
+}
+
+/** Like `request`, but for endpoints that answer `204 No Content` (e.g. logout). */
+async function requestVoid(path: string, init?: RequestInit): Promise<void> {
+  await rawFetch(path, init);
 }
 
 function queryString(params: Record<string, string | undefined>): string {
@@ -535,4 +627,26 @@ export function postOutboxTransition(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+// ---- Auth endpoints ---------------------------------------------------------
+
+/** Sign in with email + password. 200 sets the session + `itkflow_csrf`
+ * cookies and returns the user; 401 on bad or inactive credentials. */
+export function postLogin(body: LoginBody): Promise<MeOut> {
+  return request<MeOut>("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Current session's user, or a thrown `ApiError(401)` when not signed in. */
+export function getMe(signal?: AbortSignal): Promise<MeOut> {
+  return request<MeOut>("/api/auth/me", { signal });
+}
+
+/** End the current session (204). */
+export function postLogout(): Promise<void> {
+  return requestVoid("/api/auth/logout", { method: "POST" });
 }

@@ -25,9 +25,10 @@ import type {
   RequirementCheck,
   StageSuggestion,
 } from "../api";
+import { useAuth } from "../auth";
 import { filterDemoComponents, getDemoComponent } from "../demoData";
 import { formatTimestamp, t } from "../i18n";
-import { roleLabel, stageChipClass } from "../ui";
+import { describeComponent, roleLabel, stageChipClass } from "../ui";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -87,6 +88,7 @@ export default function ComponentsScreen({
   nav?: NavIntent;
   onNavigate?: (screen: ScreenId) => void;
 }) {
+  const { canWrite, isAdmin } = useAuth();
   const [q, setQ] = useState("");
   const [stage, setStage] = useState("");
   const [rows, setRows] = useState<ComponentOut[]>([]);
@@ -364,29 +366,35 @@ export default function ComponentsScreen({
                 </option>
               ))}
             </select>
-            <button
-              type="button"
-              className="btn"
-              disabled={syncing || selectedInstitute === ""}
-              onClick={() => void handleSyncSelectedInstitute()}
-            >
-              {syncing ? t.common.loading : t.components.syncSelected}
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={syncing || selectedInstitute === ""}
-              onClick={() => void handleSyncInstituteEvidence()}
-            >
-              {t.components.syncEvidenceInstitute}
-            </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => setShowCreateInstitute((visible) => !visible)}
-            >
-              {showCreateInstitute ? t.common.cancel : t.components.createInstitute}
-            </button>
+            {canWrite && (
+              <>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={syncing || selectedInstitute === ""}
+                  onClick={() => void handleSyncSelectedInstitute()}
+                >
+                  {syncing ? t.common.loading : t.components.syncSelected}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={syncing || selectedInstitute === ""}
+                  onClick={() => void handleSyncInstituteEvidence()}
+                >
+                  {t.components.syncEvidenceInstitute}
+                </button>
+              </>
+            )}
+            {isAdmin && (
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setShowCreateInstitute((visible) => !visible)}
+              >
+                {showCreateInstitute ? t.common.cancel : t.components.createInstitute}
+              </button>
+            )}
             {institutes.length === 0 && (
               <span className="muted">{t.components.noInstitutes}</span>
             )}
@@ -409,7 +417,7 @@ export default function ComponentsScreen({
               </button>
             </div>
           )}
-          {showCreateInstitute && (
+          {isAdmin && showCreateInstitute && (
             <form className="toolbar create-institute-form" onSubmit={handleCreateInstitute}>
               <input
                 className="short-input mono"
@@ -557,7 +565,7 @@ export default function ComponentsScreen({
                     </div>
                   </td>
                   <td className="mono">{c.sn}</td>
-                  <td>{c.component_type}</td>
+                  <td title={c.type_code}>{describeComponent(c)}</td>
                   <td>
                     <span className={stageChipClass(c.stage)}>{c.stage}</span>
                   </td>
@@ -583,6 +591,7 @@ function ComponentDetailPanel({
   onBack: () => void;
   onOpen: (sn: string) => void;
 }) {
+  const { canWrite } = useAuth();
   const [detail, setDetail] = useState<ComponentDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -701,7 +710,7 @@ function ComponentDetailPanel({
           <h3 className="section-title">{t.components.masterData}</h3>
           <div className="panel">
             <div className="field-grid">
-              <Field label={t.components.fieldType} value={detail.component_type} />
+              <Field label={t.components.fieldType} value={describeComponent(detail)} />
               <Field label={t.components.fieldTypeCode} value={detail.type_code} mono />
               <Field label={t.components.fieldStage} value={detail.stage} mono />
               <Field label={t.components.fieldLocation} value={detail.location} />
@@ -729,7 +738,9 @@ function ComponentDetailPanel({
               </li>
               {detail.children.map((child) => (
                 <li className="tree-row lvl1" key={child.sn}>
-                  <span className="role">{roleLabel(child.component_type)}</span>
+                  <span className="role" title={describeComponent(child)}>
+                    {roleLabel(child.component_type)}
+                  </span>
                   <button className="link-btn" onClick={() => onOpen(child.sn)}>
                     {child.local_name ?? child.sn}
                   </button>
@@ -751,23 +762,27 @@ function ComponentDetailPanel({
           </div>
         </div>
         <div className="det-col">
-          <div className="toolbar">
-            <button
-              type="button"
-              className="btn"
-              disabled={evidenceSyncing}
-              onClick={() => void handleSyncEvidence()}
-            >
-              {evidenceSyncing ? t.components.syncingEvidence : t.components.syncEvidence}
-            </button>
-          </div>
-          {evidenceNotice !== null && (
-            <div className="info-banner" role="status">
-              <span>{evidenceNotice}</span>
-              <button type="button" className="btn" onClick={() => setEvidenceNotice(null)}>
-                OK
-              </button>
-            </div>
+          {canWrite && (
+            <>
+              <div className="toolbar">
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={evidenceSyncing}
+                  onClick={() => void handleSyncEvidence()}
+                >
+                  {evidenceSyncing ? t.components.syncingEvidence : t.components.syncEvidence}
+                </button>
+              </div>
+              {evidenceNotice !== null && (
+                <div className="info-banner" role="status">
+                  <span>{evidenceNotice}</span>
+                  <button type="button" className="btn" onClick={() => setEvidenceNotice(null)}>
+                    OK
+                  </button>
+                </div>
+              )}
+            </>
           )}
           <StagedChangesSection sn={detail.sn} />
           {suggestion !== null ? (
@@ -929,6 +944,7 @@ function StageSuggestionSection({
   suggestion: StageSuggestion;
   instituteCode: string;
 }) {
+  const { canWrite, user } = useAuth();
   const [notice, setNotice] = useState<string | null>(null);
   const [proposing, setProposing] = useState(false);
   const [proposed, setProposed] = useState(false);
@@ -946,7 +962,7 @@ function StageSuggestionSection({
           from_stage: suggestion.current_stage,
           to_stage: suggestion.suggested_stage,
         },
-        created_by: "ui-user",
+        created_by: user?.email ?? "ui-user",
       });
       setProposed(true);
       setNotice(t.components.stageProposed(action.id, suggestion.suggested_stage));
@@ -995,9 +1011,10 @@ function StageSuggestionSection({
                 ? t.components.stageNoNext
                 : t.components.stageBlocked}
           </span>
-          {suggestion.move_suggested && suggestion.suggested_stage !== null && (
+          {canWrite && suggestion.move_suggested && suggestion.suggested_stage !== null && (
             <button
               className="btn primary"
+              type="button"
               disabled={proposing || proposed}
               onClick={() => void handlePropose()}
             >

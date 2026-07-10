@@ -3,7 +3,7 @@ import { ApiError, getComponents } from "../api";
 import type { ComponentOut } from "../api";
 import { filterDemoComponents } from "../demoData";
 import { t } from "../i18n";
-import { stageTone } from "../ui";
+import { describeComponent, stageTone } from "../ui";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -106,7 +106,7 @@ export default function BoardScreen({ onOpen }: { onOpen: (sn: string) => void }
                           <span className="nm-label" title={m.local_name ?? m.sn}>
                             {m.local_name ?? m.sn}
                           </span>
-                          <span className="typ" title={m.type_code}>
+                          <span className="typ" title={describeComponent(m)}>
                             {m.type_code}
                           </span>
                         </div>

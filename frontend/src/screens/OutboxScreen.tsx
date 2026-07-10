@@ -7,6 +7,7 @@ import {
   postOutboxTransition,
 } from "../api";
 import type { OutboxAction, OutboxContract, OutboxStatus } from "../api";
+import { useAuth } from "../auth";
 import { makeDemoOutbox } from "../demoData";
 import { formatTimestamp, t } from "../i18n";
 
@@ -32,6 +33,7 @@ function errorMessage(err: unknown): string {
 }
 
 export default function OutboxScreen() {
+  const { canWrite, user } = useAuth();
   const [actions, setActions] = useState<OutboxAction[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -105,7 +107,7 @@ export default function OutboxScreen() {
     }
     setBusyId(action.id);
     try {
-      await postOutboxTransition(action.id, { to, actor: ACTOR });
+      await postOutboxTransition(action.id, { to, actor: user?.email ?? ACTOR });
       await load({ silent: true });
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
@@ -208,19 +210,25 @@ export default function OutboxScreen() {
                     <td className="muted">{formatTimestamp(a.updated_at)}</td>
                     <td>
                       <div className="row-actions">
-                        {targets.length === 0 && <span className="muted">{t.outbox.noActions}</span>}
-                        {targets.map((to) => (
-                          <button
-                            key={to}
-                            className={to === "cancelled" || to === "failed" ? "btn danger" : "btn"}
-                            disabled={busyId === a.id}
-                            onClick={() => void handleTransition(a, to)}
-                          >
-                            {a.status === "failed" && to === "submitted"
-                              ? t.outbox.retryLabel
-                              : t.outbox.transitions[to]}
-                          </button>
-                        ))}
+                        {!canWrite || targets.length === 0 ? (
+                          <span className="muted">{t.outbox.noActions}</span>
+                        ) : (
+                          targets.map((to) => (
+                            <button
+                              key={to}
+                              type="button"
+                              className={
+                                to === "cancelled" || to === "failed" ? "btn danger" : "btn"
+                              }
+                              disabled={busyId === a.id}
+                              onClick={() => void handleTransition(a, to)}
+                            >
+                              {a.status === "failed" && to === "submitted"
+                                ? t.outbox.retryLabel
+                                : t.outbox.transitions[to]}
+                            </button>
+                          ))
+                        )}
                       </div>
                     </td>
                   </tr>

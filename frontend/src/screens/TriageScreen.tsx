@@ -8,6 +8,7 @@ import {
   postIngestOutboxProposal,
 } from "../api";
 import type { IngestFile, IngestPreview } from "../api";
+import { useAuth } from "../auth";
 import { makeDemoIngestFiles } from "../demoData";
 import { formatTimestamp, t } from "../i18n";
 
@@ -24,9 +25,10 @@ function parseJsonObject(text: string): Record<string, unknown> {
 }
 
 export default function TriageScreen() {
+  const { canWrite, user } = useAuth();
   const [files, setFiles] = useState<IngestFile[]>([]);
   const [filename, setFilename] = useState("");
-  const [uploadedBy, setUploadedBy] = useState("ui-demo-user");
+  const [uploadedBy, setUploadedBy] = useState(user?.email ?? "ui-demo-user");
   const [payloadText, setPayloadText] = useState(t.triage.payloadPlaceholder);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -157,39 +159,41 @@ export default function TriageScreen() {
           <span className="muted">{t.common.demoNote}</span>
         </div>
       )}
-      <form className="panel compact-panel triage-form" onSubmit={handleUpload}>
-        <div className="toolbar">
-          <input
-            className="text-input"
-            value={filename}
-            onChange={(event) => setFilename(event.target.value)}
-            placeholder={t.triage.filenamePlaceholder}
-            aria-label={t.triage.filenameLabel}
-            maxLength={240}
+      {canWrite && (
+        <form className="panel compact-panel triage-form" onSubmit={handleUpload}>
+          <div className="toolbar">
+            <input
+              className="text-input"
+              value={filename}
+              onChange={(event) => setFilename(event.target.value)}
+              placeholder={t.triage.filenamePlaceholder}
+              aria-label={t.triage.filenameLabel}
+              maxLength={240}
+              required
+            />
+            <input
+              className="text-input"
+              value={uploadedBy}
+              onChange={(event) => setUploadedBy(event.target.value)}
+              placeholder={t.triage.uploadedByPlaceholder}
+              aria-label={t.triage.uploadedByLabel}
+              maxLength={120}
+              required
+            />
+            <button className="btn" type="submit" disabled={uploading}>
+              {uploading ? t.common.loading : t.triage.submit}
+            </button>
+          </div>
+          <textarea
+            className="json-input mono"
+            value={payloadText}
+            onChange={(event) => setPayloadText(event.target.value)}
+            aria-label={t.triage.payloadLabel}
+            rows={7}
             required
           />
-          <input
-            className="text-input"
-            value={uploadedBy}
-            onChange={(event) => setUploadedBy(event.target.value)}
-            placeholder={t.triage.uploadedByPlaceholder}
-            aria-label={t.triage.uploadedByLabel}
-            maxLength={120}
-            required
-          />
-          <button className="btn" disabled={uploading}>
-            {uploading ? t.common.loading : t.triage.submit}
-          </button>
-        </div>
-        <textarea
-          className="json-input mono"
-          value={payloadText}
-          onChange={(event) => setPayloadText(event.target.value)}
-          aria-label={t.triage.payloadLabel}
-          rows={7}
-          required
-        />
-      </form>
+        </form>
+      )}
       {notice !== null && (
         <div className="info-banner" role="status">
           <span>{notice}</span>
@@ -259,15 +263,16 @@ export default function TriageScreen() {
                         </span>
                       ) : file.component_sn === null || file.test_type === null ? (
                         <span className="muted">{t.triage.cannotPropose}</span>
-                      ) : (
+                      ) : canWrite ? (
                         <button
                           className="btn"
+                          type="button"
                           disabled={busyProposalId === file.id}
                           onClick={() => void handlePropose(file)}
                         >
                           {busyProposalId === file.id ? t.common.loading : t.triage.proposeOutbox}
                         </button>
-                      )}
+                      ) : null}
                     </div>
                   </td>
                 </tr>

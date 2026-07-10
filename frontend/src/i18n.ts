@@ -1,4 +1,4 @@
-import type { OutboxStatus } from "./api";
+import type { OutboxStatus, Role } from "./api";
 
 /**
  * UI copy. English is the default (and currently only) locale; keeping every
@@ -318,11 +318,45 @@ const en = {
     scanFits: "Fits module types",
     scanStatus: "Status",
   },
+  auth: {
+    signInTitle: "Sign in to itkFlow",
+    signInSubtitle: "Sign in to record production steps and push reviewed writes.",
+    emailLabel: "Email",
+    emailPlaceholder: "you@example.org",
+    passwordLabel: "Password",
+    passwordPlaceholder: "Your password",
+    signIn: "Sign in",
+    signingIn: "Signing in…",
+    invalidCredentials: "Invalid email or password.",
+    loginNetwork: "Backend not reachable — cannot sign in right now.",
+    loginFailed: "Sign-in failed",
+    continueDemo: "Continue offline (demo)",
+    checkingSession: "Checking your session…",
+    signOut: "Sign out",
+    signedInAs: "Signed in",
+    demoUser: "Demo mode",
+    demoRole: "Offline · no sign-in",
+    demoHint: "Backend not reachable — showing built-in demo data.",
+    forbidden: "You don't have permission for that action.",
+    sessionExpired: "Your session ended — please sign in again.",
+    needOperator: "Requires the operator role",
+    needAdmin: "Requires the admin role",
+    roles: {
+      viewer: "Viewer",
+      operator: "Operator",
+      admin: "Admin",
+    } satisfies Record<Role, string>,
+  },
   placeholder: {
     shell: "Phase 0 shell — this screen arrives in phase",
     backendHint: "The backend outbox and institute API are already live under",
   },
 };
+
+/** Human-readable label for a user role (auth), i18n-driven. */
+export function roleName(role: Role): string {
+  return en.auth.roles[role];
+}
 
 export const t = en;
 
