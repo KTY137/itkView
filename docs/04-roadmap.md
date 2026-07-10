@@ -129,6 +129,14 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   `propose-outbox`) blockt, wenn das benutzte Jig fehlt. Regel-#4-safe, Default
   leer. `ingestion.missing_required_properties` + 227 Backend-Tests gruen. Siehe
   `docs/07`.
+- **Metrologie-Parser (2026-07-10):** `module-metrology-v1` validiert die
+  `MODULE_METROLOGY`-Result-Groups. Wichtiger Befund: die Messprogramm-/zFlow-JSON
+  ist bereits die Standard-PDB-`uploadTestRunResults`-Form → itkFlow ingestet
+  Metrologie direkt. Offen: der Roh-`.txt`→JSON-Converter (Nominal-Tabellen).
+  Siehe `docs/10`.
+- **Auth-Login-Fix (2026-07-10):** Alt-/Legacy-Session-Cookies liessen Login
+  (403) und `/api/auth/me` (500) crashen — gefixt (`whoami` mintet fehlende
+  CSRF-Token, `csrf_protect` nimmt Login aus), 3 Regressionstests. 240 Tests gruen.
 
 ## Naechste Arbeitspakete
 
