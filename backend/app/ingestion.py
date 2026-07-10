@@ -306,11 +306,68 @@ def _parse_generic_json(payload: dict) -> ParsedTestRun:
     return parsed
 
 
+# --------------------------------------------------------------------------
+# Module metrology (OGP Smartscope): the instrument/zFlow already converts its
+# raw position + glue-height scan into these PDB result groups — positions as
+# deviation-from-nominal, heights in µm (see docs/10). We validate that shape;
+# the raw .txt -> JSON geometry conversion itself stays upstream for now.
+# --------------------------------------------------------------------------
+
+_METROLOGY_HEIGHT_GROUPS = ("HYBRID_GLUE_THICKNESS", "PB_GLUE_THICKNESS", "CAP_HEIGHT")
+_METROLOGY_POSITION_GROUPS = ("HYBRID_POSITION", "PB_POSITION")
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _sniff_metrology(payload: dict) -> bool:
+    return _sniff_pdb_test_run(payload) and payload["testType"].strip() == "MODULE_METROLOGY"
+
+
+def _parse_metrology(payload: dict) -> ParsedTestRun:
+    parsed = _parse_pdb_test_run(payload, parser_name="module-metrology-v1")
+    results = payload.get("results")
+    if not isinstance(results, dict):
+        return parsed  # the base parser already flagged missing results
+
+    groups_seen = 0
+    for group in _METROLOGY_HEIGHT_GROUPS:
+        values = results.get(group)
+        if values is None:
+            continue
+        groups_seen += 1
+        if isinstance(values, dict):
+            bad = sorted(k for k, v in values.items() if not _is_number(v))
+            if bad:
+                parsed.issues.append(f"{group} has non-numeric heights: {', '.join(bad[:5])}")
+        elif not _is_number(values):
+            parsed.issues.append(f"{group} must be a number or a map of numbers")
+
+    for group in _METROLOGY_POSITION_GROUPS:
+        positions = results.get(group)
+        if positions is None:
+            continue
+        groups_seen += 1
+        if isinstance(positions, dict):
+            for name, xy in positions.items():
+                if not (isinstance(xy, list) and len(xy) == 2 and all(_is_number(v) for v in xy)):
+                    parsed.issues.append(f"{group}['{name}'] must be an [x, y] number pair")
+                    break
+
+    if groups_seen == 0:
+        parsed.warnings.append(
+            "No recognised metrology result groups (HYBRID_GLUE_THICKNESS, CAP_HEIGHT, …)"
+        )
+    return parsed
+
+
 # Ordered registry: most specific first, generic fallback last (always matches).
 PARSERS: tuple[Parser, ...] = (
     Parser("glue-weight-v1", _sniff_glue_weight, _parse_glue_weight),
     Parser("iv-curve-v1", _sniff_iv_curve, _parse_iv_curve),
     Parser("pull-test-v1", _sniff_pull_test, _parse_pull_test),
+    Parser("module-metrology-v1", _sniff_metrology, _parse_metrology),
     Parser("pdb-test-run-v1", _sniff_pdb_test_run, _parse_pdb_test_run),
     Parser("generic-json-v1", lambda payload: True, _parse_generic_json),
 )

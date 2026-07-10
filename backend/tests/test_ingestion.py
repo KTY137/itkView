@@ -11,14 +11,14 @@ def pdb_payload(**overrides) -> dict:
     """A complete, valid PDB-shaped test-run payload (anonymised)."""
     payload = {
         "component": "20USE5M0000701",
-        "testType": "MODULE_METROLOGY",
+        "testType": "MODULE_ASSEMBLY",
         "institution": "TUDO",
         "runNumber": "1",
         "date": "2026-07-01T09:30:00.000Z",
         "passed": True,
         "problems": False,
         "properties": {"MACHINE": "OGP Smartscope", "OPERATOR": "Anna Abel"},
-        "results": {"HYBRID_POSITION": {"H_P1": [-7.4, -11.7]}, "BOW": 12.5},
+        "results": {"HEIGHT": 12.5, "WIDTH": 97.5},
     }
     payload.update(overrides)
     return payload
@@ -34,15 +34,15 @@ def test_parse_payload_accepts_pdb_test_run_shape():
     assert parsed.parser == "pdb-test-run-v1"
     assert parsed.component_sn == "20USE5M0000701"
     assert parsed.local_name is None
-    assert parsed.test_type == "MODULE_METROLOGY"
+    assert parsed.test_type == "MODULE_ASSEMBLY"
     assert parsed.run_number == "1"
     assert parsed.institution == "TUDO"
     assert parsed.passed is True
     assert parsed.problems is False
     assert parsed.n_properties == 2
     assert {(r.name, r.kind) for r in parsed.results} == {
-        ("HYBRID_POSITION", "object"),
-        ("BOW", "number"),
+        ("HEIGHT", "number"),
+        ("WIDTH", "number"),
     }
     assert parsed.issues == []
     assert parsed.warnings == []
@@ -270,7 +270,7 @@ def test_ingest_preview_reports_dry_run_and_mirror_state(
     assert body["institute_code"] == "TUDO"
     assert body["passed"] is True
     assert body["issues"] == []
-    assert {r["name"] for r in body["results"]} == {"HYBRID_POSITION", "BOW"}
+    assert {r["name"] for r in body["results"]} == {"HEIGHT", "WIDTH"}
 
     assert client.get("/api/ingest/files/99999/preview").status_code == 404
 
@@ -345,7 +345,7 @@ def test_ingest_file_can_propose_outbox_action(client: TestClient, session_facto
     assert action["status"] == "draft"
     assert action["payload"]["ingest_file_id"] == ingest["id"]
     assert action["payload"]["component_sn"] == "20USE5M0000701"
-    assert action["payload"]["test_type"] == "MODULE_METROLOGY"
+    assert action["payload"]["test_type"] == "MODULE_ASSEMBLY"
     assert action["payload"]["run_number"] == "1"
     assert action["payload"]["passed"] is True
     assert action["payload"]["dry_run_required"] is True

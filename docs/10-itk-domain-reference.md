@@ -133,6 +133,15 @@ mit anderem Ablauf (Barrel) ueberschreibt sie im Profil — **kein Hardcoding**.
   fehlt. Offen: Quick-Select aus der `Tool`-Registry im Wizard (`docs/07`) und
   der exakte PDB-Property-Key (§6).
 
+- **Metrologie-Ingestion**: Die Messprogramm-/zFlow-Ausgabe fuer `MODULE_METROLOGY`
+  ist bereits die Standard-PDB-`uploadTestRunResults`-Form (Result-Groups
+  `HYBRID_POSITION` / `HYBRID_GLUE_THICKNESS` / `CAP_HEIGHT` / …: Positionen als
+  Abweichung vom Nominal, Hoehen in µm). itkFlow ingestet sie **direkt**; der
+  Parser `module-metrology-v1` validiert die Group-Struktur (2026-07-10).
+  **Offen:** der Roh-`.txt`→JSON-Converter (Glue-Thickness = Bauteil−Sensor,
+  mm→µm, Positions-Abweichung), portierbar aus der zFlow-Referenz — braucht die
+  Nominal-Positionstabellen je Modultyp.
+
 ## 6. Offene Fragen (gegen Live-PDB verifizieren)
 
 - Exaktes `type_code`-Vokabular (alle Ringe/Positionen, Barrel-Codes) und die
