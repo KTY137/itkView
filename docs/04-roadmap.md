@@ -137,6 +137,25 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 - **Auth-Login-Fix (2026-07-10):** Alt-/Legacy-Session-Cookies liessen Login
   (403) und `/api/auth/me` (500) crashen — gefixt (`whoami` mintet fehlende
   CSRF-Token, `csrf_protect` nimmt Login aus), 3 Regressionstests. 240 Tests gruen.
+- **Dev-Server-Login-Fix (2026-07-10):** Das hartnaeckige „kann mich nicht
+  einloggen" war letztlich **kein Auth-Code-Problem** (Login funktioniert
+  end-to-end durch den Proxy, per Cookie-Jar-Probe verifiziert), sondern ein
+  Fleet aus veralteten Dev-Servern (ein IPv6-only `:5173`, Streuner auf `:5192`,
+  Vite-Drift auf `:5174`), der den Browser auf einem toten/veralteten Tab
+  stranden liess. `frontend/vite.config.ts` pinnt jetzt `host:127.0.0.1`,
+  `port:5173`, `strictPort:true` (faellt laut aus statt zu driften) und proxyt
+  auf explizit `http://127.0.0.1:8000` (nie `localhost` — Windows/modernes Node
+  loest zuerst `::1` auf und verfehlt das IPv4-only-Backend).
+- **UI: Label-Humanisierung & Workflow-Klarheit (2026-07-10):** `stageLabel()`
+  (`ui.ts`) humanisiert `SNAKE_CASE`-Stages (`HV_TAB_ATTACHED` → „HV Tab
+  Attached"), institutsneutral, ITk-Akronyme (HV/QC/PWB…) bleiben gross;
+  verdrahtet in Board-Spaltenkoepfe (Klartext + Rohcode-Unterzeile), Stage-Chips
+  (Rohcode im `title`), Stage-Vorschlaege, Legende, Dashboard- und
+  Statistik-Balken sowie den Komponententyp-Filter (`roleLabel`). Triage/Outbox
+  benennen jetzt den Zwei-Schritt-Flow explizit („Step 1/2" Parsen+Validieren →
+  „Step 2/2" Review+Submit), und die Outbox-`Kind`-Spalte zeigt lesbare Labels
+  (Upload test run / Stage move / Register component). Rohcodes bleiben ueberall
+  als kanonische Referenz (Hover / Stammdaten-Feld). `tsc`+Build gruen. Siehe `docs/10`.
 
 ## Naechste Arbeitspakete
 
