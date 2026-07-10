@@ -62,6 +62,7 @@ from app.schemas import (
     InstituteCreate,
     InstituteEvidenceSyncOut,
     InstituteOut,
+    InstituteUpdate,
     LoginIn,
     MeOut,
     OutboxContractOut,
@@ -399,6 +400,33 @@ def create_institute(body: InstituteCreate, db: Session = Depends(get_db)) -> In
         raise HTTPException(status_code=409, detail=f"Institute '{body.code}' already exists.")
     institute = InstituteProfile(**body.model_dump())
     db.add(institute)
+    db.commit()
+    db.refresh(institute)
+    return institute
+
+
+@router.patch("/api/institutes/{code}", response_model=InstituteOut, tags=["institutes"])
+def update_institute(
+    code: str,
+    body: InstituteUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> InstituteProfile:
+    """Update an institute profile's config — branding, `stage_requirements`,
+    `required_properties` (docs/07), etc. Admin-only: a per-institute admin may
+    edit only their own institute, a global admin any. `settings` is
+    shallow-merged so unrelated config survives."""
+    institute = db.scalar(select(InstituteProfile).where(InstituteProfile.code == code))
+    if institute is None:
+        raise HTTPException(status_code=404, detail=f"Institute '{code}' not found.")
+    if admin.institute_id is not None and admin.institute_id != institute.id:
+        raise HTTPException(status_code=403, detail="You can only edit your own institute.")
+    if body.name is not None:
+        institute.name = body.name
+    if body.local_name_prefix is not None:
+        institute.local_name_prefix = body.local_name_prefix
+    if body.settings is not None:
+        institute.settings = {**(institute.settings or {}), **body.settings}
     db.commit()
     db.refresh(institute)
     return institute

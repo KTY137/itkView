@@ -13,7 +13,8 @@
 > `InstituteProfile.settings['required_properties']` = `{test_type: [key, …]}`
 > (z. B. `{"GLUE_WEIGHT": ["JIG"]}`); der Ingest-Dry-Run (`preview` +
 > `propose-outbox`) blockt, wenn eine Pflicht-Property (z. B. das benutzte Jig)
-> in `payload['properties']` fehlt. Institutskonfiguriert (Regel #4), Default leer.
+> in `payload['properties']` fehlt. Institutskonfiguriert (Regel #4), Default leer,
+> setzbar per `PATCH /api/institutes/{code}` (admin).
 
 ## Problem / Motivation
 
