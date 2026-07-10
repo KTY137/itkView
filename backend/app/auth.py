@@ -16,6 +16,10 @@ from datetime import datetime, timedelta, timezone
 ROLES = ("viewer", "operator", "admin")
 
 SESSION_COOKIE = "itkflow_session"
+# Readable (non-httpOnly) cookie carrying the CSRF token for the double-submit
+# guard; the frontend echoes it back in the X-CSRF-Token header (docs/06).
+CSRF_COOKIE = "itkflow_csrf"
+CSRF_HEADER = "X-CSRF-Token"
 SESSION_TTL = timedelta(hours=12)
 
 _PBKDF2_ROUNDS = 200_000
@@ -49,6 +53,11 @@ def verify_password(password: str, stored: str | None) -> bool:
 
 
 def new_session_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def new_csrf_token() -> str:
+    """A fresh, unguessable CSRF token, bound to the session at login."""
     return secrets.token_urlsafe(32)
 
 

@@ -1,4 +1,5 @@
 import pytest
+from authutil import authenticate
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -27,3 +28,26 @@ def tudo(client: TestClient) -> dict:
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+# Role-scoped clients: each signs the shared `client` in and pins its CSRF token
+# so gated writes work. Institute-agnostic (institute_id=None) — tests that need
+# an institute still request the `tudo` fixture (docs/06).
+
+
+@pytest.fixture()
+def as_operator(client: TestClient, session_factory) -> TestClient:
+    authenticate(client, session_factory, role="operator")
+    return client
+
+
+@pytest.fixture()
+def as_admin(client: TestClient, session_factory) -> TestClient:
+    authenticate(client, session_factory, role="admin")
+    return client
+
+
+@pytest.fixture()
+def as_viewer(client: TestClient, session_factory) -> TestClient:
+    authenticate(client, session_factory, role="viewer")
+    return client

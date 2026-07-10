@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     app_name: str = "itkFlow"
     database_url: str = "sqlite:///./itkflow.db"
 
+    # --- Auth / sessions --------------------------------------------------
+    # Mark the login (and CSRF) cookies `Secure` so browsers only send them over
+    # HTTPS. Default False keeps local http dev working; set True behind TLS
+    # (remote access, docs/08).
+    session_cookie_secure: bool = False
+
     # --- PDB access -------------------------------------------------------
     pdb_instance: Literal["test", "production"] = "test"
     # Second, deliberate switch. Both must be set to reach production.

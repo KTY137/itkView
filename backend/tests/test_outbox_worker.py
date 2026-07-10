@@ -7,6 +7,7 @@ submitter is not even called when it must not be.
 """
 
 import pytest
+from authutil import authenticate
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -80,6 +81,7 @@ def seed_upload_action(
 ) -> int:
     """Create a mirrored component set, an ingest file and an outbox
     `upload_test_run` action moved to the requested status. Returns its id."""
+    authenticate(client, session_factory, role="operator")  # ingest writes are gated
     client.post(
         "/api/institutes",
         json={"code": "TUDO", "name": "TU Dortmund", "local_name_prefix": "TUDO-"},

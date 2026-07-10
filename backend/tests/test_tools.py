@@ -1,5 +1,6 @@
 """Tests for the jig/tool registry and type-filtered quick-select (docs/07)."""
 
+from authutil import login_as
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -115,7 +116,7 @@ def test_create_tool_requires_operator(client: TestClient, session_factory, tudo
     assert client.post("/api/tools", json={"kind": "jig", "code": "X"}).status_code == 401
 
     email, password = add_operator(session_factory, tudo["id"])
-    client.post("/api/auth/login", json={"email": email, "password": password})
+    login_as(client, email, password)
     created = client.post(
         "/api/tools",
         json={"kind": "jig", "code": "NEWJIG", "compatible_types": ["R5M0"]},
@@ -128,7 +129,7 @@ def test_create_tool_requires_operator(client: TestClient, session_factory, tudo
 def test_update_tool_can_blacklist(client: TestClient, session_factory, tudo):
     tool_id = add_tool(session_factory, kind="jig", code="J", compatible_types=["R2"])
     email, password = add_operator(session_factory, tudo["id"])
-    client.post("/api/auth/login", json={"email": email, "password": password})
+    login_as(client, email, password)
     resp = client.patch(f"/api/tools/{tool_id}", json={"status": "blacklisted"})
     assert resp.status_code == 200
     assert resp.json()["status"] == "blacklisted"
@@ -150,7 +151,9 @@ def test_tool_sync_imports_pdb_tools_from_component_mirror(client, session_facto
     assert tools[0]["institute_id"] == tudo["id"]
 
 
-def test_tool_sync_endpoint_uses_existing_mirror(client: TestClient, session_factory, tudo):
+def test_tool_sync_endpoint_uses_existing_mirror(
+    client: TestClient, session_factory, tudo, as_operator
+):
     with session_factory() as session:
         sync_components(
             session,
@@ -197,7 +200,7 @@ def test_tool_sync_extracts_side_suffixed_r_types(client: TestClient, session_fa
     assert tool["compatible_types"] == ["R2H0S"]
 
 
-def test_component_sync_auto_refreshes_tool_registry(client: TestClient, tudo):
+def test_component_sync_auto_refreshes_tool_registry(client: TestClient, tudo, as_operator):
     client.app.state.component_fetcher = lambda settings, institute: FetchResult(
         records=[tool_component("20USERT0606117", local_name="Bond_Jig_Large_6117")],
         skipped=0,

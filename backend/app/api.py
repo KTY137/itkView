@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import json
 from collections.abc import Iterator
 from datetime import timezone
@@ -9,13 +10,17 @@ from sqlalchemy.orm import Session, selectinload
 
 from app import __version__
 from app.auth import (
+    CSRF_COOKIE,
+    CSRF_HEADER,
     SESSION_COOKIE,
     SESSION_TTL,
     hash_password,
+    new_csrf_token,
     new_session_token,
     session_expiry,
     verify_password,
 )
+from app.config import Settings
 from app.domain.stages import DEFAULT_STAGE_ORDER
 from app.ingestion import ParsedTestRun, parse_payload
 from app.models import (
@@ -84,9 +89,8 @@ def get_db(request: Request) -> Iterator[Session]:
         yield session
 
 
-def current_user(request: Request, db: Session = Depends(get_db)) -> User | None:
-    """Resolve the signed-in user from the session cookie, or None. Optional —
-    endpoints stay usable while auth is being rolled out (docs/06)."""
+def current_session(request: Request, db: Session = Depends(get_db)) -> UserSession | None:
+    """Resolve the live (unexpired) session from the cookie, or None."""
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         return None
@@ -99,6 +103,17 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> User | None
         expires = expires.replace(tzinfo=timezone.utc)
     if expires < utcnow():
         return None
+    return session
+
+
+def current_user(
+    session: UserSession | None = Depends(current_session),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """Resolve the signed-in user from the session cookie, or None. Optional —
+    endpoints stay usable while auth is being rolled out (docs/06)."""
+    if session is None:
+        return None
     user = db.get(User, session.user_id)
     return user if (user is not None and user.is_active) else None
 
@@ -107,6 +122,28 @@ def require_user(user: User | None = Depends(current_user)) -> User:
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication required.")
     return user
+
+
+_CSRF_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def csrf_protect(
+    request: Request, session: UserSession | None = Depends(current_session)
+) -> None:
+    """Double-submit CSRF guard, bound to the server-side session (docs/06).
+
+    Applied to every route (router-level dependency) but only enforced on
+    state-changing requests that carry a valid session: safe methods are exempt,
+    and an unauthenticated request has no ambient cookie authority to forge (it
+    is still stopped by the auth dependency where a role is required). When a
+    session is present, the `X-CSRF-Token` header must equal the token bound to
+    that session row; login itself is exempt because no session exists yet.
+    """
+    if request.method in _CSRF_SAFE_METHODS or session is None:
+        return
+    header = request.headers.get(CSRF_HEADER) or ""
+    if not header or not hmac.compare_digest(header, session.csrf_token or ""):
+        raise HTTPException(status_code=403, detail="Missing or invalid CSRF token.")
 
 
 def require_role(*roles: str):
@@ -128,7 +165,7 @@ require_admin = require_role("admin")
 require_operator = require_role("operator", "admin")
 
 
-def _me(user: User) -> MeOut:
+def _me(user: User, csrf_token: str) -> MeOut:
     code = user.institute.code if user.institute is not None else None
     return MeOut(
         id=user.id,
@@ -137,10 +174,37 @@ def _me(user: User) -> MeOut:
         role=user.role,
         institute_id=user.institute_id,
         institute_code=code,
+        csrf_token=csrf_token,
     )
 
 
-router = APIRouter()
+def _set_session_cookie(response: Response, token: str, settings: Settings) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=settings.session_cookie_secure,
+        max_age=int(SESSION_TTL.total_seconds()),
+    )
+
+
+def _set_csrf_cookie(response: Response, csrf_token: str, settings: Settings) -> None:
+    # Readable by the frontend (NOT httpOnly) so it can echo the token back in
+    # the X-CSRF-Token header (double-submit, docs/06).
+    response.set_cookie(
+        CSRF_COOKIE,
+        csrf_token,
+        httponly=False,
+        samesite="lax",
+        secure=settings.session_cookie_secure,
+        max_age=int(SESSION_TTL.total_seconds()),
+    )
+
+
+# Every route carries the CSRF guard; it is a no-op for safe methods and for
+# unauthenticated requests (see `csrf_protect`).
+router = APIRouter(dependencies=[Depends(csrf_protect)])
 
 
 # --------------------------------------------------------------------------
@@ -149,21 +213,24 @@ router = APIRouter()
 
 
 @router.post("/api/auth/login", response_model=MeOut, tags=["auth"])
-def login(body: LoginIn, response: Response, db: Session = Depends(get_db)) -> MeOut:
+def login(
+    body: LoginIn, request: Request, response: Response, db: Session = Depends(get_db)
+) -> MeOut:
     user = db.scalar(select(User).where(User.email == body.email.strip().lower()))
     if user is None or not user.is_active or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     token = new_session_token()
-    db.add(UserSession(token=token, user_id=user.id, expires_at=session_expiry()))
-    db.commit()
-    response.set_cookie(
-        SESSION_COOKIE,
-        token,
-        httponly=True,
-        samesite="lax",
-        max_age=int(SESSION_TTL.total_seconds()),
+    csrf_token = new_csrf_token()
+    db.add(
+        UserSession(
+            token=token, user_id=user.id, csrf_token=csrf_token, expires_at=session_expiry()
+        )
     )
-    return _me(user)
+    db.commit()
+    settings = request.app.state.settings
+    _set_session_cookie(response, token, settings)
+    _set_csrf_cookie(response, csrf_token, settings)
+    return _me(user, csrf_token)
 
 
 @router.post("/api/auth/logout", status_code=204, tags=["auth"])
@@ -175,11 +242,21 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)) 
             db.delete(session)
             db.commit()
     response.delete_cookie(SESSION_COOKIE)
+    response.delete_cookie(CSRF_COOKIE)
 
 
 @router.get("/api/auth/me", response_model=MeOut, tags=["auth"])
-def whoami(user: User = Depends(require_user)) -> MeOut:
-    return _me(user)
+def whoami(
+    request: Request,
+    response: Response,
+    user: User = Depends(require_user),
+    session: UserSession | None = Depends(current_session),
+) -> MeOut:
+    # `require_user` guarantees a live session here; refresh the readable CSRF
+    # cookie so the frontend always has a current token to echo back.
+    csrf_token = session.csrf_token if session is not None else ""
+    _set_csrf_cookie(response, csrf_token, request.app.state.settings)
+    return _me(user, csrf_token)
 
 
 @router.get("/api/users", response_model=list[UserOut], tags=["users"])
@@ -254,10 +331,11 @@ def order_buckets(
 def active_module_requirement_gaps(db: Session) -> tuple[int, int]:
     """Required-test gaps for active modules, using the same engine as detail.
 
-    Until a PDB test-run mirror exists, this measures local evidence gaps:
-    confirmed itkFlow uploads are counted as satisfied, everything else remains
-    missing. Terminal/trashed/stale modules are excluded so old production
-    history does not dominate the daily dashboard.
+    Gaps are computed by the same stage engine as the detail view, which counts
+    both mirrored PDB test-run evidence (`app.pdb_test_evidence`) and confirmed
+    itkFlow uploads as satisfied; everything else remains missing.
+    Terminal/trashed/stale modules are excluded so old production history does
+    not dominate the daily dashboard.
     """
 
     modules = db.scalars(
@@ -505,6 +583,7 @@ def sync_components_for_institute(
     institute_code: str,
     request: Request,
     db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
 ) -> ComponentSyncOut:
     institute = db.scalar(select(InstituteProfile).where(InstituteProfile.code == institute_code))
     if institute is None:
@@ -542,6 +621,7 @@ def sync_components_for_institute(
 def sync_tools_for_institute(
     institute_code: str,
     db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
 ) -> ToolSyncOut:
     """Rebuild the local tool registry from already mirrored PDB tool components."""
 
@@ -708,7 +788,11 @@ def get_outbox_action(action_id: int, db: Session = Depends(get_db)) -> OutboxAc
 
 
 @router.post("/api/outbox", response_model=OutboxOut, status_code=201, tags=["outbox"])
-def create_outbox_action(body: OutboxCreate, db: Session = Depends(get_db)) -> OutboxAction:
+def create_outbox_action(
+    body: OutboxCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> OutboxAction:
     institute = db.scalar(
         select(InstituteProfile).where(InstituteProfile.code == body.institute_code)
     )
@@ -719,13 +803,15 @@ def create_outbox_action(body: OutboxCreate, db: Session = Depends(get_db)) -> O
         kind=body.kind,
         payload=body.payload,
         status=OutboxStatus.DRAFT.value,
-        created_by=body.created_by,
+        created_by=user.email,
+        user_id=user.id,
     )
     db.add(action)
     db.flush()
     db.add(
         AuditEvent(
-            actor=body.created_by,
+            actor=user.email,
+            user_id=user.id,
             action="outbox.created",
             subject=f"outbox:{action.id}",
             detail={"kind": body.kind, "institute": institute.code},
@@ -739,7 +825,10 @@ def create_outbox_action(body: OutboxCreate, db: Session = Depends(get_db)) -> O
 
 @router.post("/api/outbox/{action_id}/transition", response_model=OutboxOut, tags=["outbox"])
 def transition_outbox_action(
-    action_id: int, body: OutboxTransition, db: Session = Depends(get_db)
+    action_id: int,
+    body: OutboxTransition,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
 ) -> OutboxAction:
     action = db.get(OutboxAction, action_id)
     if action is None:
@@ -760,7 +849,8 @@ def transition_outbox_action(
 
     db.add(
         AuditEvent(
-            actor=body.actor,
+            actor=user.email,
+            user_id=user.id,
             action="outbox.transition",
             subject=f"outbox:{action.id}",
             detail={"from": current.value, "to": body.to.value, "error": body.error},
@@ -793,7 +883,11 @@ def list_ingest_files(
     status_code=201,
     tags=["ingestion"],
 )
-def create_ingest_file(body: IngestFileCreate, db: Session = Depends(get_db)) -> IngestFile:
+def create_ingest_file(
+    body: IngestFileCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> IngestFile:
     raw = canonical_json_bytes(body.payload)
     parsed = parse_payload(body.payload)
     component = resolve_component(db, parsed)
@@ -813,13 +907,14 @@ def create_ingest_file(body: IngestFileCreate, db: Session = Depends(get_db)) ->
         parser=parsed.parser,
         error="; ".join(notes) if notes else None,
         payload=body.payload,
-        uploaded_by=body.uploaded_by,
+        uploaded_by=user.email,
     )
     db.add(ingest)
     db.flush()
     db.add(
         AuditEvent(
-            actor=body.uploaded_by,
+            actor=user.email,
+            user_id=user.id,
             action="ingest.received",
             subject=f"ingest:{ingest.id}",
             detail={
@@ -880,7 +975,10 @@ def preview_ingest_file(file_id: int, db: Session = Depends(get_db)) -> IngestPr
     tags=["ingestion", "outbox"],
 )
 def propose_ingest_outbox_action(
-    file_id: int, body: IngestProposalCreate, db: Session = Depends(get_db)
+    file_id: int,
+    body: IngestProposalCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
 ) -> OutboxAction:
     ingest = db.get(IngestFile, file_id)
     if ingest is None:
@@ -923,7 +1021,8 @@ def propose_ingest_outbox_action(
         institute_id=institute.id,
         kind="upload_test_run",
         status=OutboxStatus.DRAFT.value,
-        created_by=body.created_by,
+        created_by=user.email,
+        user_id=user.id,
         payload={
             "ingest_file_id": ingest.id,
             "filename": ingest.filename,
@@ -944,7 +1043,8 @@ def propose_ingest_outbox_action(
     ingest.error = None
     db.add(
         AuditEvent(
-            actor=body.created_by,
+            actor=user.email,
+            user_id=user.id,
             action="ingest.outbox_proposed",
             subject=f"ingest:{ingest.id}",
             detail={"outbox_action_id": action.id, "institute": institute.code},

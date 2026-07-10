@@ -57,6 +57,27 @@ def ensure_phase0_sqlite_schema(engine: Engine) -> None:
                 connection.execute(
                     text("ALTER TABLE outbox_action ADD COLUMN external_ref VARCHAR(64)")
                 )
+            # Server-set attribution link to the signed-in user (docs/06). Nullable
+            # and additive: the denormalised `created_by` string is kept for history.
+            if "user_id" not in outbox_columns:
+                connection.execute(
+                    text("ALTER TABLE outbox_action ADD COLUMN user_id INTEGER")
+                )
+        if "audit_event" in tables:
+            audit_columns = {
+                row[1] for row in connection.execute(text("PRAGMA table_info(audit_event)"))
+            }
+            if "user_id" not in audit_columns:
+                connection.execute(text("ALTER TABLE audit_event ADD COLUMN user_id INTEGER"))
+        if "user_session" in tables:
+            session_columns = {
+                row[1] for row in connection.execute(text("PRAGMA table_info(user_session)"))
+            }
+            # Per-session CSRF token; existing sessions get NULL and must re-login.
+            if "csrf_token" not in session_columns:
+                connection.execute(
+                    text("ALTER TABLE user_session ADD COLUMN csrf_token VARCHAR(64)")
+                )
         if "component" in tables:
             component_columns = {
                 row[1] for row in connection.execute(text("PRAGMA table_info(component)"))

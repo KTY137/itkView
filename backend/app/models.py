@@ -100,7 +100,13 @@ class OutboxAction(Base):
     # run id). Its presence means "already written" — the worker never
     # re-submits an action that has one (idempotency guard).
     external_ref: Mapped[str | None] = mapped_column(String(64), default=None)
+    # Denormalised, human-readable author kept for history/display. New writes
+    # set it server-side from the signed-in user; `user_id` is the fraud-proof
+    # link (docs/06). Nullable FK so old rows and system/worker writes stay valid.
     created_by: Mapped[str] = mapped_column(String(120))
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("app_user.id"), default=None, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -145,8 +151,10 @@ class IngestFile(Base):
 class TestRunEvidence(Base):
     """Mirrored evidence that a component has a test run result.
 
-    This is read-side evidence, not a write intent. It can be fed by a future
-    PDB test-run mirror, zFlow reconciliation, or local sync job, and is merged
+    This is read-side evidence, not a write intent. It is fed by the PDB
+    test-run mirror (`app.pdb_test_evidence.fetch_test_run_evidence`, exposed via
+    `/api/components/{sn}/sync-evidence` and `/api/sync/evidence/{institute_code}`),
+    and can also come from zFlow reconciliation or a local sync job; it is merged
     with confirmed itkFlow uploads by `app.stage_service`.
     """
 
@@ -174,7 +182,13 @@ class AuditEvent(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    # `actor` is the denormalised author string (kept for history/display);
+    # `user_id` is the server-set link to the real account. Nullable so old rows
+    # and system/worker events (no signed-in user) remain valid (docs/06).
     actor: Mapped[str] = mapped_column(String(120))
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("app_user.id"), default=None, index=True
+    )
     action: Mapped[str] = mapped_column(String(64))
     subject: Mapped[str] = mapped_column(String(200))
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -243,6 +257,9 @@ class UserSession(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("app_user.id"), index=True)
+    # Per-session CSRF token for the double-submit guard; compared against the
+    # X-CSRF-Token header on every state-changing request (docs/06).
+    csrf_token: Mapped[str] = mapped_column(String(64), default="")
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
