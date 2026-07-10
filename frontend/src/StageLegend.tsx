@@ -1,4 +1,4 @@
-import { stageChipClass } from "./ui";
+import { stageChipClass, stageLabel } from "./ui";
 
 /** The assembly flow in canonical order, then the two off-flow exits. Renders
  * the same chips used across the app, so the colour ramp is self-documenting:
@@ -17,10 +17,16 @@ export default function StageLegend({ label }: { label: string }) {
   return (
     <div className="stage-legend">
       <span className="field-label">{label}</span>
-      <div className="legend-row" role="img" aria-label={`${label}: ${FLOW.join(" → ")}`}>
+      <div
+        className="legend-row"
+        role="img"
+        aria-label={`${label}: ${FLOW.map(stageLabel).join(" → ")}`}
+      >
         {FLOW.map((stage, i) => (
           <span className="legend-item" key={stage}>
-            <span className={stageChipClass(stage)}>{stage}</span>
+            <span className={stageChipClass(stage)} title={stage}>
+              {stageLabel(stage)}
+            </span>
             {i < FLOW.length - 1 && (
               <span className="legend-arrow" aria-hidden="true">
                 →
@@ -32,8 +38,8 @@ export default function StageLegend({ label }: { label: string }) {
           |
         </span>
         {EXITS.map((stage) => (
-          <span className={stageChipClass(stage)} key={stage}>
-            {stage}
+          <span className={stageChipClass(stage)} key={stage} title={stage}>
+            {stageLabel(stage)}
           </span>
         ))}
       </div>

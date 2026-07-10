@@ -4,7 +4,7 @@ import type { ProductionStats, ProductionStatsQuery, StatsDimensions } from "../
 import { makeDemoProductionStats, makeDemoStatsDimensions } from "../demoData";
 import { formatCount, t } from "../i18n";
 import StageLegend from "../StageLegend";
-import { stageChipClass, stageLabel } from "../ui";
+import { roleLabel, stageChipClass, stageLabel } from "../ui";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -75,7 +75,7 @@ export default function StatisticsScreen() {
     );
   }
 
-  const target = stats?.target_stage ?? "FINISHED";
+  const target = stageLabel(stats?.target_stage ?? "FINISHED");
   const lead = stats?.lead_time;
 
   return (
@@ -92,7 +92,7 @@ export default function StatisticsScreen() {
           <select className="select-input" value={componentType} onChange={(e) => setComponentType(e.target.value)}>
             {(dims?.component_types ?? ["MODULE"]).map((ct) => (
               <option key={ct} value={ct}>
-                {ct}
+                {roleLabel(ct)}
               </option>
             ))}
           </select>

@@ -4,7 +4,7 @@ import type { CountBucket, DashboardSummary } from "../api";
 import { makeDemoDashboardSummary } from "../demoData";
 import { formatCount, formatRelative, formatTimestamp, t } from "../i18n";
 import StageLegend from "../StageLegend";
-import { stageTone, statusTone } from "../ui";
+import { stageLabel, stageTone, statusTone } from "../ui";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -91,7 +91,12 @@ export default function DashboardScreen() {
     return <p className="state-note">{t.common.loading}</p>;
   }
 
-  const stageRows: Row[] = summary.by_stage.map((b) => ({ ...b, tone: stageTone(b.label) }));
+  // Humanise the stage label but derive the tone from the raw code first.
+  const stageRows: Row[] = summary.by_stage.map((b) => ({
+    label: stageLabel(b.label),
+    count: b.count,
+    tone: stageTone(b.label),
+  }));
   const statusRows: Row[] = summary.outbox_by_status.map((b) => ({
     ...b,
     tone: statusTone(b.label),
