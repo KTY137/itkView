@@ -11,6 +11,7 @@ import OutboxScreen from "./screens/OutboxScreen";
 import StatisticsScreen from "./screens/StatisticsScreen";
 import ToolsScreen from "./screens/ToolsScreen";
 import TriageScreen from "./screens/TriageScreen";
+import UsersScreen from "./screens/UsersScreen";
 
 type Health = {
   status: string;
@@ -31,6 +32,9 @@ const SCREENS = [
 
 const SITE_SCREENS = [{ id: "tools", label: t.nav.tools, icon: "⚒" }] as const;
 
+// Admin-only; kept out of SITE_SCREENS so the nav entry is gated on the role.
+const USERS_NAV = { id: "users", label: t.nav.users, icon: "◈" } as const;
+
 const SOON = [
   { label: t.nav.glueBatches, icon: "⬡" },
   { label: t.nav.shipments, icon: "⛟" },
@@ -39,7 +43,8 @@ const SOON = [
 
 export type ScreenId =
   | (typeof SCREENS)[number]["id"]
-  | (typeof SITE_SCREENS)[number]["id"];
+  | (typeof SITE_SCREENS)[number]["id"]
+  | (typeof USERS_NAV)["id"];
 
 /** Cross-screen navigation intent (open a component, or seed the search). */
 export type NavIntent = { token: number; sn?: string; q?: string; returnTo?: ScreenId };
@@ -72,7 +77,7 @@ function initials(name: string): string {
 }
 
 function AppShell() {
-  const { user, demo, logout } = useAuth();
+  const { user, demo, logout, isAdmin } = useAuth();
   const [screen, setScreen] = useState<ScreenId>("board");
   const [health, setHealth] = useState<Health | null>(null);
   const [healthError, setHealthError] = useState(false);
@@ -142,7 +147,8 @@ function AppShell() {
     setScanText("");
   }
 
-  const activeLabel = [...SCREENS, ...SITE_SCREENS].find((s) => s.id === screen)?.label ?? "";
+  const activeLabel =
+    [...SCREENS, ...SITE_SCREENS, USERS_NAV].find((s) => s.id === screen)?.label ?? "";
   // A signed-in user's home institute wins for branding; fall back to the first
   // synced institute (e.g. in demo mode there is no user).
   const brandCode = user?.institute_code ?? institutes[0]?.code;
@@ -191,6 +197,22 @@ function AppShell() {
             {s.label}
           </button>
         ))}
+        {isAdmin && (
+          <>
+            <div className="grp">{t.nav.groupAdmin}</div>
+            <button
+              type="button"
+              className="nav-btn"
+              aria-current={screen === "users" ? "page" : undefined}
+              onClick={() => goToScreen("users")}
+            >
+              <span className="ic" aria-hidden="true">
+                {USERS_NAV.icon}
+              </span>{" "}
+              {USERS_NAV.label}
+            </button>
+          </>
+        )}
         {SOON.map((s) => (
           <button key={s.label} type="button" className="nav-btn dis" disabled>
             <span className="ic" aria-hidden="true">
@@ -284,6 +306,8 @@ function AppShell() {
             <OutboxScreen />
           ) : screen === "tools" ? (
             <ToolsScreen />
+          ) : screen === "users" ? (
+            <UsersScreen />
           ) : screen === "statistics" ? (
             <StatisticsScreen />
           ) : (

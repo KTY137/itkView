@@ -309,6 +309,30 @@ export type MeOut = {
 
 export type LoginBody = { email: string; password: string };
 
+export type UserOut = {
+  id: number;
+  email: string;
+  display_name: string;
+  role: Role;
+  is_active: boolean;
+  institute_id: number | null;
+  created_at: string;
+};
+
+export type UserCreateBody = {
+  email: string;
+  display_name: string;
+  role: Role;
+  password: string;
+};
+
+export type UserUpdateBody = {
+  display_name?: string;
+  role?: Role;
+  is_active?: boolean;
+  password?: string;
+};
+
 // ---- Error handling ----------------------------------------------------------
 
 export class ApiError extends Error {
@@ -548,6 +572,28 @@ export function getInstitutes(signal?: AbortSignal): Promise<Institute[]> {
 export function postInstitute(body: InstituteCreate): Promise<Institute> {
   return request<Institute>("/api/institutes", {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Admin-only user management (docs/06). The backend scopes every call to the
+ * signed-in admin's institute; new users join it automatically. */
+export function getUsers(signal?: AbortSignal): Promise<UserOut[]> {
+  return request<UserOut[]>("/api/users", { signal });
+}
+
+export function postUser(body: UserCreateBody): Promise<UserOut> {
+  return request<UserOut>("/api/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function patchUser(id: number, body: UserUpdateBody): Promise<UserOut> {
+  return request<UserOut>(`/api/users/${id}`, {
+    method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
