@@ -106,15 +106,15 @@ class DashboardSummaryOut(BaseModel):
 
 
 class OutboxCreate(BaseModel):
+    # Attribution is server-side now (docs/06): `created_by`/`user_id` are set
+    # from the session, never the body. Any client-sent author is ignored.
     institute_code: str
     kind: str = Field(min_length=1, max_length=48)
     payload: dict = Field(default_factory=dict)
-    created_by: str = Field(min_length=1, max_length=120)
 
 
 class OutboxTransition(BaseModel):
     to: OutboxStatus
-    actor: str = Field(min_length=1, max_length=120)
     error: str | None = None
 
 
@@ -130,6 +130,7 @@ class OutboxOut(BaseModel):
     attempts: int
     external_ref: str | None
     created_by: str
+    user_id: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -141,9 +142,9 @@ class OutboxContractOut(BaseModel):
 
 
 class IngestFileCreate(BaseModel):
+    # `uploaded_by` is set from the session (docs/06), not the body.
     filename: str = Field(min_length=1, max_length=240)
     payload: dict = Field(default_factory=dict)
-    uploaded_by: str = Field(min_length=1, max_length=120)
 
 
 class IngestFileOut(BaseModel):
@@ -165,7 +166,7 @@ class IngestFileOut(BaseModel):
 
 
 class IngestProposalCreate(BaseModel):
-    created_by: str = Field(min_length=1, max_length=120)
+    # `created_by`/`user_id` come from the session (docs/06), not the body.
     institute_code: str | None = Field(default=None, min_length=2, max_length=16)
 
 
@@ -198,6 +199,7 @@ class AuditOut(BaseModel):
     id: int
     ts: datetime
     actor: str
+    user_id: int | None
     action: str
     subject: str
     detail: dict
@@ -255,6 +257,9 @@ class MeOut(BaseModel):
     role: str
     institute_id: int | None
     institute_code: str | None
+    # Double-submit CSRF token, also set as the readable `itkflow_csrf` cookie.
+    # The frontend echoes it in the X-CSRF-Token header (docs/06).
+    csrf_token: str
 
 
 # --- Tools / jigs (docs/07) ------------------------------------------------

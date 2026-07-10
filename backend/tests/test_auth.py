@@ -66,10 +66,15 @@ def test_login_then_me_returns_the_user(client: TestClient, session_factory, tud
     assert body["email"] == "anna@tudo.example"
     assert body["role"] == "operator"
     assert body["institute_code"] == "TUDO"
+    # Login also issues a CSRF token (readable cookie + body field, docs/06).
+    assert body["csrf_token"]
+    assert login.cookies.get("itkflow_csrf") == body["csrf_token"]
 
     me = client.get("/api/auth/me")
     assert me.status_code == 200
     assert me.json()["email"] == "anna@tudo.example"
+    # /me re-issues the same session-bound CSRF token.
+    assert me.json()["csrf_token"] == body["csrf_token"]
 
 
 def test_login_rejects_wrong_password(client: TestClient, session_factory):
@@ -98,7 +103,11 @@ def test_me_requires_auth(client: TestClient):
 
 def test_logout_ends_the_session(client: TestClient, session_factory):
     make_user(session_factory, email="a@b.example", password="right-pass", role="viewer")
-    client.post("/api/auth/login", json={"email": "a@b.example", "password": "right-pass"})
+    body = client.post(
+        "/api/auth/login", json={"email": "a@b.example", "password": "right-pass"}
+    ).json()
+    # logout is state-changing, so it needs the CSRF header too.
+    client.headers["X-CSRF-Token"] = body["csrf_token"]
     assert client.get("/api/auth/me").status_code == 200
     assert client.post("/api/auth/logout").status_code == 204
     assert client.get("/api/auth/me").status_code == 401
@@ -112,6 +121,8 @@ def test_logout_ends_the_session(client: TestClient, session_factory):
 def login(client: TestClient, email: str, password: str) -> None:
     resp = client.post("/api/auth/login", json={"email": email, "password": password})
     assert resp.status_code == 200, resp.text
+    # Later state-changing requests must carry the session's CSRF token.
+    client.headers["X-CSRF-Token"] = resp.json()["csrf_token"]
 
 
 def test_user_management_requires_admin(client: TestClient, session_factory, tudo):

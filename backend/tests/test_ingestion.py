@@ -139,7 +139,7 @@ def test_parse_payload_generic_fallback_guesses_fields():
 # --------------------------------------------------------------------------
 
 
-def test_ingest_file_extracts_metadata_and_audits(client: TestClient):
+def test_ingest_file_extracts_metadata_and_audits(client: TestClient, as_operator):
     response = client.post(
         "/api/ingest/files",
         json={
@@ -172,7 +172,7 @@ def test_ingest_file_extracts_metadata_and_audits(client: TestClient):
     assert audit[0]["detail"]["component_sn"] == "20USE5M0000801"
 
 
-def test_ingest_file_needing_triage_is_not_rejected(client: TestClient):
+def test_ingest_file_needing_triage_is_not_rejected(client: TestClient, as_operator):
     response = client.post(
         "/api/ingest/files",
         json={
@@ -201,7 +201,9 @@ def test_ingest_endpoints_are_in_openapi(client: TestClient):
     assert "/api/ingest/files/{file_id}/propose-outbox" in paths
 
 
-def test_ingest_file_resolves_local_name_against_mirror(client: TestClient, session_factory):
+def test_ingest_file_resolves_local_name_against_mirror(
+    client: TestClient, session_factory, as_operator
+):
     with session_factory() as session:
         sync_components(session, load_fixture_records(DEMO_FIXTURE_PATH))
         session.commit()
@@ -223,7 +225,7 @@ def test_ingest_file_resolves_local_name_against_mirror(client: TestClient, sess
     assert body["error"] is None
 
 
-def test_ingest_file_with_unknown_local_name_goes_to_triage(client: TestClient):
+def test_ingest_file_with_unknown_local_name_goes_to_triage(client: TestClient, as_operator):
     response = client.post(
         "/api/ingest/files",
         json={
@@ -240,7 +242,9 @@ def test_ingest_file_with_unknown_local_name_goes_to_triage(client: TestClient):
     assert "does not match any mirrored component" in body["error"]
 
 
-def test_ingest_preview_reports_dry_run_and_mirror_state(client: TestClient, session_factory):
+def test_ingest_preview_reports_dry_run_and_mirror_state(
+    client: TestClient, session_factory, as_operator
+):
     with session_factory() as session:
         sync_components(session, load_fixture_records(DEMO_FIXTURE_PATH))
         session.commit()
@@ -271,7 +275,7 @@ def test_ingest_preview_reports_dry_run_and_mirror_state(client: TestClient, ses
     assert client.get("/api/ingest/files/99999/preview").status_code == 404
 
 
-def test_ingest_preview_of_incomplete_file_is_not_upload_ready(client: TestClient):
+def test_ingest_preview_of_incomplete_file_is_not_upload_ready(client: TestClient, as_operator):
     payload = pdb_payload()
     del payload["passed"]
     ingest = client.post(
@@ -289,7 +293,7 @@ def test_ingest_preview_of_incomplete_file_is_not_upload_ready(client: TestClien
     assert "Missing field 'passed' (must be true/false)" in body["issues"]
 
 
-def test_ingest_proposal_blocked_by_dry_run_issues(client: TestClient, tudo: dict):
+def test_ingest_proposal_blocked_by_dry_run_issues(client: TestClient, tudo: dict, as_operator):
     payload = pdb_payload(component="20USE5M9999999")
     del payload["results"]
     ingest = client.post(
@@ -311,7 +315,7 @@ def test_ingest_proposal_blocked_by_dry_run_issues(client: TestClient, tudo: dic
     assert "Missing or empty 'results' object" in response.json()["detail"]
 
 
-def test_ingest_file_can_propose_outbox_action(client: TestClient, session_factory):
+def test_ingest_file_can_propose_outbox_action(client: TestClient, session_factory, as_operator):
     client.post(
         "/api/institutes",
         json={"code": "TUDO", "name": "TU Dortmund", "local_name_prefix": "TUDO-"},
@@ -357,7 +361,9 @@ def test_ingest_file_can_propose_outbox_action(client: TestClient, session_facto
     assert duplicate.status_code == 409
 
 
-def test_ingest_file_proposal_can_use_explicit_institute(client: TestClient, tudo: dict):
+def test_ingest_file_proposal_can_use_explicit_institute(
+    client: TestClient, tudo: dict, as_operator
+):
     ingest = client.post(
         "/api/ingest/files",
         json={
@@ -376,7 +382,7 @@ def test_ingest_file_proposal_can_use_explicit_institute(client: TestClient, tud
     assert response.json()["institute_id"] == tudo["id"]
 
 
-def test_ingest_file_proposal_requires_triage_complete(client: TestClient):
+def test_ingest_file_proposal_requires_triage_complete(client: TestClient, as_operator):
     ingest = client.post(
         "/api/ingest/files",
         json={

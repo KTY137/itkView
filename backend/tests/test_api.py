@@ -23,7 +23,7 @@ def test_institute_code_is_validated(client: TestClient):
     assert response.status_code == 422
 
 
-def test_outbox_lifecycle_with_audit_trail(client: TestClient, tudo: dict):
+def test_outbox_lifecycle_with_audit_trail(client: TestClient, tudo: dict, as_operator):
     created = client.post(
         "/api/outbox",
         json={
@@ -82,7 +82,7 @@ def test_outbox_contract_is_public_and_not_an_action_id(client: TestClient):
     assert body["terminal"] == ["cancelled", "confirmed"]
 
 
-def test_outbox_rejects_invalid_transition(client: TestClient, tudo: dict):
+def test_outbox_rejects_invalid_transition(client: TestClient, tudo: dict, as_operator):
     action = client.post(
         "/api/outbox",
         json={"institute_code": "TUDO", "kind": "register_component", "created_by": "aa"},
@@ -96,7 +96,7 @@ def test_outbox_rejects_invalid_transition(client: TestClient, tudo: dict):
     assert "draft" in response.json()["detail"]
 
 
-def test_outbox_requires_known_institute(client: TestClient):
+def test_outbox_requires_known_institute(client: TestClient, as_operator):
     response = client.post(
         "/api/outbox",
         json={"institute_code": "NOPE", "kind": "stage_move", "created_by": "aa"},
@@ -104,7 +104,7 @@ def test_outbox_requires_known_institute(client: TestClient):
     assert response.status_code == 404
 
 
-def test_outbox_list_filters_by_status(client: TestClient, tudo: dict):
+def test_outbox_list_filters_by_status(client: TestClient, tudo: dict, as_operator):
     first = client.post(
         "/api/outbox",
         json={"institute_code": "TUDO", "kind": "stage_move", "created_by": "aa"},

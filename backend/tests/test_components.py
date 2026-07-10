@@ -205,7 +205,7 @@ def test_component_endpoints_are_in_openapi(client: TestClient):
 
 
 def test_component_sync_endpoint_uses_configured_fetcher(
-    client: TestClient, tudo: dict
+    client: TestClient, tudo: dict, as_operator
 ):
     def fake_fetcher(settings, institute):
         assert settings.pdb_instance == "test"
@@ -250,7 +250,7 @@ def test_component_sync_endpoint_uses_configured_fetcher(
     assert second.json()["unchanged"] == 2
 
 
-def test_component_sync_requires_known_institute(client: TestClient):
+def test_component_sync_requires_known_institute(client: TestClient, as_operator):
     called = False
 
     def fake_fetcher(settings, institute):
@@ -265,7 +265,7 @@ def test_component_sync_requires_known_institute(client: TestClient):
     assert called is False
 
 
-def test_component_sync_reports_pdb_unavailable(client: TestClient, tudo: dict):
+def test_component_sync_reports_pdb_unavailable(client: TestClient, tudo: dict, as_operator):
     def fake_fetcher(settings, institute):
         raise PdbSyncUnavailable("No sandbox token configured.")
 
@@ -277,7 +277,7 @@ def test_component_sync_reports_pdb_unavailable(client: TestClient, tudo: dict):
 
 
 def test_component_sync_rolls_back_unknown_parent(
-    client: TestClient, tudo: dict
+    client: TestClient, tudo: dict, as_operator
 ):
     def fake_fetcher(settings, institute):
         return FetchResult(
@@ -325,7 +325,7 @@ def test_dashboard_summary_empty(client: TestClient):
 
 
 def test_dashboard_summary_counts_components_and_outbox(
-    client: TestClient, tudo: dict, demo_mirror
+    client: TestClient, tudo: dict, demo_mirror, as_operator
 ):
     client.post(
         "/api/outbox",
@@ -550,7 +550,7 @@ def test_sync_without_prune_scope_never_marks_stale(session_factory):
         assert untouched.stale is False
 
 
-def test_stale_filter_on_component_list(client: TestClient, tudo: dict):
+def test_stale_filter_on_component_list(client: TestClient, tudo: dict, as_operator):
     def fetch_two(settings, institute):
         return FetchResult(
             records=[record("20USE5M0000801"), record("20USE5M0000802")], skipped=0
@@ -571,7 +571,7 @@ def test_stale_filter_on_component_list(client: TestClient, tudo: dict):
 
 
 def test_component_staged_changes_lists_open_actions_for_the_component(
-    client: TestClient, tudo: dict
+    client: TestClient, tudo: dict, as_operator
 ):
     mine = client.post(
         "/api/outbox",
