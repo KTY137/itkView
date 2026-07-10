@@ -138,6 +138,8 @@ def revalidate(session: Session, action: OutboxAction) -> list[str]:
         return revalidate_upload(session, action)
     if action.kind == "stage_move":
         return revalidate_stage_move(session, action)
+    if action.kind == "register_component":
+        return revalidate_register(session, action)
     return []
 
 
@@ -198,6 +200,17 @@ def revalidate_stage_move(session: Session, action: OutboxAction) -> list[str]:
         return [
             f"Suggested stage changed to '{evaluation.suggested_stage}', not '{to_stage}'."
         ]
+    return []
+
+
+def revalidate_register(session: Session, action: OutboxAction) -> list[str]:
+    """Structural check for a `register_component` draft. The hard type guard
+    (only MODULE/HYBRID — never sensors/ASICs) is enforced at submit time by
+    `register_dummy_component`; here we only ensure the payload is complete."""
+    payload = action.payload or {}
+    missing = [k for k in ("component_type", "type_code", "institute_code") if not payload.get(k)]
+    if missing:
+        return [f"register_component payload is missing: {', '.join(missing)}."]
     return []
 
 

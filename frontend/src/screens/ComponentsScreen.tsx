@@ -29,6 +29,7 @@ import { useAuth } from "../auth";
 import { filterDemoComponents, getDemoComponent } from "../demoData";
 import { formatTimestamp, t } from "../i18n";
 import { describeComponent, roleLabel, stageChipClass } from "../ui";
+import RegisterModuleForm from "./RegisterModuleForm";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -449,6 +450,13 @@ export default function ComponentsScreen({
                 {creatingInstitute ? t.common.loading : t.common.create}
               </button>
             </form>
+          )}
+          {canWrite && (
+            <RegisterModuleForm
+              institutes={institutes}
+              defaultInstitute={selectedInstitute}
+              onDone={(message) => setSyncNotice(message)}
+            />
           )}
         </div>
       )}

@@ -558,6 +558,24 @@ export function postOutboxAction(body: OutboxCreateBody): Promise<OutboxAction> 
   });
 }
 
+export type ComponentRegisterBody = {
+  component_type: string;
+  type_code: string;
+  institute_code: string;
+  local_name?: string;
+  subproject?: string;
+};
+
+/** Queue a DUMMY module/hybrid registration as an outbox draft (docs/10).
+ * The backend refuses any type outside the registrable allowlist. */
+export function postComponentRegister(body: ComponentRegisterBody): Promise<OutboxAction> {
+  return request<OutboxAction>("/api/components/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export function postComponentSync(instituteCode: string): Promise<ComponentSyncResult> {
   return request<ComponentSyncResult>(
     `/api/sync/components/${encodeURIComponent(instituteCode)}`,

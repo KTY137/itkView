@@ -117,6 +117,12 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   in lesbare Kurzform („Module · Endcap R5, pos 0"); verdrahtet in
   Komponentenliste, Detail, Family-Tree und Board. Volle Taxonomie/Legende in
   `docs/10-itk-domain-reference.md`.
+- **Create-Module (2026-07-10):** DUMMY-Modul/Hybrid-Registrierung als
+  Outbox-Flow — `POST /api/components/register` (operator-gated, Typ-Guard nur
+  MODULE/HYBRID → 400 sonst) legt einen `register_component`-Draft an;
+  Worker-Revalidate + `register_dummy_component` schreiben (dummy-only,
+  Access-Codes). Frontend: `RegisterModuleForm` (`canWrite`). 220 Backend-Tests
+  und Frontend-`tsc` gruen. Siehe `docs/10`.
 
 ## Naechste Arbeitspakete
 

@@ -42,12 +42,14 @@ from app.outbox import (
     assert_transition,
     transition_contract,
 )
+from app.pdb_scope import is_registrable_type
 from app.pdb_sync import PdbSyncUnavailable
 from app.schemas import (
     AuditOut,
     ComponentDetailOut,
     ComponentImageOut,
     ComponentOut,
+    ComponentRegisterIn,
     ComponentSyncOut,
     CountBucket,
     DashboardSummaryOut,
@@ -784,6 +786,74 @@ def get_outbox_action(action_id: int, db: Session = Depends(get_db)) -> OutboxAc
     action = db.get(OutboxAction, action_id)
     if action is None:
         raise HTTPException(status_code=404, detail=f"Outbox action {action_id} not found.")
+    return action
+
+
+@router.post(
+    "/api/components/register", response_model=OutboxOut, status_code=201, tags=["components"]
+)
+def register_component_draft(
+    body: ComponentRegisterIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> OutboxAction:
+    """Queue a DUMMY component registration as a reviewed outbox draft (docs/10).
+
+    Registration is the only component-creating PDB write itkFlow does, so the
+    type allowlist is enforced up front here (MODULE/HYBRID only) and again at
+    submit time by `register_dummy_component`. Nothing is written to the PDB
+    until the draft is approved and the worker runs with access codes.
+    """
+    settings = request.app.state.settings
+    if not is_registrable_type(body.component_type, settings):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Refusing to register component type '{body.component_type}': only "
+                f"{settings.pdb_dummy_component_types} may be registered as DUMMY test parts. "
+                "Sensors and ASICs must never be registered by itkFlow."
+            ),
+        )
+    institute = db.scalar(
+        select(InstituteProfile).where(InstituteProfile.code == body.institute_code)
+    )
+    if institute is None:
+        raise HTTPException(status_code=404, detail=f"Institute '{body.institute_code}' not found.")
+    payload: dict = {
+        "component_type": body.component_type,
+        "type_code": body.type_code,
+        "institute_code": body.institute_code,
+        "subproject": body.subproject,
+    }
+    if body.local_name:
+        payload["local_name"] = body.local_name
+    action = OutboxAction(
+        institute_id=institute.id,
+        kind="register_component",
+        payload=payload,
+        status=OutboxStatus.DRAFT.value,
+        created_by=user.email,
+        user_id=user.id,
+    )
+    db.add(action)
+    db.flush()
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action="outbox.created",
+            subject=f"outbox:{action.id}",
+            detail={
+                "kind": "register_component",
+                "institute": institute.code,
+                "component_type": body.component_type,
+            },
+            outbox_action_id=action.id,
+        )
+    )
+    db.commit()
+    db.refresh(action)
     return action
 
 
