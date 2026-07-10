@@ -601,7 +601,7 @@ function ComponentDetailPanel({
   onBack: () => void;
   onOpen: (sn: string) => void;
 }) {
-  const { canWrite } = useAuth();
+  const { canWrite, showToast } = useAuth();
   const [detail, setDetail] = useState<ComponentDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -705,12 +705,34 @@ function ComponentDetailPanel({
 
   const parentSn = detail.parent_sn;
 
+  const copySn = (sn: string) => {
+    if (!navigator.clipboard) {
+      showToast(t.components.snCopyFailed);
+      return;
+    }
+    void navigator.clipboard
+      .writeText(sn)
+      .then(() => showToast(t.components.snCopied(sn)))
+      .catch(() => showToast(t.components.snCopyFailed));
+  };
+
   return (
     <div className="screen">
       {toolbar}
       <div className="detail-head">
         <h2 className="detail-title">{detail.local_name ?? detail.sn}</h2>
-        <span className="mono muted">{detail.sn}</span>
+        <button
+          type="button"
+          className="sn-copy mono muted"
+          onClick={() => copySn(detail.sn)}
+          title={t.components.copySn}
+          aria-label={t.components.copySn}
+        >
+          {detail.sn}
+          <span className="sn-copy-ic" aria-hidden="true">
+            ⧉
+          </span>
+        </button>
         <span className={stageChipClass(detail.stage)} title={detail.stage}>
           {stageLabel(detail.stage)}
         </span>

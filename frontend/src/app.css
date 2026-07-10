@@ -619,6 +619,30 @@ code {
   font-weight: 700;
   margin: 0;
 }
+/* Click-to-copy serial number (detail head). Reads as the plain mono SN until
+   hovered, then reveals it is actionable. */
+.sn-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  margin: -2px -2px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.sn-copy:hover {
+  background: var(--surface2);
+  color: var(--ink2);
+}
+.sn-copy-ic {
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.sn-copy:hover .sn-copy-ic,
+.sn-copy:focus-visible .sn-copy-ic {
+  opacity: 0.7;
+}
 .section-title {
   font: 700 12px var(--sans);
   text-transform: uppercase;
