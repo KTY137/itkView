@@ -123,6 +123,12 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   Worker-Revalidate + `register_dummy_component` schreiben (dummy-only,
   Access-Codes). Frontend: `RegisterModuleForm` (`canWrite`). 220 Backend-Tests
   und Frontend-`tsc` gruen. Siehe `docs/10`.
+- **Jig-/Pflicht-Property-Pruefung (2026-07-10):** institutskonfigurierbare
+  Pflicht-Properties pro Testtyp (`InstituteProfile.settings['required_properties']`,
+  z. B. `{"GLUE_WEIGHT": ["JIG"]}`); der Ingest-Dry-Run (`preview` +
+  `propose-outbox`) blockt, wenn das benutzte Jig fehlt. Regel-#4-safe, Default
+  leer. `ingestion.missing_required_properties` + 227 Backend-Tests gruen. Siehe
+  `docs/07`.
 
 ## Naechste Arbeitspakete
 

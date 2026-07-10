@@ -22,7 +22,7 @@ from app.auth import (
 )
 from app.config import Settings
 from app.domain.stages import DEFAULT_STAGE_ORDER
-from app.ingestion import ParsedTestRun, parse_payload
+from app.ingestion import ParsedTestRun, missing_required_properties, parse_payload
 from app.models import (
     AuditEvent,
     Component,
@@ -1000,6 +1000,33 @@ def create_ingest_file(
     return ingest
 
 
+def _required_property_issues(
+    db: Session,
+    ingest: IngestFile,
+    parsed: ParsedTestRun,
+    component: Component | None,
+) -> list[str]:
+    """Institute-configured mandatory upload properties (e.g. the used jig) that
+    are missing from this ingest file (docs/07). Data-driven and empty by default
+    — a no-op until an institute sets `settings['required_properties']`."""
+    test_type = parsed.test_type or ingest.test_type
+    institute_code = (
+        component.institute_code if component is not None else None
+    ) or parsed.institution
+    if test_type is None or institute_code is None:
+        return []
+    profile = db.scalar(select(InstituteProfile).where(InstituteProfile.code == institute_code))
+    if profile is None:
+        return []
+    missing = missing_required_properties(
+        ingest.payload.get("properties"), profile.settings, test_type
+    )
+    if not missing:
+        return []
+    label = "property" if len(missing) == 1 else "properties"
+    return [f"Missing required {label} for {test_type}: {', '.join(missing)}."]
+
+
 @router.get(
     "/api/ingest/files/{file_id}/preview",
     response_model=IngestPreviewOut,
@@ -1014,11 +1041,12 @@ def preview_ingest_file(file_id: int, db: Session = Depends(get_db)) -> IngestPr
     parsed = parse_payload(ingest.payload)
     component = resolve_component(db, parsed)
     component_sn = parsed.component_sn or (component.sn if component is not None else None)
+    issues = parsed.issues + _required_property_issues(db, ingest, parsed, component)
     return IngestPreviewOut(
         file_id=ingest.id,
         parser=parsed.parser,
         upload_ready=(
-            not parsed.issues and component_sn is not None and parsed.test_type is not None
+            not issues and component_sn is not None and parsed.test_type is not None
         ),
         component_sn=component_sn,
         local_name=parsed.local_name,
@@ -1033,7 +1061,7 @@ def preview_ingest_file(file_id: int, db: Session = Depends(get_db)) -> IngestPr
         problems=parsed.problems,
         n_properties=parsed.n_properties,
         results=parsed.results,
-        issues=parsed.issues,
+        issues=issues,
         warnings=parsed.warnings,
     )
 
@@ -1067,13 +1095,14 @@ def propose_ingest_outbox_action(
             ),
         )
     parsed = parse_payload(ingest.payload)
-    if parsed.issues:
+    component = db.scalar(select(Component).where(Component.sn == ingest.component_sn))
+    issues = parsed.issues + _required_property_issues(db, ingest, parsed, component)
+    if issues:
         raise HTTPException(
             status_code=409,
-            detail=f"Dry-run validation failed: {'; '.join(parsed.issues)}.",
+            detail=f"Dry-run validation failed: {'; '.join(issues)}.",
         )
 
-    component = db.scalar(select(Component).where(Component.sn == ingest.component_sn))
     institute_code = component.institute_code if component is not None else body.institute_code
     if institute_code is None:
         raise HTTPException(
