@@ -34,7 +34,9 @@ gruen).** Was steht:
   `useAuth`, Session-Probe auf `/api/auth/me`, User-Rail unten links (Name,
   Rolle, Institut, Logout), Rollen-Gating der Write-Buttons (Viewer sieht keine),
   zentraler `X-CSRF-Token`-Versand + 401→Login/403→Toast; Offline-Demo-Fallback
-  bleibt erhalten.
+  bleibt erhalten. **Admin-`Users`-Screen** (`frontend/src/screens/UsersScreen.tsx`):
+  Personen anlegen, Rolle wechseln, aktivieren/deaktivieren, Passwort
+  zuruecksetzen — admin-gated (Nav-Eintrag nur fuer Admins).
 - Tests: `backend/tests/test_auth.py` + `test_auth_enforcement.py` (401/403 je
   Write, Attribution, CSRF, Migration); Erst-Admin per CLI
   `python -m app.create_admin`.

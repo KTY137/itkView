@@ -103,8 +103,9 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   Attribution (statt Client-Actor), `require_operator`-Enforcement auf
   Sync/Outbox/Ingest, Double-Submit-CSRF (`itkflow_csrf`/`X-CSRF-Token`) +
   konfigurierbares `Secure`-Cookie, und das Frontend (Login-Screen, User-Rail,
-  Rollen-Gating, Demo-Fallback). Verifiziert: 211 Backend-Tests + Frontend-`tsc`
-  gruen. Offen: Demo-User-Seed, 4-Augen-Approve, OIDC. Details docs/06.
+  Rollen-Gating, Demo-Fallback) plus **Admin-`Users`-Screen** (Konten anlegen,
+  Rolle/aktiv setzen, Passwort-Reset). Verifiziert: 211 Backend-Tests +
+  Frontend-`tsc` gruen. Offen: Demo-User-Seed, 4-Augen-Approve, OIDC. Details docs/06.
 - **Doku-Disziplin & -Waechter (2026-07-10):** CLAUDE.md-Regel #6 macht
   Doku-Updates verbindlich; `docs/00-doc-map.md` haelt die Ownership fest. Zwei
   Haiku-Subagenten pflegen die Doku — `yatagarasu` (Drift-Audit, read-only) und
