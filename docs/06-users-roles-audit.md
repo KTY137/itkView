@@ -1,8 +1,52 @@
 # Plan: Nutzer, Rollen und Audit-Zuordnung
 
-> Planungsdokument (noch nicht umgesetzt). Legt fest, wie itkFlow echte
-> Nutzerkonten, Rollen und eine faelschungssichere „wer hat was gemacht"-Spur
-> bekommt. Umsetzung erst nach Freigabe.
+> Legt fest, wie itkFlow echte Nutzerkonten, Rollen und eine faelschungssichere
+> „wer hat was gemacht"-Spur bekommt. **Umgesetzt und End-to-End verdrahtet
+> (2026-07-10): Attribution, Rollen-Enforcement, CSRF und das Frontend-Login
+> stehen und sind getestet** — siehe Umsetzungsstand.
+
+## Umsetzungsstand (2026-07-10)
+
+**End-to-End umgesetzt und getestet (211 Backend-Tests gruen, Frontend `tsc`
+gruen).** Was steht:
+
+- Auth-Primitive `backend/app/auth.py`: PBKDF2-HMAC-SHA256 (nur stdlib),
+  konstantzeitiges Verify, opake Session-Tokens, CSRF-Token, Rollen-Vokabular
+  `("viewer","operator","admin")`, Session-TTL 12 h.
+- Modelle `backend/app/models.py`: `User` (`app_user`, inkl. `external_subject`
+  fuer spaeteres OIDC), `UserSession` (serverseitige Session-Tabelle, jetzt mit
+  `csrf_token`). `user_id`-FK additiv auf `outbox_action` und `audit_event`
+  (Patch in `ensure_phase0_sqlite_schema`, denormalisierte Actor-Strings bleiben).
+- Login/Session `backend/app/api.py`: `POST /api/auth/login` (httpOnly-Session +
+  lesbares `itkflow_csrf`-Cookie, `csrf_token` in `MeOut`), `logout`,
+  `GET /api/auth/me`; `GET/POST/PATCH /api/users` (admin, institut-gescoped).
+- **Attribution serverseitig:** Schreib-Endpunkte setzen `user_id` + den
+  denormalisierten Actor aus der Session (E-Mail), nie aus dem Body; die
+  Client-Actor-Felder sind aus den Request-Schemas entfernt.
+- **Rollen-Enforcement (`require_operator`)** auf Component-/Tool-Sync,
+  Outbox-Create, Outbox-Transition (inkl. Approve), Ingest-Upload und
+  Propose-Outbox. Reads bleiben offen; `/api/users*` admin-only.
+- **CSRF:** Double-Submit — router-weites `csrf_protect`, no-op fuer
+  GET/HEAD/OPTIONS und unauthentifizierte Requests; sonst muss `X-CSRF-Token`
+  dem Session-Token entsprechen (`hmac.compare_digest`). `session_cookie_secure`
+  (Default False fuer lokales http, True hinter TLS).
+- **Frontend** (`frontend/src/auth.tsx`, `LoginScreen.tsx`, `api.ts`): Login,
+  `useAuth`, Session-Probe auf `/api/auth/me`, User-Rail unten links (Name,
+  Rolle, Institut, Logout), Rollen-Gating der Write-Buttons (Viewer sieht keine),
+  zentraler `X-CSRF-Token`-Versand + 401→Login/403→Toast; Offline-Demo-Fallback
+  bleibt erhalten.
+- Tests: `backend/tests/test_auth.py` + `test_auth_enforcement.py` (401/403 je
+  Write, Attribution, CSRF, Migration); Erst-Admin per CLI
+  `python -m app.create_admin`.
+
+**Offen:**
+
+- Kein Demo-User im Seed: echtes Login ist erst nach `create_admin` nutzbar
+  (offline greift der Demo-Modus, kein Login-Zwang).
+- Die zwei Evidence-Sync-POSTs sind CSRF-geschuetzt, aber (bewusst) noch nicht
+  rollen-gegated.
+- 4-Augen-Prinzip fuer Outbox-Approve und OIDC/CERN-SSO bleiben spaeter (siehe
+  Offene Fragen).
 
 ## Problem / Motivation
 
@@ -104,12 +148,15 @@ Institut-Scoping: ein Nutzer agiert in seinem Institut; Reads/Writes werden auf
 
 ## Offene Fragen
 
-- Admin-Reichweite: **pro Institut** (empfohlen, passt zu Multi-Institut) oder
-  ein globaler Super-Admin?
-- Session: server-seitige Session-Tabelle vs. signiertes JWT.
-- 4-Augen-Prinzip fuer Outbox-Approve (Ersteller ≠ Freigeber) — als
-  Institut-Profil-Flag?
-- Zeitpunkt OIDC/CERN-SSO.
+- Admin-Reichweite: **entschieden — beides unterstuetzt.** Ein Admin mit
+  `institute_id` verwaltet nur sein Institut; ein Admin mit `institute_id = NULL`
+  agiert global. Default bleibt per-Institut.
+- Session: **entschieden — serverseitige Session-Tabelle** (`UserSession`),
+  kein JWT.
+- 4-Augen-Prinzip fuer Outbox-Approve (Ersteller ≠ Freigeber) — noch offen, als
+  Institut-Profil-Flag denkbar.
+- Zeitpunkt OIDC/CERN-SSO — noch offen; `external_subject` ist bereits
+  vorgesehen.
 
 ## Roadmap-Einordnung
 

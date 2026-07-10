@@ -63,7 +63,7 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   (confirmed `upload_test_run`) zu passed/failed/missing aus und schlaegt den
   naechsten Stage-Move nur vor, wenn alle angezeigten Pflicht-Tests bis
   einschliesslich der aktuellen Stage passen; fehlende/fruehere Tests blocken
-  konservativ, bis der PDB-Test-Run-Mirror als zusaetzliche Quelle steht.
+  konservativ; der PDB-Test-Run-Mirror wird als zusaetzliche Evidenzquelle herangezogen.
   Das Detail-UI zeigt die Pflicht-Tests-Tabelle + Vorschlag-Callout, und
   „Propose stage move" legt einen auditierten `stage_move`-Draft in die Outbox.
 - Async-Outbox-Worker: eigenstaendiger Prozess (`app/run_worker.py`,
@@ -98,21 +98,41 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   RFID-/Blacklist-Informationen werden nicht durch normale Syncs
   heruntergestuft.
 
+- **Auth End-to-End (docs/06, 2026-07-10):** Lokale Konten `viewer/operator/admin`
+  vollstaendig — Login/Session/`create_admin`, serverseitige `user_id`-
+  Attribution (statt Client-Actor), `require_operator`-Enforcement auf
+  Sync/Outbox/Ingest, Double-Submit-CSRF (`itkflow_csrf`/`X-CSRF-Token`) +
+  konfigurierbares `Secure`-Cookie, und das Frontend (Login-Screen, User-Rail,
+  Rollen-Gating, Demo-Fallback). Verifiziert: 211 Backend-Tests + Frontend-`tsc`
+  gruen. Offen: Demo-User-Seed, 4-Augen-Approve, OIDC. Details docs/06.
+- **Doku-Disziplin & -Waechter (2026-07-10):** CLAUDE.md-Regel #6 macht
+  Doku-Updates verbindlich; `docs/00-doc-map.md` haelt die Ownership fest. Zwei
+  Haiku-Subagenten pflegen die Doku — `yatagarasu` (Drift-Audit, read-only) und
+  `tenjin` (Doku-Sync) — plus der `Stop`-Hook `.claude/hooks/doc-guard.ps1`
+  (erinnert bei Code-Change ohne Doku-Update, fail-open/loop-sicher) und der
+  `/sync-docs`-Command. Siehe `docs/00-doc-map.md`, `docs/03-agent-team.md`.
+- **Komponenten-Typ-Decodierung (2026-07-10):** `frontend/src/ui.ts` uebersetzt
+  die kodierten PDB-`type_code`s (`R5M0`, `ATLAS18R5`, `PBR5`) institutsneutral
+  in lesbare Kurzform („Module · Endcap R5, pos 0"); verdrahtet in
+  Komponentenliste, Detail, Family-Tree und Board. Volle Taxonomie/Legende in
+  `docs/10-itk-domain-reference.md`.
+
 ## Naechste Arbeitspakete
 
 1. **Stage-Move-Strecke schliessen** (`domain-modeler`, `backend-dev`,
    `pdb-gateway-dev`): Suggestion-Engine, `stage_move`-Draft und realer
-   Submitter (setComponentStage, DUMMY-Scope) stehen (2026-07-08). Offen: die
-   reale PDB-Test-Run-Fetchstrecke an den lokalen `TestRunEvidence`-Mirror
-   anbinden (fuer Parallelbetrieb mit zFlow).
+   Submitter (setComponentStage, DUMMY-Scope) stehen (2026-07-08). Erledigt
+   (2026-07-10): PDB-Test-Run-Fetcher (`POST /api/components/{sn}/sync-evidence`,
+   `POST /api/sync/evidence/{institute_code}`) an den lokalen
+   `TestRunEvidence`-Mirror angebunden.
 2. **Dashboard ausbauen** (`frontend-dev`, `backend-dev`): Summary erweitert
    (2026-07-08): `/api/dashboard/summary` liefert Required-Test-Gaps fuer
    aktive Module, Sync-Alter (neueste/aelteste Mirror-Zeile), stale/trashed
    Mirror-Zeilen sowie Review-/Approved-/Submitted-/Failed-Outbox-Zaehler; das
    Dashboard zeigt diese als kompakte KPI-Tiles und die Institutsverteilung mit
    profilbasierten Logos bzw. generischen Code-Icons. Required-Test-Gaps nutzen
-   denselben Evidence-Service wie Stage-Suggestions; offen ist der echte
-   PDB-Test-Run-Fetcher in diesen Mirror.
+   denselben Evidence-Service wie Stage-Suggestions und arbeiten mit dem
+   Mirrored PDB-Test-Run-Evidence.
 3. **Outbox-Worker haerten** (`backend-dev`, `pdb-gateway-dev`, `qa-engineer`):
    Async-Worker steht (2026-07-08, ADR 002); automatischer Retry mit Backoff
    fuer transiente Fehler und `worker_max_attempts` sind durchgesetzt. Offen:
@@ -136,14 +156,19 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 
 ## Geplant (Design steht, Umsetzung nach Freigabe)
 
-Drei durchdachte, aber noch nicht gebaute Erweiterungen. Details im jeweiligen
-Dokument:
+Drei Erweiterungen mit fertigem Design. Beim Auth-Punkt ist das Backend-
+Fundament bereits gebaut (siehe „Aktueller Stand"); der Rest wartet auf
+Freigabe. Details im jeweiligen Dokument:
 
-- **Nutzer, Rollen & Audit-Zuordnung** — `docs/06-users-roles-audit.md`. Echte
-  Konten (admin/operator/viewer), Institut nur durch Admin, serverseitige
-  `user_id`-Zuordnung statt client-gelieferter Actor-Strings. Empfehlung: lokale
-  Accounts fuer v1, OIDC/CERN-SSO als spaeterer Adapter. **Fundament fuer echte
-  Nachvollziehbarkeit — sollte vor Remote-Zugriff stehen.**
+- **Nutzer, Rollen & Audit-Zuordnung** — `docs/06-users-roles-audit.md`.
+  **Backend-Fundament gebaut+getestet (Teilstand 2026-07-10):** lokale Konten
+  `admin/operator/viewer`, Login/Session, admin-gescopte `/api/users`, Rollen-
+  Dependencies, `create_admin`-CLI. **Offen:** serverseitige `user_id`-
+  Attribution statt Client-Actor-Strings, Rollen-Enforcement auf
+  Sync/Outbox/Ingest, Frontend-Login, CSRF/`Secure`-Cookie. Lokale Accounts
+  fuer v1, OIDC/CERN-SSO als spaeterer Adapter (`external_subject` ist
+  vorgesehen). **Fundament fuer echte Nachvollziehbarkeit — sollte vor
+  Remote-Zugriff stehen.**
 - **Jig-/Tool-Registry + typ-gefilterter Quick-Select** —
   `docs/07-jig-tool-quickselect.md`. Basis-Registry, Tools-Screen und
   PDB-`TOOLS`-Mirror-Import stehen (2026-07-08). Offen: Glue-Batches und die
