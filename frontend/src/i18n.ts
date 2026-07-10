@@ -211,7 +211,8 @@ const en = {
     noRework: "No rework recorded.",
   },
   outbox: {
-    subtitle: "Reviewed writes to the PDB — nothing is sent without approval.",
+    subtitle:
+      "Step 2 of 2 — the review gate for every PDB write. Approve, then submit. Nothing is sent automatically.",
     statusFilterLabel: "Filter by status",
     allStatuses: "All statuses",
     loadError: "Could not load outbox",
@@ -226,6 +227,12 @@ const en = {
     colActions: "Actions",
     showPayload: "show",
     noActions: "—",
+    // Friendly labels for the write-intent kinds; unknown kinds fall back to raw.
+    kinds: {
+      upload_test_run: "Upload test run",
+      stage_move: "Stage move",
+      register_component: "Register component",
+    } as Record<string, string>,
     transitionRejected: "Transition rejected",
     transitionNetwork: "Backend not reachable — transition was not sent.",
     retryLabel: "Retry",
@@ -240,7 +247,8 @@ const en = {
     } satisfies Record<OutboxStatus, string>,
   },
   triage: {
-    subtitle: "Instrument JSONs land here, get parsed, validated and queued.",
+    subtitle:
+      "Step 1 of 2 — drop instrument JSONs to parse and validate them, then queue an upload to the Outbox for review.",
     loadError: "Could not load ingestion inbox",
     filenameLabel: "Filename",
     filenamePlaceholder: "instrument-output.json",

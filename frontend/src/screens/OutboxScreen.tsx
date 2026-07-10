@@ -192,7 +192,7 @@ export default function OutboxScreen() {
                 return (
                   <tr key={a.id}>
                     <td className="mono">#{a.id}</td>
-                    <td className="mono">{a.kind}</td>
+                    <td title={a.kind}>{t.outbox.kinds[a.kind] ?? a.kind}</td>
                     <td>
                       <details className="payload-details">
                         <summary>{t.outbox.showPayload}</summary>
