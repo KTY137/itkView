@@ -36,6 +36,13 @@ Team: `docs/03-agent-team.md`.
 5. **Alles Produkt-Facing ist Englisch** (internationale Nutzung): App-UI, Nutzerdoku,
    API-/Fehlermeldungen, Code, Kommentare, Commits. Nur die internen Planungsdokumente
    in `docs/` bleiben Deutsch. UI-Texte i18n-fähig aufbauen (EN als Default-Locale).
+6. **Dokumentationsdisziplin.** Jede Verhaltens- oder Vertragsänderung am Code aktualisiert im
+   selben Change das zuständige Dokument (Ownership: `docs/00-doc-map.md`) und den Abschnitt
+   „Aktueller Stand" in `docs/04-roadmap.md`. Keinen konkurrierenden Plan im Chat erfinden
+   (siehe Startkontext). Der `Stop`-Hook `.claude/hooks/doc-guard.ps1` erinnert, wenn Produktivcode
+   ohne Doku-Update geändert wurde; die Subagenten **Yatagarasu** (Drift-Audit, read-only) und
+   **Tenjin** (Doku-Sync) übernehmen die Pflege, `/sync-docs` startet beides. Reine Refactors/Tests
+   ohne Verhaltensänderung sind ausgenommen — dann kurz begründen.
 
 ## Stack (Kurzreferenz)
 

@@ -1,6 +1,6 @@
 # Das itkFlow-Agenten-Team
 
-10 Subagenten in `.claude/agents/` (Projekt-Scope, im Repo versioniert). Claude Code wählt
+12 Subagenten in `.claude/agents/` (Projekt-Scope, im Repo versioniert). Claude Code wählt
 anhand der `description` automatisch den passenden Agenten; explizit anfordern geht immer
 ("nutze den code-reviewer für …"). Alle Agenten laden `CLAUDE.md` — dort stehen die harten
 Regeln (zeuthenflow nie ausführen, nur PDB-Testinstanz, keine Secrets, kein Institut-Hardcoding).
@@ -19,6 +19,8 @@ ihre Arbeit dem nächsten passenden Meilenstein zu, sofern der Nutzer nichts and
 | 8 | `qa-engineer` | pytest/vitest/Playwright, Fixtures | voll | PDB nur gemockt/Sandbox-markiert |
 | 9 | `code-reviewer` | Review: PDB-Sicherheit, Korrektheit, Regeln | read-only + git diff | `effort: high` |
 | 10 | `docs-writer` | Nutzerdoku (DE), API-Doku (EN), Onboarding | Read/Write/Edit | `model: sonnet` (günstig) |
+| 11 | `yatagarasu` | Doku-Drift-Audit (findet Drift) | read-only (Read/Grep/Glob) | `model: haiku`, fixt nicht |
+| 12 | `tenjin` | Doku-Sync (schreibt Fixes) | Read/Write/Edit/Glob/Grep | `model: haiku`, Partner von yatagarasu |
 
 ## Typischer Ablauf pro Feature
 
@@ -35,3 +37,7 @@ ihre Arbeit dem nächsten passenden Meilenstein zu, sofern der Nutzer nichts and
   gestartet werden (eigene Repo-Kopie) — sinnvoll ab Phase 1, wenn backend/frontend parallel laufen.
 - Nicht alles braucht einen Agenten: kleine Fixes macht die Hauptsession direkt; Agenten lohnen
   sich für abgegrenzte Pakete, deren Zwischenschritte den Hauptkontext fluten würden.
+- **Dokumentationsdisziplin** ist über CLAUDE.md-Regel #6 verankert: Verhaltensänderungen ziehen
+  im selben Change das zuständige Doc (`docs/00-doc-map.md`) + „Aktueller Stand" nach. Die
+  Haiku-Wächter `yatagarasu` (Audit) und `tenjin` (Sync) sowie der `Stop`-Hook
+  `.claude/hooks/doc-guard.ps1` erzwingen das; `/sync-docs` startet Audit + Fix in einem Rutsch.
