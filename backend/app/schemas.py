@@ -14,6 +14,14 @@ class InstituteCreate(BaseModel):
     settings: dict = Field(default_factory=dict)
 
 
+class InstituteUpdate(BaseModel):
+    # Edit an institute profile's config (branding, stage_requirements,
+    # required_properties, …). `settings` is shallow-merged at the top level.
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    local_name_prefix: str | None = Field(default=None, max_length=32)
+    settings: dict | None = None
+
+
 class InstituteOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
