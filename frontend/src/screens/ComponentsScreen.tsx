@@ -479,7 +479,7 @@ export default function ComponentsScreen({
           <option value="">{t.components.allStages}</option>
           {stageOptions.map((s) => (
             <option key={s} value={s}>
-              {s}
+              {stageLabel(s)}
             </option>
           ))}
         </select>
@@ -492,7 +492,7 @@ export default function ComponentsScreen({
           <option value="">{t.components.allTypes}</option>
           {typeOptions.map((tp) => (
             <option key={tp} value={tp}>
-              {tp}
+              {roleLabel(tp)}
             </option>
           ))}
         </select>
