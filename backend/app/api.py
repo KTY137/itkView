@@ -142,10 +142,18 @@ def csrf_protect(
     session is present, the `X-CSRF-Token` header must equal the token bound to
     that session row; login itself is exempt because no session exists yet.
     """
-    if request.method in _CSRF_SAFE_METHODS or session is None:
+    if request.method in _CSRF_SAFE_METHODS:
+        return
+    # Login must not be blocked by a stale/leftover session cookie — it
+    # establishes a fresh session. Everything else needs a matching token.
+    if request.url.path == "/api/auth/login":
+        return
+    # No session, or a legacy session created before CSRF tokens existed (no
+    # token to match yet) — `whoami` mints one on the next /me call.
+    if session is None or not session.csrf_token:
         return
     header = request.headers.get(CSRF_HEADER) or ""
-    if not header or not hmac.compare_digest(header, session.csrf_token or ""):
+    if not hmac.compare_digest(header, session.csrf_token):
         raise HTTPException(status_code=403, detail="Missing or invalid CSRF token.")
 
 
@@ -252,12 +260,18 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)) 
 def whoami(
     request: Request,
     response: Response,
+    db: Session = Depends(get_db),
     user: User = Depends(require_user),
     session: UserSession | None = Depends(current_session),
 ) -> MeOut:
-    # `require_user` guarantees a live session here; refresh the readable CSRF
-    # cookie so the frontend always has a current token to echo back.
+    # `require_user` guarantees a live session here. Legacy sessions created
+    # before CSRF tokens existed carry none — mint and persist one so the token
+    # is always a valid string the frontend can echo back on writes.
     csrf_token = session.csrf_token if session is not None else ""
+    if session is not None and not csrf_token:
+        csrf_token = new_csrf_token()
+        session.csrf_token = csrf_token
+        db.commit()
     _set_csrf_cookie(response, csrf_token, request.app.state.settings)
     return _me(user, csrf_token)
 

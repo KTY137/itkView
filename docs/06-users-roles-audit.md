@@ -28,7 +28,10 @@ gruen).** Was steht:
   Propose-Outbox. Reads bleiben offen; `/api/users*` admin-only.
 - **CSRF:** Double-Submit — router-weites `csrf_protect`, no-op fuer
   GET/HEAD/OPTIONS und unauthentifizierte Requests; sonst muss `X-CSRF-Token`
-  dem Session-Token entsprechen (`hmac.compare_digest`). `session_cookie_secure`
+  dem Session-Token entsprechen (`hmac.compare_digest`). `POST /api/auth/login`
+  ist ausgenommen (ein Alt-Session-Cookie darf den Login nicht mit 403 blocken);
+  Legacy-Sessions ohne Token werden von `GET /api/auth/me` geheilt (Token wird
+  gemintet und persistiert), statt mit 500 zu crashen. `session_cookie_secure`
   (Default False fuer lokales http, True hinter TLS).
 - **Frontend** (`frontend/src/auth.tsx`, `LoginScreen.tsx`, `api.ts`): Login,
   `useAuth`, Session-Probe auf `/api/auth/me`, User-Rail unten links (Name,
