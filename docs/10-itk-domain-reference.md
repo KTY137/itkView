@@ -116,10 +116,14 @@ mit anderem Ablauf (Barrel) ueberschreibt sie im Profil — **kein Hardcoding**.
 
 ## 5. Konsequenzen fuer die offenen Assembly-Features
 
-- **Create Module** (`register_component`): Das PDB-Primitiv
-  `pdb_submit.register_dummy_component()` existiert ✓, aber es gibt **keinen
-  Outbox-Flow, Endpoint oder Wizard**. Neu zu bauen — und der Guard `component_type
-  ∈ pdb_dummy_component_types` (nur MODULE/HYBRID) ist Pflicht: **nie SENSOR/ASIC**.
+- **Create Module** (`register_component`): **Umgesetzt (2026-07-10).**
+  `POST /api/components/register` (operator-gated) validiert den Typ (nur
+  MODULE/HYBRID → sonst 400) und legt einen `register_component`-Outbox-Draft an;
+  Worker-Revalidate + der Submitter registrieren per
+  `register_dummy_component` (harter Typ-Guard erneut, dummy-only + Access-Codes).
+  Frontend: `RegisterModuleForm` bei den Komponenten (`canWrite`). Der eigentliche
+  PDB-Write passiert nie direkt — nur ueber die genehmigte Outbox-Aktion. **Nie
+  SENSOR/ASIC** (Guard an beiden Enden).
 - **Jig-Pflicht beim Upload**: Nicht abgedeckt. `pdb_upload.build_upload_test_run_payload`
   reicht `properties` nur durch ✓; `stages.py` kennt nur `required_tests`, **keine
   required Attachment-Properties**. Loesung: pro Stage/Testtyp konfigurierbare

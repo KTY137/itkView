@@ -4,6 +4,7 @@ Dispatches by action kind:
 
 - `upload_test_run` -> `uploadTestRunResults`
 - `stage_move`      -> `setComponentStage`
+- `register_component` -> `registerComponent` (DUMMY parts only)
 
 Write scope (docs/09, ADR 003): with `pdb_write_scope="dummy_only"` (the
 default) every write is refused unless its target component is an
@@ -129,11 +130,42 @@ def make_pdb_submitter(settings: Settings) -> Submitter:
             return SubmitOutcome.rejected(f"PDB rejected the stage move: {exc}")
         return SubmitOutcome.confirmed(to_stage)
 
+    def _submit_register(session, action: OutboxAction) -> SubmitOutcome:
+        p = action.payload or {}
+        ct, tc, inst = p.get("component_type"), p.get("type_code"), p.get("institute_code")
+        if not ct or not tc or not inst:
+            return SubmitOutcome.rejected(
+                "register_component payload is missing component_type / type_code / institute_code."
+            )
+        if not is_registrable_type(ct, settings):
+            return SubmitOutcome.rejected(
+                f"Refusing to register component type '{ct}': only "
+                f"{settings.pdb_dummy_component_types} may be registered as DUMMY test parts. "
+                "Sensors and ASICs must never be registered by itkFlow."
+            )
+        try:
+            component = register_dummy_component(
+                session,
+                settings,
+                component_type=ct,
+                type_code=tc,
+                institute_code=inst,
+                subproject=p.get("subproject") or "SE",
+                local_name=p.get("local_name"),
+            )
+        except PdbSubmitUnavailable:
+            raise  # scope/codes unavailable -> transient; the worker retries with backoff
+        except Exception as exc:
+            return SubmitOutcome.rejected(f"PDB rejected the registration: {exc}")
+        return SubmitOutcome.confirmed(component.sn)
+
     def submit(session, action: OutboxAction) -> SubmitOutcome:
         if action.kind == "upload_test_run":
             return _submit_upload(session, action)
         if action.kind == "stage_move":
             return _submit_stage_move(session, action)
+        if action.kind == "register_component":
+            return _submit_register(session, action)
         # No PDB write path for this kind yet; refuse rather than guess.
         # Transient so it is not recorded as a data rejection.
         raise PdbSubmitUnavailable(f"No PDB submitter for action kind '{action.kind}'.")

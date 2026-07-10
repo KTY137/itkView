@@ -113,6 +113,16 @@ class OutboxCreate(BaseModel):
     payload: dict = Field(default_factory=dict)
 
 
+class ComponentRegisterIn(BaseModel):
+    # Register a new DUMMY test component (docs/10). The server refuses any type
+    # outside the registrable allowlist (MODULE/HYBRID) — never sensors/ASICs.
+    component_type: str = Field(min_length=1, max_length=32)
+    type_code: str = Field(min_length=1, max_length=32)
+    institute_code: str
+    local_name: str | None = Field(default=None, max_length=64)
+    subproject: str = Field(default="SE", min_length=1, max_length=8)
+
+
 class OutboxTransition(BaseModel):
     to: OutboxStatus
     error: str | None = None
