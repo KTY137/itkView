@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { ApiError, getInstitutes, getTools, postToolSync, scanTool } from "../api";
 import type { Institute, Tool } from "../api";
+import { useAuth } from "../auth";
 import { filterDemoTools, scanDemoTool } from "../demoData";
 import { t } from "../i18n";
 
@@ -27,6 +28,7 @@ function statusChip(status: string): string {
  * will reuse so operators never type a jig by hand (docs/07).
  */
 export default function ToolsScreen() {
+  const { canWrite } = useAuth();
   const [tools, setTools] = useState<Tool[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -160,7 +162,7 @@ export default function ToolsScreen() {
         </div>
       )}
       {scanned !== null && <ScannedToolCard tool={scanned} onClear={() => setScanned(null)} />}
-      {!demo && (
+      {!demo && canWrite && (
         <div className="panel compact-panel">
           <div className="toolbar">
             <label className="control-label" htmlFor="tool-sync-institute">

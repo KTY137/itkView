@@ -82,10 +82,93 @@ export function roleLabel(componentType: string): string {
     MODULE: "Module",
     SENSOR: "Sensor",
     HYBRID: "Hybrid",
+    HYBRID_ASSEMBLY: "Hybrid",
     HYBRID_FLEX: "Hybrid flex",
     PWB: "Powerboard",
     POWERBOARD: "Powerboard",
     PWB_CARRIER: "PWB carrier",
+    ABC: "ABC ASIC",
+    ABCSTAR: "ABCStar ASIC",
+    HCC: "HCC ASIC",
+    HCCSTAR: "HCCStar ASIC",
+    AMAC: "AMAC ASIC",
   };
-  return map[componentType] ?? componentType;
+  return map[componentType.toUpperCase()] ?? componentType;
+}
+
+/**
+ * Coarse component kind from the PDB componentType. Institute-agnostic — for
+ * grouping/iconography, never behaviour. `sensor` and `asic` (ABC/HCC/AMAC) are
+ * the "never register" kinds (hard rule #2, docs/10-itk-domain-reference.md).
+ */
+export type ComponentKind =
+  | "module"
+  | "sensor"
+  | "hybrid"
+  | "powerboard"
+  | "asic"
+  | "other";
+
+export function componentKind(componentType: string): ComponentKind {
+  const c = componentType.toUpperCase();
+  if (c === "MODULE") return "module";
+  if (c === "SENSOR") return "sensor";
+  if (c.startsWith("HYBRID")) return "hybrid";
+  if (c === "PWB" || c === "POWERBOARD" || c === "PWB_CARRIER") return "powerboard";
+  if (c === "ABC" || c === "ABCSTAR" || c === "HCC" || c === "HCCSTAR" || c === "AMAC")
+    return "asic";
+  return "other";
+}
+
+/**
+ * Decode the compact ITk `type_code` into a human-readable geometry, or null
+ * when the pattern is unknown (the caller then shows the raw code). The codes
+ * are collaboration-wide conventions, not institute-specific, so this stays a
+ * pure pattern decode with graceful fallback — no `R5M0 -> "…"` table (hard
+ * rule #4). See docs/10-itk-domain-reference.md.
+ *
+ *   R<ring>M/H<pos>  endcap module/hybrid  R5M0 -> "Endcap R5, pos 0"
+ *   ATLAS<g>R<ring>  endcap sensor         ATLAS18R5 -> "Sensor ATLAS18, Endcap R5"
+ *   ATLAS<g>SS/LS    barrel sensor         ATLAS18LS -> "Sensor ATLAS18, Barrel long-strip"
+ *   PB[R]<ring>      powerboard            PBR5 -> "Powerboard R5"
+ */
+export function describeTypeCode(typeCode: string | null | undefined): string | null {
+  if (!typeCode) return null;
+  const code = typeCode.trim().toUpperCase();
+
+  const endcap = code.match(/^R(\d+)[MH](\d+)$/);
+  if (endcap) return `Endcap R${endcap[1]}, pos ${endcap[2]}`;
+
+  const sensor = code.match(/^ATLAS(\d+)(R\d+|SS|LS)$/);
+  if (sensor) {
+    const [, gen, geo] = sensor;
+    if (geo.startsWith("R")) return `Sensor ATLAS${gen}, Endcap ${geo}`;
+    return `Sensor ATLAS${gen}, Barrel ${geo === "SS" ? "short-strip" : "long-strip"}`;
+  }
+
+  const pwb = code.match(/^PBR?(\d+)?$/);
+  if (pwb) return pwb[1] ? `Powerboard R${pwb[1]}` : "Powerboard";
+
+  return null;
+}
+
+/**
+ * One-line component overview: kind plus decoded geometry, e.g.
+ * "Hybrid · Endcap R5, pos 1". Falls back to `kind · rawcode`, then to just the
+ * kind, so nothing is ever hidden.
+ */
+export function describeComponent(c: {
+  component_type: string;
+  type_code: string | null;
+}): string {
+  const kind = roleLabel(c.component_type);
+  // Treat the mirror's UNKNOWN sentinel as "no code" so it never leaks to the UI.
+  const raw = c.type_code && c.type_code !== "UNKNOWN" ? c.type_code : null;
+  const geo = describeTypeCode(raw);
+  if (geo) {
+    // Some decodes already name the kind (Sensor…, Powerboard…) — don't repeat it.
+    return geo.toLowerCase().startsWith(kind.toLowerCase()) ? geo : `${kind} · ${geo}`;
+  }
+  if (raw) return `${kind} · ${raw}`;
+  return kind;
 }
