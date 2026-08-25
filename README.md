@@ -21,6 +21,7 @@ For current implementation priorities, agents and humans should start with
 | `frontend/` | React + TypeScript (Vite) frontend |
 | `agent/` | Watched-folder upload agent for instrument PCs (phase 2) |
 | `deploy/` | Docker Compose, Dockerfiles, `.env.example` |
+| `desktop/` | Tauri desktop shell: bundles the backend and the built UI into one app |
 | `docs/` | Internal planning documents (German): roadmap `docs/04-roadmap.md`, binding UI design reference `docs/05-ui-design-reference.md` (+ mockup `docs/itkflow-ui-mockup.html`) |
 
 ## Prerequisites
@@ -124,6 +125,39 @@ the repository.
 
 Full stack via Docker: see `deploy/README.md`.
 
+## Desktop build
+
+The desktop app is the same itkFlow, packaged: a small shell starts the backend
+and shows its UI. Backend and frontend are served from one local origin, so
+sign-in, sessions and PDB connections behave exactly as they do in a browser.
+It is a single-workstation build — an institute still runs the server
+deployment, because roles, audit and the outbox worker are shared state.
+
+Prerequisites, on top of the ones above: a Rust toolchain (`rustup`), and on
+Windows the MSVC build tools (Tauri's supported toolchain there).
+
+```bash
+cd desktop
+npm install                          # Tauri CLI
+python build-sidecar.py              # builds the frontend, then the backend sidecar
+npm run build                        # produces the installer
+```
+
+`build-sidecar.py` bundles the backend with PyInstaller and names the result
+for the Rust target triple, which is what Tauri's sidecar mechanism expects.
+Pass `--skip-frontend` to reuse an existing `frontend/dist`. For a run without
+packaging an installer, `npm run dev` starts the same shell.
+
+The app keeps its database, credential key and logs in the per-user
+application data directory — on Windows `%LOCALAPPDATA%\itkflow`, deliberately
+the same place `start-itkflow.ps1` uses, so a PDB connection made in the dev
+launcher keeps working in the packaged app. **Back up `pdb-credential.key`**:
+losing it makes saved PDB connections unreadable.
+
+PDB access is unchanged by packaging: the desktop build starts against no PDB
+and needs the same two deliberate opt-ins for production reads. Design notes
+and the trade-offs are in `docs/adr/005-desktop-packaging.md`.
+
 ## Troubleshooting
 
 **Account → “Test connection” reports “The PDB could not be reached”, although
@@ -153,6 +187,11 @@ have each person reconnect their codes under **Account**.
 **The launcher refuses to start: a port is in use.**
 Another process owns `8000` or `5173`. Identify it first; only then rerun with
 `-ForcePortCleanup`, which terminates that process and its child tree.
+
+**The desktop app opens but stays on the splash screen.**
+The backend did not come up. Its log says why:
+`%LOCALAPPDATA%\itkflow\logs\server.log` — a windowed build has no console,
+so that file is the only trail.
 
 **Sign-in fails right after setup.**
 No account exists yet. From `backend/`, create one with

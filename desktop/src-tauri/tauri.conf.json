@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "itkFlow",
+  "version": "0.1.0",
+  "identifier": "org.itkflow.desktop",
+  "build": {
+    "frontendDist": "../splash"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "itkFlow",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": ["binaries/itkflow-server"],
+    "shortDescription": "ITk strip module production cockpit",
+    "longDescription": "itkFlow bundles its backend and web UI into one desktop application. The ITk Production Database stays the source of truth; PDB access requires the same deliberate opt-in as every other itkFlow deployment."
+  }
+}

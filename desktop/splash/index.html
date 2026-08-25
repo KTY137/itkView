@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>itkFlow</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b1220;
+        --bg-soft: #141f35;
+        --ink: #e2e8f0;
+        --muted: #94a3b8;
+        --accent: #38bdf8;
+        --warn: #f59e0b;
+        --danger: #fda4af;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: radial-gradient(120% 90% at 50% 0%, var(--bg-soft), var(--bg));
+        color: var(--ink);
+        font: 400 15px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      .panel { width: min(420px, 90vw); text-align: center; }
+      .mark { display: block; margin: 0 auto 28px; width: 96px; height: 96px; }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 26px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .tagline { margin: 0 0 32px; color: var(--muted); font-size: 13.5px; }
+      .status { color: var(--muted); font-size: 14px; min-height: 3em; }
+      .track {
+        margin: 0 auto 20px;
+        width: 200px;
+        height: 3px;
+        border-radius: 999px;
+        background: rgba(148, 163, 184, 0.18);
+        overflow: hidden;
+      }
+      .track i {
+        display: block;
+        width: 40%;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--accent);
+        animation: slide 1.4s ease-in-out infinite;
+      }
+      @keyframes slide {
+        0% { transform: translateX(-110%); }
+        100% { transform: translateX(360%); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .track i { animation: none; width: 100%; opacity: 0.6; }
+      }
+      body.failed .track { display: none; }
+      body.failed .status { color: var(--danger); }
+      .hint {
+        margin-top: 18px;
+        font-size: 12.5px;
+        color: var(--muted);
+        word-break: break-all;
+      }
+      .hint:empty { display: none; }
+    </style>
+  </head>
+  <body>
+    <main class="panel">
+      <svg class="mark" viewBox="0 0 1024 1024" aria-hidden="true">
+        <rect x="64" y="64" width="896" height="896" rx="200" fill="#101a2e" />
+        <g fill="#38bdf8">
+          <rect x="246" y="268" width="46" height="464" rx="23" />
+          <rect x="326" y="268" width="46" height="464" rx="23" />
+          <rect x="406" y="268" width="46" height="464" rx="23" />
+          <rect x="486" y="268" width="46" height="464" rx="23" />
+          <rect x="566" y="268" width="46" height="464" rx="23" />
+          <rect x="646" y="268" width="46" height="464" rx="23" />
+          <rect x="726" y="268" width="46" height="464" rx="23" />
+        </g>
+        <rect x="190" y="588" width="644" height="88" rx="44" fill="#f59e0b" />
+      </svg>
+      <h1>itkFlow</h1>
+      <p class="tagline">ITk strip module production cockpit</p>
+      <div class="track"><i></i></div>
+      <p class="status" id="status">Starting the local server…</p>
+      <p class="hint" id="hint"></p>
+    </main>
+    <script>
+      // The Rust host calls these; keep the names stable.
+      window.itkflowStatus = function (message) {
+        document.getElementById("status").textContent = message;
+      };
+      window.itkflowFailed = function (message, hint) {
+        document.body.classList.add("failed");
+        document.getElementById("status").textContent = message;
+        document.getElementById("hint").textContent = hint || "";
+      };
+    </script>
+  </body>
+</html>
