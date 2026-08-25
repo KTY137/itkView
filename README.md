@@ -144,9 +144,23 @@ npm run build                        # produces the installer
 ```
 
 `build-sidecar.py` bundles the backend with PyInstaller and names the result
-for the Rust target triple, which is what Tauri's sidecar mechanism expects.
-Pass `--skip-frontend` to reuse an existing `frontend/dist`. For a run without
-packaging an installer, `npm run dev` starts the same shell.
+for the Rust host target triple, which is what Tauri's sidecar mechanism
+expects. Pass `--skip-frontend` to reuse an existing `frontend/dist`. For a run
+without packaging an installer, `npm run dev` starts the same shell.
+
+On a GNU toolchain (`rustup show` reports `x86_64-pc-windows-gnu`), build with
+the target spelled out:
+
+```bash
+npx tauri build --target x86_64-pc-windows-gnu
+```
+
+Without it the bundler looks for the sidecar under the MSVC triple and stops
+with `resource path binaries\itkflow-server-x86_64-pc-windows-msvc.exe doesn't
+exist`, because the sidecar is named for the host triple. MSVC needs no flag.
+
+The installer lands in
+`desktop/src-tauri/target/<triple>/release/bundle/nsis/itkFlow_<version>_x64-setup.exe`.
 
 The app keeps its database, credential key and logs in the per-user
 application data directory — on Windows `%LOCALAPPDATA%\itkflow`, deliberately

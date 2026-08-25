@@ -57,8 +57,12 @@ keine reduzierte Zweitfassung, die auseinanderdriftet.
   das; wird es störend, ist Onedir plus Tauri-Resources der nächste Schritt.
 - Signierung ist offen. Ohne Zertifikat zeigt Windows SmartScreen eine Warnung.
 - Toolchain: Tauri unter Windows ist offiziell MSVC. Der Build lief hier mit
-  der GNU-Toolchain durch, erzeugt aber eine Linker-Warnung
-  (`.rsrc merge failure: multiple non-default manifests`). Für Releases ist
+  der GNU-Toolchain vollstaendig durch — Binary und NSIS-Installer
+  (`itkFlow_0.1.0_x64-setup.exe`, 21 MB) —, mit zwei Eigenheiten:
+  einer Linker-Warnung (`.rsrc merge failure: multiple non-default manifests`),
+  und der Notwendigkeit, `--target x86_64-pc-windows-gnu` explizit zu setzen.
+  Ohne das sucht der Bundler den Sidecar unter dem MSVC-Triple, waehrend
+  `build-sidecar.py` ihn nach dem Host-Triple benennt. Fuer Releases bleibt
   MSVC die getretene Pfadstrecke.
 
 ## Alternativen
