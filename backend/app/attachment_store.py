@@ -48,6 +48,12 @@ _EXTENSION_BY_CONTENT_TYPE = {
     "text/csv": ".csv",
 }
 
+# Instrument output arrives as application/octet-stream, so the content type
+# says nothing. These suffixes are accepted from the PDB's filename because
+# they are inert data formats and keeping them lets a person open the file with
+# the tool they already use. Nothing executable is on this list.
+_TRUSTED_DATA_SUFFIXES = frozenset({".dat", ".log", ".xml", ".root", ".tsv", ".md"})
+
 _SAFE_CODE = re.compile(r"[^A-Za-z0-9_-]")
 _SAFE_SN = re.compile(r"[^A-Za-z0-9_-]")
 
@@ -78,8 +84,9 @@ def _extension_for(content_type: str | None, filename: str | None) -> str:
             return known
     if filename:
         suffix = Path(filename).suffix.lower()
-        # Only accept a suffix we already trust from the content-type table.
-        if suffix in set(_EXTENSION_BY_CONTENT_TYPE.values()):
+        # Only ever a suffix from one of the two allowlists — never whatever
+        # the PDB happens to put after the last dot.
+        if suffix in set(_EXTENSION_BY_CONTENT_TYPE.values()) or suffix in _TRUSTED_DATA_SUFFIXES:
             return suffix
     return ""
 
@@ -208,17 +215,35 @@ def _as_bytes(result: Any) -> bytes | None:
     return None
 
 
-def _fetch_bytes(client: Any, descriptor: dict[str, Any]) -> bytes | None:
-    """Pull one attachment's bytes. None when the PDB will not hand them over.
+# An HTML document where a binary was requested is the PDB answering with an
+# error or sign-in page. Storing it produces a file that is the right size, has
+# the right name, and renders as a broken image — a failure that looks like a
+# success everywhere except the screen.
+_HTML_PREFIXES = (b"<!DOC", b"<!doc", b"<html", b"<HTML", b"<?xml")
 
-    The binary store is the route the live image proxy already uses
-    (`app.pdb_attachments`). The test-run route is kept as a fallback because
-    attachment handles have historically been served by either, and a download
-    that silently returns nothing is worse than one extra request.
+
+def looks_like_html(data: bytes) -> bool:
+    return data[:5] in _HTML_PREFIXES
+
+
+def _reported_content_type(result: Any) -> str | None:
+    """itkdb sniffs the real type; trust it over the listing's metadata."""
+    for attribute in ("mimetype", "content_type"):
+        value = getattr(result, attribute, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _fetch_bytes(client: Any, descriptor: dict[str, Any]) -> tuple[bytes, str | None] | None:
+    """Pull one attachment's bytes and its real type. None when unavailable.
+
+    `getTestRunAttachment` is the route that actually returns the file; it needs
+    the owning run, which is why the descriptor carries it. The binary store is
+    tried only as a last resort and has been observed answering with an HTML
+    page instead of the file, so anything it returns is validated the same way.
     """
-    attempts: list[tuple[str, dict[str, Any]]] = [
-        ("uu-app-binarystore/getBinaryData", {"code": descriptor["code"]}),
-    ]
+    attempts: list[tuple[str, dict[str, Any]]] = []
     if descriptor.get("test_run_ref"):
         attempts.append(
             (
@@ -226,6 +251,7 @@ def _fetch_bytes(client: Any, descriptor: dict[str, Any]) -> bytes | None:
                 {"code": descriptor["code"], "testRun": descriptor["test_run_ref"]},
             )
         )
+    attempts.append(("uu-app-binarystore/getBinaryData", {"code": descriptor["code"]}))
 
     for action, request in attempts:
         try:
@@ -233,8 +259,9 @@ def _fetch_bytes(client: Any, descriptor: dict[str, Any]) -> bytes | None:
         except Exception:
             continue
         data = _as_bytes(result)
-        if data:
-            return data
+        if not data or looks_like_html(data):
+            continue
+        return data, _reported_content_type(result)
     return None
 
 
@@ -286,13 +313,21 @@ def download_attachments(
                 failed += 1
                 continue
 
-        data = _fetch_bytes(client, descriptor)
-        if data is None:
+        fetched = _fetch_bytes(client, descriptor)
+        if fetched is None:
             failed += 1
             continue
+        data, reported_type = fetched
+
+        # itkdb sniffs the actual type from the response; the listing metadata
+        # is often just "file". Prefer the sniffed one for both the stored
+        # extension and what the API later serves.
+        content_type = reported_type or descriptor["content_type"]
+        if content_type != row.content_type:
+            row.content_type = content_type
 
         relative_path = storage_path(
-            component_sn, descriptor["code"], descriptor["content_type"], descriptor["filename"]
+            component_sn, descriptor["code"], content_type, descriptor["filename"]
         )
         try:
             size = _write_bytes(root, relative_path, data)

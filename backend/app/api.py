@@ -1833,13 +1833,19 @@ def component_image_binary(
     sn: str,
     attachment_id: str,
     request: Request,
+    test_run_ref: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ) -> Response:
-    """Stream one image attachment's bytes from the PDB binary store."""
+    """Stream one image attachment's bytes from the PDB.
+
+    `test_run_ref` comes from the listing and is what makes the working
+    download route usable; without it only the fallback remains."""
     from app.pdb_attachments import fetch_image_binary
 
-    result = fetch_image_binary(_pdb_gateway(request, db, user), sn, attachment_id)
+    result = fetch_image_binary(
+        _pdb_gateway(request, db, user), sn, attachment_id, test_run_ref
+    )
     if result is None:
         raise HTTPException(status_code=404, detail="Image not available.")
     content_type, data = result

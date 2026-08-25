@@ -235,3 +235,114 @@ def test_resolve_path_is_none_when_the_file_is_gone(session, settings, evidence)
 def test_attachment_root_is_created(settings):
     root = attachment_store.attachment_root(settings)
     assert root.is_dir()
+
+
+# --- download route and payload validation ---------------------------------
+
+
+HTML_ERROR_PAGE = b"<!DOCTYPE html><html><body>Sign in to continue</body></html>"
+
+
+class _RoutingClient:
+    """Records which routes were tried and what each one answers."""
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.calls: list[str] = []
+
+    def get(self, action, json=None):
+        self.calls.append(action)
+        answer = self.answers.get(action)
+        if answer is None:
+            raise RuntimeError(f"no answer configured for {action}")
+
+        class _File:
+            content = answer[0]
+            mimetype = answer[1]
+
+        return _File()
+
+
+def test_the_working_route_is_tried_first(session, settings, evidence):
+    """getTestRunAttachment is the route that returns the file.
+
+    The binary store answered a 200 with an HTML page during live validation,
+    so trying it first would store that page and call it a success.
+    """
+    client = _RoutingClient(
+        {
+            "getTestRunAttachment": (JPEG, "image/jpeg"),
+            "uu-app-binarystore/getBinaryData": (HTML_ERROR_PAGE, "text/html"),
+        }
+    )
+    stats = download_attachments(session, _FakeGateway(client), settings, "20USEM20000041")
+    session.commit()
+
+    assert client.calls == ["getTestRunAttachment"]
+    assert stats.downloaded == 1
+    assert resolve_path(settings, session.scalar(select(TestRunAttachment))).read_bytes() == JPEG
+
+
+def test_an_html_answer_is_refused(session, settings, evidence):
+    """A 200 carrying an error page is a failure, not a file.
+
+    Stored, it would be the right size with the right name and render as a
+    broken image — a failure that looks like a success everywhere but the screen.
+    """
+    client = _RoutingClient(
+        {
+            "getTestRunAttachment": (HTML_ERROR_PAGE, "text/html"),
+            "uu-app-binarystore/getBinaryData": (HTML_ERROR_PAGE, "text/html"),
+        }
+    )
+    stats = download_attachments(session, _FakeGateway(client), settings, "20USEM20000041")
+    session.commit()
+
+    assert stats.downloaded == 0 and stats.failed == 1
+    assert resolve_path(settings, session.scalar(select(TestRunAttachment))) is None
+
+
+def test_the_binary_store_is_used_as_a_fallback(session, settings, evidence):
+    client = _RoutingClient(
+        {
+            "getTestRunAttachment": (b"", None),
+            "uu-app-binarystore/getBinaryData": (JPEG, "image/jpeg"),
+        }
+    )
+    stats = download_attachments(session, _FakeGateway(client), settings, "20USEM20000041")
+    session.commit()
+
+    assert client.calls == ["getTestRunAttachment", "uu-app-binarystore/getBinaryData"]
+    assert stats.downloaded == 1
+
+
+def test_the_sniffed_content_type_wins_over_the_listing(session, settings, evidence):
+    """The listing often says "file"; itkdb sniffs what it actually is."""
+    client = _RoutingClient({"getTestRunAttachment": (b"%PDF-1.4 body", "application/pdf")})
+    download_attachments(session, _FakeGateway(client), settings, "20USEM20000041")
+    session.commit()
+
+    row = session.scalar(select(TestRunAttachment))
+    assert row.content_type == "application/pdf"
+    # And the stored name follows the real type, not the claimed one.
+    assert row.relative_path.endswith(".pdf")
+
+
+def test_looks_like_html_detects_the_usual_shapes():
+    from app.attachment_store import looks_like_html
+
+    for page in (b"<!DOCTYPE html>", b"<html><body>", b"<?xml version"):
+        assert looks_like_html(page), page
+    assert not looks_like_html(JPEG)
+    assert not looks_like_html(b"")
+
+
+def test_instrument_data_keeps_its_suffix():
+    """Instrument output arrives as octet-stream; the name is the only clue."""
+    assert storage_path("SN", "c", "application/octet-stream", "iv_002.dat") == "SN/c.dat"
+    assert storage_path("SN", "c", "application/octet-stream", "run.log") == "SN/c.log"
+
+
+def test_an_executable_suffix_is_still_refused():
+    for name in ("payload.exe", "script.bat", "lib.dll", "run.ps1", "x.cmd"):
+        assert storage_path("SN", "c", "application/octet-stream", name) == "SN/c", name
