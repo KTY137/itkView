@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The shell window needs nothing beyond the core defaults: the UI is a normal web app served over localhost and never calls Tauri IPC.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

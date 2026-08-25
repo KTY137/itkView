@@ -1,0 +1,15 @@
+{
+  "name": "itkflow-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop shell for itkFlow: bundles the backend and the built frontend.",
+  "scripts": {
+    "icon": "tauri icon icon-source.png",
+    "sidecar": "python build-sidecar.py",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.1"
+  }
+}

@@ -14,7 +14,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import model_validator
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # UI base URL of the PDB test instance (links shown to users).
@@ -46,15 +46,33 @@ class Settings(BaseSettings):
     # (remote access, docs/08).
     session_cookie_secure: bool = False
 
+    # --- Desktop / static hosting -----------------------------------------
+    # Directory holding the built frontend (Vite `dist`). When set, the backend
+    # serves the SPA from its own origin, which is how the packaged desktop
+    # build works. Unset in Compose: nginx serves the SPA there.
+    static_dir: str | None = None
+    # Directory for test-run attachments mirrored from the PDB (images, IV
+    # plots, instrument output). Kept on disk rather than in the database so a
+    # person can open the folder and look at them directly. Unset falls back to
+    # `attachments/` beside the application data.
+    attachment_dir: str | None = None
+
     # --- PDB access -------------------------------------------------------
     pdb_instance: Literal["test", "production"] = "test"
     # Second, deliberate switch. Both must be set to reach production.
     allow_production: bool = False
     # API base URL of the PDB *test* instance (itkdb prefix_url).
     pdb_test_api_url: str = PDB_TEST_API_URL_DEFAULT
-    # itkdb access codes — only ever provided via environment, never committed.
+    # Explicit credentials for manually opted-in PDB integration tests only.
+    # Web requests, sync jobs and the production worker never fall back to
+    # these deployment-wide values (ADR 004).
     itkdb_access_code1: str | None = None
     itkdb_access_code2: str | None = None
+    # Master key for per-user PDB access codes stored in the local database.
+    # It must be a URL-safe base64-encoded 32-byte key and is only supplied via
+    # ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY. SecretStr keeps settings reprs and
+    # validation errors from disclosing the value.
+    pdb_credential_encryption_key: SecretStr | None = None
 
     # --- PDB write scope ----------------------------------------------------
     # "dummy_only": writes (test-run uploads, stage moves) are refused unless

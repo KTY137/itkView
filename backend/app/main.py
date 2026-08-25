@@ -4,6 +4,8 @@ Run locally with:
     uvicorn app.main:create_app --factory --reload
 """
 
+from pathlib import Path
+
 from fastapi import FastAPI
 
 from app import __version__
@@ -11,6 +13,8 @@ from app.api import router
 from app.config import Settings, get_settings
 from app.db import Base, ensure_phase0_sqlite_schema, make_engine, make_session_factory
 from app.pdb_sync import fetch_for_institute
+from app.static_spa import mount_spa
+from app.sync_jobs import SyncJobManager, recover_interrupted_sync_jobs
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -25,10 +29,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title=settings.app_name, version=__version__)
     app.state.settings = settings
     app.state.session_factory = make_session_factory(engine)
+    # A process restart cannot resume the exact authoritative PDB snapshot. Any
+    # durable live row is therefore closed as interrupted before accepting a
+    # new job, which also releases the global single-flight lease.
+    recover_interrupted_sync_jobs(app.state.session_factory)
     app.state.component_fetcher = fetch_for_institute
+    app.state.sync_job_manager = SyncJobManager(app.state.session_factory, settings)
+    app.router.add_event_handler("shutdown", app.state.sync_job_manager.shutdown)
     # FastAPI/Starlette in this environment stores included routers lazily as
     # `_IncludedRouter`, which TestClient resolves but the live Uvicorn server
     # did not expose reliably. Append concrete routes for a predictable dev app.
     for route in router.routes:
         app.router.routes.append(route)
+    # Strictly after the API routes: the SPA fallback is a catch-all and
+    # Starlette matches routes in registration order.
+    if settings.static_dir:
+        app.state.spa_mounted = mount_spa(app, Path(settings.static_dir))
+    else:
+        app.state.spa_mounted = False
     return app
