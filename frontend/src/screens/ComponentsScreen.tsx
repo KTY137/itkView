@@ -984,7 +984,10 @@ function ImagesSection({ sn }: { sn: string }) {
                 title={img.test_type ?? img.title}
                 onClick={() => setLightbox(img)}
               >
-                <img src={componentImageUrl(sn, img.id)} alt={img.title || t.images.untitled} />
+                <img
+                  src={componentImageUrl(sn, img.id, img.test_run_ref)}
+                  alt={img.title || t.images.untitled}
+                />
                 {img.test_type !== null && <span className="img-tag">{img.test_type}</span>}
               </button>
             ))}
@@ -996,7 +999,10 @@ function ImagesSection({ sn }: { sn: string }) {
           <button type="button" className="img-lightbox-close" aria-label={t.images.close}>
             ×
           </button>
-          <img src={componentImageUrl(sn, lightbox.id)} alt={lightbox.title || t.images.untitled} />
+          <img
+            src={componentImageUrl(sn, lightbox.id, lightbox.test_run_ref)}
+            alt={lightbox.title || t.images.untitled}
+          />
           <div className="img-lightbox-cap">
             {lightbox.test_type ? `${lightbox.test_type} · ` : ""}
             {lightbox.filename ?? lightbox.title}
