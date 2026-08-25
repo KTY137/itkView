@@ -546,6 +546,8 @@ export type ComponentImage = {
   id: string;
   title: string;
   test_type: string | null;
+  /** The owning test run. The working download route needs it. */
+  test_run_ref: string | null;
   filename: string | null;
   content_type: string | null;
 };
@@ -554,9 +556,13 @@ export function getComponentImages(sn: string, signal?: AbortSignal): Promise<Co
   return request<ComponentImage[]>(`/api/components/${encodeURIComponent(sn)}/images`, { signal });
 }
 
-/** URL of one image's binary (streamed by the backend from the PDB). */
-export function componentImageUrl(sn: string, id: string): string {
-  return `/api/components/${encodeURIComponent(sn)}/images/${encodeURIComponent(id)}`;
+/** URL of one image's binary (streamed by the backend from the PDB).
+ *
+ * Passing the run reference matters: without it the backend can only try the
+ * fallback route, which returns an error page rather than the file. */
+export function componentImageUrl(sn: string, id: string, testRunRef?: string | null): string {
+  const base = `/api/components/${encodeURIComponent(sn)}/images/${encodeURIComponent(id)}`;
+  return testRunRef ? `${base}?test_run_ref=${encodeURIComponent(testRunRef)}` : base;
 }
 
 export type TestRunAttachment = {
