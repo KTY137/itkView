@@ -3,9 +3,12 @@ import hmac
 import json
 from collections.abc import Iterator
 from datetime import timezone
+from typing import Literal
 
+from fastapi.responses import FileResponse
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app import __version__
@@ -29,7 +32,12 @@ from app.models import (
     IngestFile,
     InstituteProfile,
     OutboxAction,
+    OutboxPdbPrincipal,
+    PdbCredential,
     StageEvent,
+    SyncJob,
+    TestRunAttachment,
+    TestRunEvidence,
     Tool,
     User,
     UserSession,
@@ -42,9 +50,24 @@ from app.outbox import (
     assert_transition,
     transition_contract,
 )
+from app.pdb_credentials import (
+    CredentialDecryptionError,
+    CredentialIdentityConflictError,
+    CredentialKeyInvalidError,
+    CredentialKeyMissingError,
+    CredentialNotFoundError,
+    PdbAccessCodes,
+    delete_pdb_credentials,
+    get_pdb_credential_status,
+    load_pdb_credentials,
+    save_pdb_credentials,
+    update_pdb_credential_status,
+)
+from app.pdb_gateway import PdbClientUnavailable
 from app.pdb_scope import is_registrable_type
 from app.pdb_sync import PdbSyncUnavailable
 from app.schemas import (
+    AttachmentSyncOut,
     AuditOut,
     ComponentDetailOut,
     ComponentImageOut,
@@ -69,10 +92,15 @@ from app.schemas import (
     OutboxCreate,
     OutboxOut,
     OutboxTransition,
+    PdbConnectionOut,
+    PdbCredentialsPut,
     ProductionStatsOut,
     RequirementCheckOut,
     StageSuggestionOut,
     StatsDimensionsOut,
+    SyncJobOut,
+    TestRunAttachmentOut,
+    TestRunDetailOut,
     ToolCreate,
     ToolOut,
     ToolSyncOut,
@@ -84,6 +112,13 @@ from app.schemas import (
 from app.stage_service import evaluate_for_component
 from app.stats import production_stats
 from app.sync import UnknownParentError, sync_components
+from app.sync_jobs import (
+    COMPONENT_SYNC_ACTIVE_KEY,
+    COMPONENT_SYNC_KIND,
+    SyncLeaseBusy,
+    acquire_component_sync_lease,
+    fail_sync_job,
+)
 from app.tool_sync import sync_tools_from_components
 
 
@@ -274,6 +309,334 @@ def whoami(
         db.commit()
     _set_csrf_cookie(response, csrf_token, request.app.state.settings)
     return _me(user, csrf_token)
+
+
+# --------------------------------------------------------------------------
+# Personal Plus4U / PDB connection
+# --------------------------------------------------------------------------
+
+
+def _pdb_connection_out(db: Session, user: User, settings: Settings) -> PdbConnectionOut:
+    status = get_pdb_credential_status(db, user_id=user.id)
+    return PdbConnectionOut(
+        configured=status.configured,
+        state=status.status,
+        instance=settings.pdb_instance,
+        identity=status.pdb_identity,
+        institutions=list(status.institutions),
+        last_checked_at=status.last_checked_at,
+        verified_at=status.verified_at,
+    )
+
+
+def _personal_pdb_gateway(request: Request, access_codes: PdbAccessCodes):
+    """Create an operation-local gateway; tests may inject a credential-aware factory."""
+    from app.pdb_gateway import PdbGateway
+
+    factory = getattr(request.app.state, "pdb_gateway_factory", None)
+    if factory is not None:
+        return factory(request.app.state.settings, access_codes)
+    return PdbGateway(request.app.state.settings, access_codes=access_codes)
+
+
+def _pdb_failure_state(error: Exception) -> Literal["invalid", "unreachable"]:
+    """Classify without formatting the exception, whose request may contain codes."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        response = getattr(current, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if status_code in {400, 401, 403}:
+            return "invalid"
+        current = current.__cause__ or current.__context__
+    return "unreachable"
+
+
+def _verified_pdb_metadata(request: Request, access_codes: PdbAccessCodes) -> dict:
+    try:
+        raw = _personal_pdb_gateway(request, access_codes).verify_connection()
+    except PdbClientUnavailable:
+        raise HTTPException(
+            status_code=500,
+            detail="PDB client support is unavailable on this itkFlow server.",
+        ) from None
+    except Exception as exc:
+        state = _pdb_failure_state(exc)
+        status_code = 422 if state == "invalid" else 503
+        detail = (
+            "The PDB rejected these access codes."
+            if state == "invalid"
+            else "The PDB could not be reached. Try again later."
+        )
+        # itkdb's ResponseException can embed the complete grantToken body.
+        # Never stringify it and suppress the exception chain at the API edge.
+        raise HTTPException(status_code=status_code, detail=detail) from None
+
+    if not isinstance(raw, dict) or not isinstance(raw.get("identity"), str):
+        raise HTTPException(
+            status_code=503,
+            detail="The PDB returned an invalid account response. Try again later.",
+        )
+    identity = raw["identity"].strip()
+    if not identity:
+        raise HTTPException(
+            status_code=422,
+            detail="The PDB access codes did not resolve to a user identity.",
+        )
+    institutions = sorted(
+        {
+            code.strip()
+            for code in (raw.get("institutions") or [])
+            if isinstance(code, str) and code.strip()
+        }
+    )
+    name_parts = [raw.get("first_name"), raw.get("last_name")]
+    display_name = " ".join(
+        part.strip() for part in name_parts if isinstance(part, str) and part.strip()
+    )
+    return {
+        "identity": identity,
+        "institutions": institutions,
+        "display_name": display_name or None,
+    }
+
+
+def _require_pdb_institute(user: User, institutions: list[str]) -> None:
+    if user.institute is not None and user.institute.code not in institutions:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"This PDB account is not a member of the local institute "
+                f"'{user.institute.code}'."
+            ),
+        )
+
+
+def _load_personal_pdb_access(
+    request: Request,
+    db: Session,
+    user: User,
+) -> PdbAccessCodes:
+    """Resolve one verified credential for this request, with no global fallback."""
+    credential = db.get(PdbCredential, user.id)
+    if credential is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Connect your personal PDB account in Account settings first.",
+        )
+    if credential.status != "verified":
+        raise HTTPException(
+            status_code=409,
+            detail="Test and verify your personal PDB connection in Account settings first.",
+        )
+    _require_pdb_institute(user, list(credential.institutions or []))
+    try:
+        return load_pdb_credentials(
+            db,
+            user_id=user.id,
+            encryption_key=request.app.state.settings.pdb_credential_encryption_key,
+        )
+    except CredentialNotFoundError:
+        raise HTTPException(
+            status_code=409,
+            detail="Connect your personal PDB account in Account settings first.",
+        ) from None
+    except (CredentialDecryptionError, CredentialKeyMissingError, CredentialKeyInvalidError):
+        raise HTTPException(
+            status_code=503,
+            detail="The saved PDB connection cannot be opened by this server.",
+        ) from None
+
+
+def _audit_pdb_connection(
+    db: Session,
+    user: User,
+    action: str,
+    *,
+    result: str,
+    instance: str,
+) -> None:
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action=action,
+            subject=f"user:{user.id}:pdb-connection",
+            detail={"result": result, "instance": instance},
+        )
+    )
+
+
+@router.get(
+    "/api/account/pdb-connection",
+    response_model=PdbConnectionOut,
+    tags=["account", "pdb"],
+)
+def get_personal_pdb_connection(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> PdbConnectionOut:
+    return _pdb_connection_out(db, user, request.app.state.settings)
+
+
+@router.put(
+    "/api/account/pdb-connection",
+    response_model=PdbConnectionOut,
+    tags=["account", "pdb"],
+)
+def put_personal_pdb_connection(
+    body: PdbCredentialsPut,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> PdbConnectionOut:
+    settings = request.app.state.settings
+    code1 = body.access_code1.get_secret_value().strip()
+    code2 = body.access_code2.get_secret_value().strip()
+    if not code1 or not code2:
+        raise HTTPException(status_code=422, detail="Both PDB access codes are required.")
+    access_codes = PdbAccessCodes(
+        code1,
+        code2,
+    )
+    metadata = _verified_pdb_metadata(request, access_codes)
+    _require_pdb_institute(user, metadata["institutions"])
+
+    try:
+        save_pdb_credentials(
+            db,
+            user_id=user.id,
+            access_codes=access_codes,
+            pdb_identity=metadata["identity"],
+            pdb_display_name=metadata["display_name"],
+            institutions=metadata["institutions"],
+            encryption_key=settings.pdb_credential_encryption_key,
+        )
+        _audit_pdb_connection(
+            db,
+            user,
+            "pdb.connection_connected",
+            result="verified",
+            instance=settings.pdb_instance,
+        )
+        db.commit()
+    except CredentialIdentityConflictError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This PDB identity is already connected to another itkFlow account.",
+        ) from None
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This PDB identity is already connected to another itkFlow account.",
+        ) from None
+    except (CredentialKeyMissingError, CredentialKeyInvalidError):
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Personal PDB credential storage is not configured on this server.",
+        ) from None
+    return _pdb_connection_out(db, user, settings)
+
+
+@router.post(
+    "/api/account/pdb-connection/test",
+    response_model=PdbConnectionOut,
+    tags=["account", "pdb"],
+)
+def test_personal_pdb_connection(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> PdbConnectionOut:
+    settings = request.app.state.settings
+    try:
+        access_codes = load_pdb_credentials(
+            db,
+            user_id=user.id,
+            encryption_key=settings.pdb_credential_encryption_key,
+        )
+    except CredentialNotFoundError:
+        raise HTTPException(
+            status_code=409,
+            detail="No personal PDB connection is configured for this account.",
+        ) from None
+    except (CredentialDecryptionError, CredentialKeyMissingError, CredentialKeyInvalidError):
+        raise HTTPException(
+            status_code=503,
+            detail="The saved PDB connection cannot be opened by this server.",
+        ) from None
+
+    try:
+        metadata = _verified_pdb_metadata(request, access_codes)
+        _require_pdb_institute(user, metadata["institutions"])
+        credential = db.get(PdbCredential, user.id)
+        if credential is None:
+            raise HTTPException(
+                status_code=409,
+                detail="No personal PDB connection is configured for this account.",
+            )
+        if metadata["identity"] != credential.pdb_identity:
+            raise HTTPException(
+                status_code=422,
+                detail="The saved access codes no longer match the connected PDB identity.",
+            )
+        credential.pdb_display_name = metadata["display_name"]
+        credential.institutions = metadata["institutions"]
+        update_pdb_credential_status(db, user_id=user.id, status="verified")
+        _audit_pdb_connection(
+            db,
+            user,
+            "pdb.connection_tested",
+            result="verified",
+            instance=settings.pdb_instance,
+        )
+        db.commit()
+        return _pdb_connection_out(db, user, settings)
+    except HTTPException as exc:
+        if exc.status_code == 500:
+            # A local deployment problem says nothing about whether the saved
+            # personal codes remain valid. Preserve the last known status.
+            raise exc from None
+        state: Literal["invalid", "unreachable"] = (
+            "invalid" if exc.status_code == 422 else "unreachable"
+        )
+        update_pdb_credential_status(db, user_id=user.id, status=state)
+        _audit_pdb_connection(
+            db,
+            user,
+            "pdb.connection_tested",
+            result=state,
+            instance=settings.pdb_instance,
+        )
+        db.commit()
+        raise exc from None
+
+
+@router.delete(
+    "/api/account/pdb-connection",
+    status_code=204,
+    tags=["account", "pdb"],
+)
+def delete_personal_pdb_connection(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> None:
+    settings = request.app.state.settings
+    removed = delete_pdb_credentials(db, user_id=user.id)
+    _audit_pdb_connection(
+        db,
+        user,
+        "pdb.connection_disconnected",
+        result="removed" if removed else "not_configured",
+        instance=settings.pdb_instance,
+    )
+    db.commit()
 
 
 @router.get("/api/users", response_model=list[UserOut], tags=["users"])
@@ -577,6 +940,52 @@ def list_components(
     return list(db.scalars(stmt))
 
 
+# Registered before /api/components/{sn}: FastAPI matches routes in
+# registration order, and a literal segment that sits beside a path parameter
+# is otherwise swallowed by it.
+@router.get(
+    "/api/components/thumbnails",
+    response_model=dict[str, str],
+    tags=["components"],
+)
+def component_thumbnails(
+    request: Request,
+    institute_code: str | None = None,
+    limit: int = 2000,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> dict[str, str]:
+    """Map of serial number to one locally stored image, for list thumbnails.
+
+    One request for a whole list rather than one per row: a grid of a few
+    hundred modules would otherwise open a few hundred connections just to
+    discover that most have no picture.
+
+    Only attachments whose bytes are actually on disk are returned, so the
+    caller can render every entry it receives without a fallback state."""
+    from app.attachment_store import resolve_path
+
+    settings = request.app.state.settings
+    stmt = (
+        select(TestRunAttachment)
+        .where(TestRunAttachment.relative_path.is_not(None))
+        .order_by(TestRunAttachment.component_sn, TestRunAttachment.id)
+    )
+    if institute_code:
+        stmt = stmt.join(
+            Component, Component.sn == TestRunAttachment.component_sn
+        ).where(Component.institute_code == institute_code)
+
+    thumbnails: dict[str, str] = {}
+    for row in db.scalars(stmt.limit(max(1, min(limit, 5000)))):
+        if row.component_sn in thumbnails or not row.is_image:
+            continue
+        if resolve_path(settings, row) is None:
+            continue
+        thumbnails[row.component_sn] = row.pdb_code
+    return thumbnails
+
+
 @router.get("/api/components/{sn}", response_model=ComponentDetailOut, tags=["components"])
 def get_component(sn: str, db: Session = Depends(get_db)) -> Component:
     component = db.scalar(
@@ -618,6 +1027,92 @@ def component_stage_suggestion(sn: str, db: Session = Depends(get_db)) -> StageS
     )
 
 
+@router.get(
+    "/api/sync/jobs/active",
+    response_model=SyncJobOut,
+    responses={204: {"description": "No component sync is active."}},
+    tags=["components", "sync"],
+)
+def active_sync_job(
+    kind: Literal["components"] = COMPONENT_SYNC_KIND,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> SyncJob | Response:
+    """Discover the global live job after navigation, refresh or another tab."""
+
+    job = db.scalar(
+        select(SyncJob).where(
+            SyncJob.kind == kind,
+            SyncJob.active_key == COMPONENT_SYNC_ACTIVE_KEY,
+        )
+    )
+    return job if job is not None else Response(status_code=204)
+
+
+@router.get(
+    "/api/sync/jobs/{job_id}",
+    response_model=SyncJobOut,
+    tags=["components", "sync"],
+)
+def get_sync_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> SyncJob:
+    job = db.get(SyncJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Sync job '{job_id}' not found.")
+    return job
+
+
+@router.post(
+    "/api/sync/jobs/components/{institute_code}",
+    response_model=SyncJobOut,
+    status_code=202,
+    tags=["components", "sync"],
+)
+def start_component_sync_job(
+    institute_code: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> SyncJob:
+    """Start a pollable sync, or converge on the already-active global job."""
+
+    institute = db.scalar(
+        select(InstituteProfile).where(InstituteProfile.code == institute_code)
+    )
+    if institute is None:
+        raise HTTPException(status_code=404, detail=f"Institute '{institute_code}' not found.")
+
+    # Fail before acquiring the global lease. The worker resolves this same
+    # user's codes again in its own short-lived session; no secret enters the
+    # durable job row or executor queue.
+    _load_personal_pdb_access(request, db, user)
+
+    try:
+        lease = acquire_component_sync_lease(
+            db,
+            institute_code=institute.code,
+            requested_by=user.email,
+            user_id=user.id,
+        )
+    except SyncLeaseBusy as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not lease.created:
+        return lease.job
+
+    try:
+        request.app.state.sync_job_manager.start(
+            lease.job.id,
+            request.app.state.component_fetcher,
+        )
+    except Exception as exc:
+        fail_sync_job(request.app.state.session_factory, lease.job.id, exc)
+        raise HTTPException(status_code=503, detail="Could not schedule component sync.") from exc
+    return lease.job
+
+
 @router.post(
     "/api/sync/components/{institute_code}",
     response_model=ComponentSyncOut,
@@ -633,28 +1128,75 @@ def sync_components_for_institute(
     if institute is None:
         raise HTTPException(status_code=404, detail=f"Institute '{institute_code}' not found.")
 
+    access_codes = _load_personal_pdb_access(request, db, user)
+
+    try:
+        lease = acquire_component_sync_lease(
+            db,
+            institute_code=institute.code,
+            requested_by=user.email,
+            user_id=user.id,
+            initial_status="running",
+        )
+    except SyncLeaseBusy as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not lease.created:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Component sync job '{lease.job.id}' for institute "
+                f"'{lease.job.institute_code}' is already active."
+            ),
+        )
+
+    job_id = lease.job.id
     fetcher = request.app.state.component_fetcher
     try:
-        fetched = fetcher(request.app.state.settings, institute)
+        fetched = fetcher(request.app.state.settings, institute, access_codes, None)
         # A full institute fetch is authoritative, so prune rows that vanished.
         stats = sync_components(db, fetched.records, prune_scope=institute.code)
         sync_tools_from_components(db, institute)
+        result = {
+            "institute_code": institute.code,
+            "fetched": len(fetched.records) + fetched.skipped,
+            "skipped": fetched.skipped,
+            "created": stats.created,
+            "updated": stats.updated,
+            "unchanged": stats.unchanged,
+            "stale": stats.stale,
+            "total": stats.total,
+        }
+        job = db.get(SyncJob, job_id)
+        if job is None:
+            raise RuntimeError(f"Sync job '{job_id}' disappeared before commit.")
+        finished = utcnow()
+        job.status = "succeeded"
+        job.phase = "complete"
+        job.current = len(fetched.records)
+        job.total = len(fetched.records)
+        job.percent = 100.0
+        job.message = "Component sync completed."
+        job.result = result
+        job.error = None
+        job.active_key = None
+        job.updated_at = finished
+        job.finished_at = finished
+        # Mirror, prune, derived tools and terminal lease state are one commit.
+        db.commit()
     except PdbSyncUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        db.rollback()
+        fail_sync_job(request.app.state.session_factory, job_id, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     except UnknownParentError as exc:
+        db.rollback()
+        fail_sync_job(request.app.state.session_factory, job_id, exc)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        fail_sync_job(request.app.state.session_factory, job_id, exc)
+        raise
 
-    db.commit()
-    return ComponentSyncOut(
-        institute_code=institute.code,
-        fetched=len(fetched.records) + fetched.skipped,
-        skipped=fetched.skipped,
-        created=stats.created,
-        updated=stats.updated,
-        unchanged=stats.unchanged,
-        stale=stats.stale,
-        total=stats.total,
-    )
+    return ComponentSyncOut(**result)
 
 
 @router.post(
@@ -939,6 +1481,7 @@ def create_outbox_action(
 def transition_outbox_action(
     action_id: int,
     body: OutboxTransition,
+    request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_operator),
 ) -> OutboxAction:
@@ -951,6 +1494,37 @@ def transition_outbox_action(
         assert_transition(current, body.to)
     except InvalidTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if body.to is OutboxStatus.APPROVED:
+        if user.institute_id is not None and user.institute_id != action.institute_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only approve PDB actions for your own institute.",
+            )
+        # Decryption here proves that the bound identity is usable by this
+        # deployment. The codes themselves are discarded; the worker reloads
+        # them for this exact user when it later submits or retries.
+        _load_personal_pdb_access(request, db, user)
+        credential = db.get(PdbCredential, user.id)
+        if credential is None:  # guarded above; defensive against future refactors
+            raise HTTPException(status_code=409, detail="Personal PDB connection required.")
+        principal = db.get(OutboxPdbPrincipal, action.id)
+        if principal is not None and (
+            principal.user_id != user.id
+            or principal.pdb_identity != credential.pdb_identity
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="This action is already bound to a different PDB identity.",
+            )
+        if principal is None:
+            db.add(
+                OutboxPdbPrincipal(
+                    outbox_action_id=action.id,
+                    user_id=user.id,
+                    pdb_identity=credential.pdb_identity,
+                )
+            )
 
     action.status = body.to.value
     if body.to is OutboxStatus.SUBMITTED:
@@ -965,7 +1539,16 @@ def transition_outbox_action(
             user_id=user.id,
             action="outbox.transition",
             subject=f"outbox:{action.id}",
-            detail={"from": current.value, "to": body.to.value, "error": body.error},
+            detail={
+                "from": current.value,
+                "to": body.to.value,
+                "error": body.error,
+                **(
+                    {"pdb_principal_user_id": user.id}
+                    if body.to is OutboxStatus.APPROVED
+                    else {}
+                ),
+            },
             outbox_action_id=action.id,
         )
     )
@@ -1217,12 +1800,15 @@ def list_audit(limit: int = 100, db: Session = Depends(get_db)) -> list[AuditEve
 # --------------------------------------------------------------------------
 
 
-def _pdb_gateway(request: Request):
-    """The PDB gateway for read-only fetches; tests may inject a fake on app.state."""
+def _pdb_gateway(request: Request, db: Session, user: User):
+    """Personal PDB gateway for direct reads; tests may inject a fake."""
     from app.pdb_gateway import PdbGateway
 
     injected = getattr(request.app.state, "pdb_gateway", None)
-    return injected if injected is not None else PdbGateway(request.app.state.settings)
+    if injected is not None:
+        return injected
+    access_codes = _load_personal_pdb_access(request, db, user)
+    return PdbGateway(request.app.state.settings, access_codes=access_codes)
 
 
 @router.get(
@@ -1230,23 +1816,198 @@ def _pdb_gateway(request: Request):
     response_model=list[ComponentImageOut],
     tags=["components"],
 )
-def component_images(sn: str, request: Request) -> list[dict]:
+def component_images(
+    sn: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> list[dict]:
     """List a component's metrology/VI image attachments (empty when offline)."""
     from app.pdb_attachments import list_component_images
 
-    return list_component_images(_pdb_gateway(request), sn)
+    return list_component_images(_pdb_gateway(request, db, user), sn)
 
 
 @router.get("/api/components/{sn}/images/{attachment_id}", tags=["components"])
-def component_image_binary(sn: str, attachment_id: str, request: Request) -> Response:
+def component_image_binary(
+    sn: str,
+    attachment_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> Response:
     """Stream one image attachment's bytes from the PDB binary store."""
     from app.pdb_attachments import fetch_image_binary
 
-    result = fetch_image_binary(_pdb_gateway(request), sn, attachment_id)
+    result = fetch_image_binary(_pdb_gateway(request, db, user), sn, attachment_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Image not available.")
     content_type, data = result
     return Response(content=data, media_type=content_type)
+
+
+def _attachment_rows_by_run(db: Session, sn: str) -> dict[str | None, list]:
+    """Local attachment index for one component, grouped by test run."""
+    from app.attachment_store import known_attachments
+
+    grouped: dict[str | None, list] = {}
+    for row in known_attachments(db, sn):
+        grouped.setdefault(row.test_run_ref, []).append(row)
+    return grouped
+
+
+def _attachment_out(settings: Settings, row) -> TestRunAttachmentOut:
+    from app.attachment_store import resolve_path
+
+    return TestRunAttachmentOut(
+        code=row.pdb_code,
+        test_type=row.test_type,
+        test_run_ref=row.test_run_ref,
+        filename=row.filename,
+        content_type=row.content_type,
+        title=row.title,
+        size_bytes=row.size_bytes,
+        stored=resolve_path(settings, row) is not None,
+        is_image=row.is_image,
+    )
+
+
+@router.get(
+    "/api/components/{sn}/tests",
+    response_model=list[TestRunDetailOut],
+    tags=["components", "workflow"],
+)
+def component_test_details(
+    sn: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> list[TestRunDetailOut]:
+    """Mirrored test runs with their measured values, newest first.
+
+    Purely local: this reads the mirror written by `/sync-evidence` and never
+    touches the PDB, so the detail page stays fast and works offline. An empty
+    list means nothing has been mirrored yet, not that no tests exist."""
+    settings = request.app.state.settings
+    grouped = _attachment_rows_by_run(db, sn)
+
+    rows = db.scalars(
+        select(TestRunEvidence)
+        .where(TestRunEvidence.component_sn == sn)
+        .order_by(TestRunEvidence.measured_at.desc().nullslast(), TestRunEvidence.id.desc())
+    )
+
+    details: list[TestRunDetailOut] = []
+    for evidence in rows:
+        payload = evidence.payload or {}
+        run_number = payload.get("run_number")
+        details.append(
+            TestRunDetailOut(
+                test_type=evidence.test_type,
+                passed=evidence.passed,
+                external_ref=evidence.external_ref,
+                measured_at=evidence.measured_at,
+                run_number=str(run_number) if run_number is not None else None,
+                results=payload.get("results") or {},
+                result_meta=payload.get("result_meta") or {},
+                properties=payload.get("properties") or {},
+                attachments=[
+                    _attachment_out(settings, row)
+                    for row in grouped.get(evidence.external_ref, [])
+                ],
+            )
+        )
+    return details
+
+
+@router.get(
+    "/api/components/{sn}/attachments",
+    response_model=list[TestRunAttachmentOut],
+    tags=["components"],
+)
+def component_attachments(
+    sn: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> list[TestRunAttachmentOut]:
+    """The locally mirrored attachment index for one component."""
+    from app.attachment_store import known_attachments
+
+    settings = request.app.state.settings
+    return [_attachment_out(settings, row) for row in known_attachments(db, sn)]
+
+
+@router.post(
+    "/api/components/{sn}/attachments/sync",
+    response_model=AttachmentSyncOut,
+    tags=["components"],
+)
+def component_attachments_sync(
+    sn: str,
+    request: Request,
+    force: bool = False,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> AttachmentSyncOut:
+    """Mirror this component's attachment bytes into the local folder.
+
+    Read-only against the PDB. Requires the detailed evidence sync to have run
+    first, which is what records *which* attachments exist."""
+    from app.attachment_store import download_attachments
+
+    stats = download_attachments(
+        db,
+        _pdb_gateway(request, db, user),
+        request.app.state.settings,
+        sn,
+        force=force,
+    )
+    db.commit()
+    return AttachmentSyncOut(
+        component_sn=sn,
+        downloaded=stats.downloaded,
+        reused=stats.reused,
+        failed=stats.failed,
+        total=stats.total,
+    )
+
+
+@router.get("/api/components/{sn}/attachments/{code}", tags=["components"])
+def component_attachment_binary(
+    sn: str,
+    code: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> Response:
+    """Serve one locally mirrored attachment.
+
+    Local only: a file that was never downloaded is a 404 rather than a silent
+    fetch, so the UI can offer the sync instead of hiding a slow PDB call
+    behind an image tag."""
+    from app.attachment_store import resolve_path
+
+    row = db.scalar(
+        select(TestRunAttachment).where(
+            TestRunAttachment.component_sn == sn,
+            TestRunAttachment.pdb_code == code,
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Unknown attachment.")
+
+    path = resolve_path(request.app.state.settings, row)
+    if path is None:
+        raise HTTPException(
+            status_code=404,
+            detail="This attachment is not mirrored locally yet. Sync attachments first.",
+        )
+    return FileResponse(
+        path,
+        media_type=row.content_type or "application/octet-stream",
+        filename=row.filename or row.pdb_code,
+    )
 
 
 @router.get(
@@ -1279,15 +2040,31 @@ def component_staged_changes(sn: str, db: Session = Depends(get_db)) -> list[Out
     tags=["components", "workflow"],
 )
 def component_sync_evidence(
-    sn: str, request: Request, db: Session = Depends(get_db)
+    sn: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
 ) -> EvidenceSyncOut:
     """Mirror this component's PDB test-run results into local evidence, so the
     stage engine knows which required tests really passed (not just itkFlow
-    uploads). Read-only against the PDB; no-op counts when not configured."""
-    from app.pdb_test_evidence import fetch_test_run_evidence
+    uploads). Read-only against the PDB, and detailed: measured values,
+    properties and attachment metadata come along, which is what the
+    glue-weight, metrology and IV views read.
+
+    Answers 503 when the PDB cannot be read. Reporting a successful zero there
+    would be indistinguishable from a module that has no test runs at all."""
+    from app.pdb_test_evidence import PdbEvidenceUnavailable, fetch_test_run_evidence
     from app.test_run_evidence import upsert_test_run_evidence
 
-    records = fetch_test_run_evidence(_pdb_gateway(request), sn)
+    # One opened component is worth the extra request per run: this is what
+    # fills the glue-weight, metrology and IV views.
+    try:
+        records = fetch_test_run_evidence(
+            _pdb_gateway(request, db, user), sn, with_detail=True, strict=True
+        )
+    except PdbEvidenceUnavailable as exc:
+        # Reporting "0 mirrored" here would be a lie that looks like a fact.
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     stats = upsert_test_run_evidence(db, records)
     db.commit()
     return EvidenceSyncOut(
@@ -1309,6 +2086,7 @@ def sync_institute_evidence(
     request: Request,
     component_type: str = "MODULE",
     db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
 ) -> InstituteEvidenceSyncOut:
     """Mirror PDB test-run evidence for every live component of one type at an
     institute, so the dashboard's required-test gaps and stage suggestions
@@ -1317,7 +2095,7 @@ def sync_institute_evidence(
     from app.pdb_test_evidence import fetch_test_run_evidence
     from app.test_run_evidence import upsert_test_run_evidence
 
-    gateway = _pdb_gateway(request)
+    gateway = _pdb_gateway(request, db, user)
     components = db.scalars(
         select(Component).where(
             Component.institute_code == institute_code,

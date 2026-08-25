@@ -4,6 +4,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -114,6 +115,11 @@ class OutboxAction(Base):
 
     institute: Mapped[InstituteProfile] = relationship(back_populates="outbox_actions")
     audit_events: Mapped[list["AuditEvent"]] = relationship(back_populates="outbox_action")
+    pdb_principal: Mapped["OutboxPdbPrincipal | None"] = relationship(
+        back_populates="outbox_action",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
 
 class IngestFile(Base):
@@ -175,6 +181,48 @@ class TestRunEvidence(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class TestRunAttachment(Base):
+    """A PDB test-run attachment mirrored to a local file.
+
+    The row is the index; the bytes live on disk under the configured
+    attachment directory (`app.attachment_store`). Keeping them out of the
+    database keeps the mirror small and lets a person open the folder and look
+    at the images with any ordinary viewer.
+
+    `pdb_code` is the PDB's own attachment handle and is unique per source, so
+    re-running a sync re-uses the file instead of downloading it again.
+    """
+
+    __tablename__ = "test_run_attachment"
+    __test__ = False
+    __table_args__ = (
+        UniqueConstraint("source", "pdb_code", name="uq_test_run_attachment_source_code"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    component_sn: Mapped[str] = mapped_column(String(20), index=True)
+    test_type: Mapped[str] = mapped_column(String(64), index=True)
+    # The run this belongs to; matches `TestRunEvidence.external_ref`.
+    test_run_ref: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
+    source: Mapped[str] = mapped_column(String(24), default="pdb", index=True)
+    pdb_code: Mapped[str] = mapped_column(String(128))
+    filename: Mapped[str | None] = mapped_column(String(255), default=None)
+    content_type: Mapped[str | None] = mapped_column(String(128), default=None)
+    title: Mapped[str | None] = mapped_column(String(255), default=None)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, default=None)
+    # Relative to the configured attachment directory, so moving or backing up
+    # that directory does not invalidate every row.
+    relative_path: Mapped[str | None] = mapped_column(String(400), default=None)
+    downloaded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    @property
+    def is_image(self) -> bool:
+        return bool(self.content_type and self.content_type.startswith("image/"))
+
+
 class AuditEvent(Base):
     """Append-only trail: who did what, when, to which subject."""
 
@@ -221,6 +269,61 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     institute: Mapped[InstituteProfile | None] = relationship()
+    pdb_credential: Mapped["PdbCredential | None"] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class PdbCredential(Base):
+    """Encrypted, account-owned credentials for the external production DB.
+
+    The local user id is both primary key and foreign key, which makes the
+    relationship structurally one-to-one. Access codes only ever appear inside
+    ``encrypted_payload``; identity and verification metadata are non-secret
+    operational state used by the account UI.
+    """
+
+    __tablename__ = "pdb_credential"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("app_user.id", ondelete="CASCADE"), primary_key=True
+    )
+    encrypted_payload: Mapped[str] = mapped_column(Text)
+    pdb_identity: Mapped[str] = mapped_column(String(200), unique=True)
+    pdb_display_name: Mapped[str | None] = mapped_column(String(200), default=None)
+    institutions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(16), default="verified")
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="pdb_credential")
+
+
+class OutboxPdbPrincipal(Base):
+    """Immutable account identity selected when an outbox write is approved.
+
+    The creator remains recorded on ``OutboxAction.user_id``. This separate
+    one-to-one row binds submission and every retry to the approving account's
+    personal PDB identity, without copying either access code into the queue.
+    """
+
+    __tablename__ = "outbox_pdb_principal"
+
+    outbox_action_id: Mapped[int] = mapped_column(
+        ForeignKey("outbox_action.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_user.id"), index=True)
+    pdb_identity: Mapped[str] = mapped_column(String(200))
+    bound_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    outbox_action: Mapped[OutboxAction] = relationship(back_populates="pdb_principal")
+    user: Mapped[User] = relationship()
 
 
 class Tool(Base):
@@ -291,3 +394,40 @@ class StageEvent(Base):
     stage: Mapped[str] = mapped_column(String(48), index=True)
     entered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     rework: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class SyncJob(Base):
+    """Persistent status for a long-running read-only mirror sync.
+
+    ``active_key`` is populated only while a job is queued/running. Its unique
+    constraint is the cross-request, cross-thread single-flight guard: component
+    sync scopes can overlap, so only one component sync may mutate the mirror at
+    a time. Terminal jobs clear the key and remain available as history.
+    """
+
+    __tablename__ = "sync_job"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    institute_code: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    phase: Mapped[str] = mapped_column(String(24))
+    current: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int | None] = mapped_column(Integer, default=None)
+    percent: Mapped[float | None] = mapped_column(Float, default=None)
+    message: Mapped[str] = mapped_column(String(240), default="")
+    result: Mapped[dict | None] = mapped_column(JSON, default=None)
+    error: Mapped[str | None] = mapped_column(Text, default=None)
+    requested_by: Mapped[str] = mapped_column(String(120))
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("app_user.id"), default=None, index=True
+    )
+    # NULL for terminal rows. SQLite and PostgreSQL both allow multiple NULLs
+    # in a UNIQUE column, while rejecting a second live ``components`` lease.
+    active_key: Mapped[str | None] = mapped_column(String(32), unique=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)

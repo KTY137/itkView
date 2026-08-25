@@ -55,6 +55,42 @@ export type ComponentSyncResult = {
   total: number;
 };
 
+export type SyncJobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "interrupted";
+
+export type ComponentSyncPhase =
+  | "queued"
+  | "fetching"
+  | "mapping"
+  | "upserting"
+  | "stage_events"
+  | "tools"
+  | "committing"
+  | "complete";
+
+/** Persisted progress for the read-only PDB -> local component-mirror job. */
+export type ComponentSyncJob = {
+  id: number;
+  kind: "components";
+  institute_code: string;
+  status: SyncJobStatus;
+  phase: ComponentSyncPhase;
+  current: number;
+  total: number | null;
+  percent: number | null;
+  message: string;
+  result: ComponentSyncResult | null;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  updated_at: string;
+  finished_at: string | null;
+};
+
 // ---- Institute shapes -------------------------------------------------------
 
 export type Institute = {
@@ -333,6 +369,31 @@ export type UserUpdateBody = {
   password?: string;
 };
 
+// ---- Personal PDB connection -----------------------------------------------
+
+export type PdbConnectionState =
+  | "not_configured"
+  | "verified"
+  | "invalid"
+  | "unreachable";
+
+/** Non-secret status for the signed-in user's personal PDB access codes. */
+export type PdbConnectionOut = {
+  configured: boolean;
+  state: PdbConnectionState;
+  instance: string;
+  identity: string | null;
+  institutions: string[];
+  last_checked_at: string | null;
+  verified_at: string | null;
+};
+
+/** Write-only credential pair. The backend never echoes either value. */
+export type PdbCredentialsPut = {
+  access_code1: string;
+  access_code2: string;
+};
+
 // ---- Error handling ----------------------------------------------------------
 
 export class ApiError extends Error {
@@ -498,6 +559,83 @@ export function componentImageUrl(sn: string, id: string): string {
   return `/api/components/${encodeURIComponent(sn)}/images/${encodeURIComponent(id)}`;
 }
 
+export type TestRunAttachment = {
+  code: string;
+  test_type: string;
+  test_run_ref: string | null;
+  filename: string | null;
+  content_type: string | null;
+  title: string | null;
+  size_bytes: number | null;
+  /** False when the PDB knows the file but it has not been mirrored yet. */
+  stored: boolean;
+  is_image: boolean;
+};
+
+export type TestRunDetail = {
+  test_type: string;
+  passed: boolean;
+  external_ref: string | null;
+  measured_at: string | null;
+  run_number: string | null;
+  /** Measured values keyed by PDB code; arrays for curves (IV), scalars otherwise. */
+  results: Record<string, unknown>;
+  /** Descriptions per code — this is where the unit lives. */
+  result_meta: Record<string, { name?: string; data_type?: string; value_type?: string }>;
+  properties: Record<string, unknown>;
+  attachments: TestRunAttachment[];
+};
+
+/** Serial number -> attachment code, for one locally stored image per component.
+ *
+ * One request for a whole list: a per-row lookup would open a connection per
+ * module only to learn that most have no picture. */
+export function getComponentThumbnails(
+  instituteCode?: string,
+  signal?: AbortSignal,
+): Promise<Record<string, string>> {
+  const query = instituteCode
+    ? `?institute_code=${encodeURIComponent(instituteCode)}`
+    : "";
+  return request<Record<string, string>>(`/api/components/thumbnails${query}`, { signal });
+}
+
+/** Mirrored test runs with their measured values. Local only — never hits the PDB. */
+export function getComponentTests(sn: string, signal?: AbortSignal): Promise<TestRunDetail[]> {
+  return request<TestRunDetail[]>(`/api/components/${encodeURIComponent(sn)}/tests`, { signal });
+}
+
+export function getComponentAttachments(
+  sn: string,
+  signal?: AbortSignal,
+): Promise<TestRunAttachment[]> {
+  return request<TestRunAttachment[]>(
+    `/api/components/${encodeURIComponent(sn)}/attachments`,
+    { signal },
+  );
+}
+
+export type AttachmentSyncResult = {
+  component_sn: string;
+  downloaded: number;
+  reused: number;
+  failed: number;
+  total: number;
+};
+
+/** Mirror this component's attachment bytes into the local attachment folder. */
+export function postComponentAttachmentSync(sn: string): Promise<AttachmentSyncResult> {
+  return request<AttachmentSyncResult>(
+    `/api/components/${encodeURIComponent(sn)}/attachments/sync`,
+    { method: "POST" },
+  );
+}
+
+/** URL of one locally mirrored attachment. 404 until it has been synced. */
+export function componentAttachmentUrl(sn: string, code: string): string {
+  return `/api/components/${encodeURIComponent(sn)}/attachments/${encodeURIComponent(code)}`;
+}
+
 /** Open (not yet confirmed/cancelled) outbox actions targeting this component. */
 export function getComponentStaged(sn: string, signal?: AbortSignal): Promise<OutboxAction[]> {
   return request<OutboxAction[]>(`/api/components/${encodeURIComponent(sn)}/staged`, { signal });
@@ -581,6 +719,28 @@ export function postComponentSync(instituteCode: string): Promise<ComponentSyncR
     `/api/sync/components/${encodeURIComponent(instituteCode)}`,
     { method: "POST" },
   );
+}
+
+/** Start (or join) the single-flight background component sync. */
+export function startComponentSyncJob(instituteCode: string): Promise<ComponentSyncJob> {
+  return request<ComponentSyncJob>(
+    `/api/sync/jobs/components/${encodeURIComponent(instituteCode)}`,
+    { method: "POST" },
+  );
+}
+
+/** Poll one persisted sync job. */
+export function getSyncJob(id: number, signal?: AbortSignal): Promise<ComponentSyncJob> {
+  return request<ComponentSyncJob>(`/api/sync/jobs/${id}`, { signal });
+}
+
+/** Recover a component sync after navigation/reload. No active job is a 204. */
+export async function getActiveComponentSyncJob(
+  signal?: AbortSignal,
+): Promise<ComponentSyncJob | null> {
+  const response = await rawFetch("/api/sync/jobs/active?kind=components", { signal });
+  if (response.status === 204) return null;
+  return (await response.json()) as ComponentSyncJob;
 }
 
 export function getInstitutes(signal?: AbortSignal): Promise<Institute[]> {
@@ -713,4 +873,32 @@ export function getMe(signal?: AbortSignal): Promise<MeOut> {
 /** End the current session (204). */
 export function postLogout(): Promise<void> {
   return requestVoid("/api/auth/logout", { method: "POST" });
+}
+
+// ---- Personal PDB connection endpoints ------------------------------------
+
+/** Read only non-secret connection metadata for the signed-in user. */
+export function getPdbConnection(signal?: AbortSignal): Promise<PdbConnectionOut> {
+  return request<PdbConnectionOut>("/api/account/pdb-connection", { signal });
+}
+
+/** Replace the signed-in user's PDB access codes and verify the new pair. */
+export function putPdbConnection(body: PdbCredentialsPut): Promise<PdbConnectionOut> {
+  return request<PdbConnectionOut>("/api/account/pdb-connection", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Re-test the saved pair without returning it to the browser. */
+export function testPdbConnection(): Promise<PdbConnectionOut> {
+  return request<PdbConnectionOut>("/api/account/pdb-connection/test", {
+    method: "POST",
+  });
+}
+
+/** Remove only the signed-in user's saved PDB connection (204). */
+export function deletePdbConnection(): Promise<void> {
+  return requestVoid("/api/account/pdb-connection", { method: "DELETE" });
 }

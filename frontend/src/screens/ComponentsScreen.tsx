@@ -1,16 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { NavIntent, ScreenId } from "../App";
 import {
   ApiError,
+  componentAttachmentUrl,
   componentImageUrl,
   getComponent,
   getComponentImages,
   getComponents,
   getComponentStaged,
+  getComponentThumbnails,
   getInstitutes,
   getStageSuggestion,
-  postComponentSync,
   postComponentSyncEvidence,
   postInstitute,
   postInstituteEvidenceSync,
@@ -25,9 +26,12 @@ import type {
   RequirementCheck,
   StageSuggestion,
 } from "../api";
+import { TestResultsSection } from "../TestResults";
 import { useAuth } from "../auth";
+import type { ComponentSyncController } from "../componentSync";
 import { filterDemoComponents, getDemoComponent } from "../demoData";
 import { formatTimestamp, t } from "../i18n";
+import { SyncProgressPanel } from "../SyncProgress";
 import { describeComponent, roleLabel, stageChipClass, stageLabel } from "../ui";
 import RegisterModuleForm from "./RegisterModuleForm";
 
@@ -85,9 +89,11 @@ function pickScanTarget(rows: ComponentOut[], needle: string): ComponentOut | un
 export default function ComponentsScreen({
   nav,
   onNavigate,
+  componentSync,
 }: {
   nav?: NavIntent;
   onNavigate?: (screen: ScreenId) => void;
+  componentSync: ComponentSyncController;
 }) {
   const { canWrite, isAdmin } = useAuth();
   const [q, setQ] = useState("");
@@ -112,10 +118,36 @@ export default function ComponentsScreen({
   const [newInstituteName, setNewInstituteName] = useState("");
   const [newInstitutePrefix, setNewInstitutePrefix] = useState("");
   const [creatingInstitute, setCreatingInstitute] = useState(false);
-  const [syncing, setSyncing] = useState(false);
+  const [evidenceSyncing, setEvidenceSyncing] = useState(false);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  // Serial number -> attachment code for one locally stored image, fetched
+  // once for the whole list rather than per row.
+  const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
+  // If this screen mounts after a job already finished, its initial list fetch
+  // already sees the committed snapshot and needs no second request.
+  const reloadedSyncJob = useRef<number | null>(
+    componentSync.job?.status === "succeeded" ? componentSync.job.id : null,
+  );
 
   const debouncedQ = useDebounced(q, 250);
+
+  // Refresh the heavy component list once, only after the background job has
+  // committed. Progress polling itself only reads the tiny job-status record.
+  // Thumbnails are a nicety: a failure here must leave the list untouched.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    getComponentThumbnails(selectedInstitute || undefined, ctrl.signal)
+      .then(setThumbnails)
+      .catch(() => setThumbnails({}));
+    return () => ctrl.abort();
+  }, [selectedInstitute, reloadKey]);
+
+  useEffect(() => {
+    const job = componentSync.job;
+    if (job?.status !== "succeeded" || reloadedSyncJob.current === job.id) return;
+    reloadedSyncJob.current = job.id;
+    setReloadKey((key) => key + 1);
+  }, [componentSync.job]);
 
   // React to a cross-screen navigation intent (board card click, topbar scan).
   const navToken = nav?.token ?? 0;
@@ -274,25 +306,8 @@ export default function ComponentsScreen({
       setSyncNotice(t.components.syncNeedsInstitute);
       return;
     }
-    setSyncing(true);
     setSyncNotice(null);
-    try {
-      const result = await postComponentSync(selectedInstitute);
-      setSyncNotice(
-        t.components.syncComplete(
-          result.created,
-          result.updated,
-          result.unchanged,
-          result.stale,
-          result.skipped,
-        ),
-      );
-      setReloadKey((key) => key + 1);
-    } catch (err) {
-      setSyncNotice(`${t.components.syncFailed}: ${errorMessage(err)}`);
-    } finally {
-      setSyncing(false);
-    }
+    await componentSync.start(selectedInstitute);
   }
 
   async function handleSyncInstituteEvidence() {
@@ -300,7 +315,7 @@ export default function ComponentsScreen({
       setSyncNotice(t.components.syncNeedsInstitute);
       return;
     }
-    setSyncing(true);
+    setEvidenceSyncing(true);
     setSyncNotice(null);
     try {
       const result = await postInstituteEvidenceSync(selectedInstitute);
@@ -310,7 +325,7 @@ export default function ComponentsScreen({
     } catch (err) {
       setSyncNotice(`${t.components.syncFailed}: ${errorMessage(err)}`);
     } finally {
-      setSyncing(false);
+      setEvidenceSyncing(false);
     }
   }
 
@@ -372,18 +387,34 @@ export default function ComponentsScreen({
                 <button
                   type="button"
                   className="btn"
-                  disabled={syncing || selectedInstitute === ""}
+                  disabled={
+                    componentSync.active ||
+                    componentSync.discovering ||
+                    evidenceSyncing ||
+                    selectedInstitute === ""
+                  }
                   onClick={() => void handleSyncSelectedInstitute()}
                 >
-                  {syncing ? t.common.loading : t.components.syncSelected}
+                  {componentSync.discovering
+                    ? t.components.checkingSync
+                    : componentSync.active
+                      ? t.components.syncingComponents
+                      : t.components.syncSelected}
                 </button>
                 <button
                   type="button"
                   className="btn"
-                  disabled={syncing || selectedInstitute === ""}
+                  disabled={
+                    componentSync.active ||
+                    componentSync.discovering ||
+                    evidenceSyncing ||
+                    selectedInstitute === ""
+                  }
                   onClick={() => void handleSyncInstituteEvidence()}
                 >
-                  {t.components.syncEvidenceInstitute}
+                  {evidenceSyncing
+                    ? t.components.syncingEvidenceInstitute
+                    : t.components.syncEvidenceInstitute}
                 </button>
               </>
             )}
@@ -418,6 +449,7 @@ export default function ComponentsScreen({
               </button>
             </div>
           )}
+          <SyncProgressPanel controller={componentSync} canRetry={canWrite} />
           {isAdmin && showCreateInstitute && (
             <form className="toolbar create-institute-form" onSubmit={handleCreateInstitute}>
               <input
@@ -536,6 +568,9 @@ export default function ComponentsScreen({
           <table className="data-table">
             <thead>
               <tr>
+                <th scope="col" className="col-thumb">
+                  <span className="sr-only">{t.images.title}</span>
+                </th>
                 <th scope="col">{t.components.colLocalName}</th>
                 <th scope="col">{t.components.colSerial}</th>
                 <th scope="col">{t.components.colType}</th>
@@ -552,6 +587,16 @@ export default function ComponentsScreen({
                   }
                   onClick={() => openFromList(c.sn)}
                 >
+                  <td className="col-thumb">
+                    {thumbnails[c.sn] !== undefined && (
+                      <img
+                        className="row-thumb"
+                        src={componentAttachmentUrl(c.sn, thumbnails[c.sn])}
+                        alt=""
+                        loading="lazy"
+                      />
+                    )}
+                  </td>
                   <td>
                     <div className="tree-row">
                       <button
@@ -834,6 +879,7 @@ function ComponentDetailPanel({
               </div>
             </>
           )}
+          <TestResultsSection sn={detail.sn} canWrite={canWrite} />
           <ImagesSection sn={detail.sn} />
         </div>
       </div>

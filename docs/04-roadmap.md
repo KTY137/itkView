@@ -16,10 +16,42 @@ UI-Arbeit folgt zusaetzlich der verbindlichen Design-Referenz
 `docs/05-ui-design-reference.md` (+ Mockup `docs/itkflow-ui-mockup.html`), damit
 die Umsetzung nicht vom Design-Ziel abdriftet.
 
-## Aktueller Stand (2026-07-08)
+## Aktueller Stand (2026-08-25)
 
 - Monorepo steht mit `backend/`, `frontend/`, `agent/`, `deploy/`, CI- und
   Docker-Grundstruktur.
+- **Desktop-Paketierung (2026-08-25):** `desktop/` enthaelt eine Tauri-Shell,
+  die den als PyInstaller-Onefile gepackten Backend-Sidecar startet, auf
+  `/health` wartet und den Webview darauf zeigt. Das Backend kann die gebaute
+  SPA selbst ausliefern (`app/static_spa.py`, Setting `static_dir`), damit UI
+  und API auf einer Origin liegen und Session-Cookie/CSRF unveraendert
+  funktionieren. Zustand (DB, Credential-Key, Logs) liegt im
+  Anwendungsdatenverzeichnis, dasselbe wie beim Windows-Launcher. Die
+  PDB-Defaults bleiben unangetastet (test / kein Produktions-Opt-in /
+  `dummy_only`). Details: `docs/adr/005-desktop-packaging.md`.
+- **PDB-Request-Timeout griff nie (2026-08-25, Bugfix):** `requests` waehlt den
+  Adapter mit dem *laengsten* Prefix, und itkdb mountet einen eigenen fuer die
+  PDB-Basis-URL. Der generische `https://`-Adapter war damit fuer jeden echten
+  API-Call verschattet — Reads liefen unbegrenzt. Ein haengender Request hat
+  reproduzierbar den Evidence-Sync bei 60/263 Komponenten eingefroren.
+  `app/pdb_gateway.py` bindet den Timeout jetzt an *jeden* gemounteten Adapter
+  (Instanz-Wrapping, damit itkdbs Cache erhalten bleibt). Danach lief derselbe
+  Sync in 97 s durch: 713 Testlaeufe ueber 222 Module.
+- **Testlauf-Detail statt nur pass/fail (2026-08-25):** `fetch_test_run_evidence`
+  kennt jetzt `with_detail` und spiegelt Messwerte, Properties und
+  Attachment-Metadaten (`getTestRun` pro Lauf). Der Institutssweep bleibt
+  flach/billig, die Einzelkomponente holt Detail. Damit stehen Klebegewichte,
+  Metrologie und IV-Kurven lokal zur Verfuegung; neue Endpunkte
+  `GET /api/components/{sn}/tests` und `GET /api/components/thumbnails`.
+- **Attachments lokal (2026-08-25):** `app/attachment_store.py` spiegelt
+  Bilder/Plots in einen Ordner (`attachment_dir`), ein Verzeichnis je
+  Seriennummer. PDB-Dateinamen wandern nie in einen Pfad; gespeichert wird
+  unter dem Attachment-Code plus Extension aus einer Allowlist. Die UI zeigt
+  Messwerte, IV-Kurven und Thumbnails (Detailseite und Komponentenliste).
+- **`sync-evidence` antwortet 503 statt „0 gespiegelt" (2026-08-25):** eine
+  nicht erreichbare PDB sah bisher aus wie „diese Komponente hat keine Tests" —
+  genau die Verwechslung, die eine ganze Instituts-Ansicht wie lauter fehlende
+  Pflichttests aussehen laesst.
 - Harte Sicherheitsregeln sind dokumentiert: keine produktive PDB in Dev/Tests,
   `references/zeuthenflow` nur lesen, keine Secrets, kein Institut-Hardcoding.
 - Backend-Basis: FastAPI-App, SQLAlchemy-Modelle fuer Institute, Komponenten,
@@ -70,8 +102,8 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   `worker`-Service in Compose) beansprucht `approved`/`submitted`-Aktionen,
   wiederholt den Dry-Run gegen den aktuellen Mirror, ruft einen injizierten
   Submitter und setzt `confirmed` (mit `external_ref`) oder `failed`. Realer
-  Submitter schreibt `uploadTestRunResults`/`setComponentStage`, ist ohne
-  Access-Codes inaktiv und lehnt jedes Ziel ab, das keine eigene
+  Submitter schreibt `uploadTestRunResults`/`setComponentStage`, verlangt die
+  beim Approve gebundene persoenliche Credential und lehnt jedes Ziel ab, das keine eigene
   DUMMY-Testkomponente ist (`pdb_write_scope=dummy_only`, ADR 003).
   Idempotenz ueber `external_ref`; transiente `PdbSubmitUnavailable`-Fehler
   werden nach exponentiellem Backoff automatisch bis `worker_max_attempts`
@@ -82,6 +114,20 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   (`stale`) fuer verschwundene Komponenten. Erstes DUMMY-Modul registriert
   (`20USEM00000435`). `is_dummy` leitet sich aus DUMMY-**Batch**-Mitgliedschaft
   ab (nicht dem `dummy`-Flag).
+- **Navigationstoleranter Komponenten-Sync (2026-08-24):** Der lange
+  Produktions-Read laeuft jetzt als persistenter, globaler Single-Flight-Job
+  mit Poll-API und atomarem Mirror-Commit. Topbar und Components-Screen zeigen
+  Phase, echten Zaehler, Fortschrittsbalken, Laufzeit und letztes Update; ein
+  Screen-Wechsel oder Reload verliert den laufenden Job nicht. Der PDB-Fetch
+  filtert serverseitig auf `state=ready`, liest feste 50er-Seiten seriell mit
+  Timeout/Retry (einschliesslich Auth/JWKS) und verweigert metadatafreie
+  Nutzdaten sowie Total-/Page-Drift. Jeder Retry aktualisiert den persistenten
+  Job-Heartbeat, damit das UI trotz wartendem PDB-Read ein aktuelles
+  Lebenszeichen zeigt. Alter synchroner und neuer Background-Endpunkt teilen
+  denselben DB-Lease; parallele Mirror-Prunes sind damit ausgeschlossen. Lokale
+  Komponenten werden blockweise vorgeladen, Stage-Events gebuendelt geschrieben.
+  Ein Server-Neustart markiert den Job als `interrupted`; Teilstaende werden
+  nie committed.
 - **Statistik/Verlauf (Phase-1-Dashboard-Ausbau):** `StageEvent`-Historie wird
   beim Sync aus dem PDB-`stages[]`-Log rekonstruiert; `app/stats.py` +
   `/api/stats/production` liefern Throughput, Lead-Time, Stage-Dwell und Rework;
@@ -106,6 +152,16 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   Rollen-Gating, Demo-Fallback) plus **Admin-`Users`-Screen** (Konten anlegen,
   Rolle/aktiv setzen, Passwort-Reset). Verifiziert: 211 Backend-Tests +
   Frontend-`tsc` gruen. Offen: Demo-User-Seed, 4-Augen-Approve, OIDC. Details docs/06.
+- **Persoenliche Plus4U/PDB-Verbindung (Phase 6 vorgezogen, 2026-08-24):**
+  Jedes lokale Konto verwaltet im neuen Account-Screen sein eigenes
+  Access-Code-Paar. Das Backend verifiziert vor dem Speichern, erzwingt
+  eindeutige PDB-Identitaeten und gleiche Institutsmitgliedschaft und legt nur
+  AES-256-GCM-Ciphertext mit usergebundener AAD ab. Web-Reads haben keinen
+  globalen Fallback; Background-Syncs laden ueber `SyncJob.user_id`. Beim
+  Approve bindet `OutboxPdbPrincipal` Worker und Retries an die PDB-Identity
+  des Freigebenden. API/Browser/Audit/Jobs/Logs bleiben secret-frei; der
+  Windows-Launcher verwaltet einen stabilen Master-Key ausserhalb des Repos.
+  Details: docs/06, docs/09, ADR 004.
 - **Doku-Disziplin & -Waechter (2026-07-10):** CLAUDE.md-Regel #6 macht
   Doku-Updates verbindlich; `docs/00-doc-map.md` haelt die Ownership fest. Zwei
   Haiku-Subagenten pflegen die Doku — `yatagarasu` (Drift-Audit, read-only) und
@@ -146,6 +202,15 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   `port:5173`, `strictPort:true` (faellt laut aus statt zu driften) und proxyt
   auf explizit `http://127.0.0.1:8000` (nie `localhost` — Windows/modernes Node
   loest zuerst `::1` auf und verfehlt das IPv4-only-Backend).
+- **Windows-Dev-Neustart (2026-08-24):** Das Root-Skript
+  `start-itkflow.ps1` raeumt erkannte laufende itkFlow-Listener auf den fest
+  konfigurierten Dev-Ports `8000`/`5173` auf und startet FastAPI und Vite
+  reproduzierbar auf `127.0.0.1` neu. Unbekannte Portbesitzer werden ohne
+  explizites `-ForcePortCleanup` nicht beendet; das Skript setzt Anwendungsdaten
+  und Konten nicht zurueck. Der Default bleibt PDB-inert; der explizite Schalter
+  `-EnableProductionReads` aktiviert den produktiven Read-Pfad fuer Component-
+  Syncs, ohne den Outbox-Worker zu starten (`dummy_only`, Write-Test-Opt-in aus).
+  Browserzugriff: `http://127.0.0.1:5173`.
 - **UI: Label-Humanisierung & Workflow-Klarheit (2026-07-10):** `stageLabel()`
   (`ui.ts`) humanisiert `SNAKE_CASE`-Stages (`HV_TAB_ATTACHED` → „HV Tab
   Attached"), institutsneutral, ITk-Akronyme (HV/QC/PWB…) bleiben gross;
@@ -176,8 +241,8 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 3. **Outbox-Worker haerten** (`backend-dev`, `pdb-gateway-dev`, `qa-engineer`):
    Async-Worker steht (2026-07-08, ADR 002); automatischer Retry mit Backoff
    fuer transiente Fehler und `worker_max_attempts` sind durchgesetzt. Offen:
-   die reale Idempotenz-Pruefung gegen die Testinstanz, bevor der
-   `submitted`-Recovery-Pfad mit echten Tokens scharf geschaltet wird.
+   die reale Idempotenz-Pruefung gegen die Produktions-PDB im strikt
+   DUMMY-gescopeten E2E, bevor der `submitted`-Recovery-Pfad scharf geschaltet wird.
 4. **Upload-Converter und Worker-Schnitt** (`ingestion-dev`, `architect`,
    `backend-dev`): Registry, Preview und Dry-Run-Gate stehen inkl. Glue-Weight-,
    IV-, Pulltest- und generischem Parser (2026-07-08). Der Uebergang
@@ -193,22 +258,26 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
    `dummy`-Flag, Prune/`stale`). **Erstes echtes Dummy-Modul registriert**
    (`20USEM00000435`, `DUMMY_TUDO`). Offen: der volle `pytest -m pdb_write`
    (Upload + Stage-Move-Kreis auf der Dummy-SN) noch scharf durchziehen.
+   Erledigt (2026-08-24): sichtbarer Background-Sync, navigationstolerantes
+   Polling, explizites serielles Paging mit Timeout/Retry (auch fuer die vom
+   Client intern ausgefuehrte Authentifizierung), Retry-Heartbeat, gemeinsamer
+   Single-Flight-Lease fuer beide API-Pfade sowie Bulk-Mirror-Optimierung.
+   Reale Messung: Die erste `full`-100er-Seite brauchte ohne State-Filter ca.
+   14,0 s, mit `state=ready` ca. 3,6 s. Am problematischen Offset 300 lief
+   `pageSize=100` (`pageIndex=3`) in einen Read-Timeout von mehr als 60 s;
+   dieselben Datenbereiche kamen mit den festen 50er-Seiten (`pageIndex=6/7`)
+   in 4,49 s beziehungsweise 2,24 s. Deshalb ist 50 die feste Seitengroesse;
+   erschoepfte Retries markieren den Job als fehlgeschlagen, ohne den
+   bestehenden Mirror zu veraendern.
 
-## Geplant (Design steht, Umsetzung nach Freigabe)
+## Geplant / verbleibende Ausbaustufen
 
-Drei Erweiterungen mit fertigem Design. Beim Auth-Punkt ist das Backend-
-Fundament bereits gebaut (siehe „Aktueller Stand"); der Rest wartet auf
-Freigabe. Details im jeweiligen Dokument:
+Details im jeweiligen Dokument:
 
 - **Nutzer, Rollen & Audit-Zuordnung** — `docs/06-users-roles-audit.md`.
-  **Backend-Fundament gebaut+getestet (Teilstand 2026-07-10):** lokale Konten
-  `admin/operator/viewer`, Login/Session, admin-gescopte `/api/users`, Rollen-
-  Dependencies, `create_admin`-CLI. **Offen:** serverseitige `user_id`-
-  Attribution statt Client-Actor-Strings, Rollen-Enforcement auf
-  Sync/Outbox/Ingest, Frontend-Login, CSRF/`Secure`-Cookie. Lokale Accounts
-  fuer v1, OIDC/CERN-SSO als spaeterer Adapter (`external_subject` ist
-  vorgesehen). **Fundament fuer echte Nachvollziehbarkeit — sollte vor
-  Remote-Zugriff stehen.**
+  Lokale Accounts, Rollen, Attribution, Frontend, CSRF und persoenliche
+  PDB-Verbindungen sind umgesetzt. Offen bleiben optionales OIDC/CERN-SSO,
+  Demo-User-Policy und konfigurierbares 4-Augen-Prinzip.
 - **Jig-/Tool-Registry + typ-gefilterter Quick-Select** —
   `docs/07-jig-tool-quickselect.md`. Basis-Registry, Tools-Screen und
   PDB-`TOOLS`-Mirror-Import stehen (2026-07-08). Offen: Glue-Batches und die
@@ -227,7 +296,7 @@ weiteren Features ohne PDB-Produktionsrisiko entstehen.
 **Epics:**
 
 - Dev- und CI-Kommandos dokumentieren und gruene Offline-Tests erhalten.
-- PDB-Testinstanz als einzigen vorkonfigurierten Remote-Zielpunkt absichern.
+- PDB-inerten Default sowie produktive Reads hinter doppeltem Opt-in absichern.
 - Institute-Profil, Component-Mirror, Outbox und Audit als Kernmodell
   konsolidieren.
 - Agentenvertrag und Roadmap-Pflege verbindlich in Repo-Dokumente schreiben.
@@ -242,8 +311,8 @@ weiteren Features ohne PDB-Produktionsrisiko entstehen.
 **Owner-Agenten:** `architect`, `backend-dev`, `pdb-gateway-dev`,
 `qa-engineer`, `docs-writer`.
 
-**Abhaengigkeiten:** Zugriff auf PDB-Testinstanz nur fuer markierte
-Integrationschecks; anonymisierte Referenz bleibt read-only.
+**Abhaengigkeiten:** Produktive PDB-Reads nur mit doppeltem Opt-in und fuer
+markierte Integrationschecks; anonymisierte Referenz bleibt read-only.
 
 ### Phase 1 - Read-only-Cockpit
 
@@ -252,7 +321,7 @@ Komponenten suchen, Status verstehen, Familien sehen, Dashboards lesen.
 
 **Epics:**
 
-- Komponenten-/Test-/Shipment-Sync aus der PDB-Testinstanz in lokale
+- Komponenten-/Test-/Shipment-Sync aus der produktiven PDB hinter Read-Opt-in in lokale
   Mirror-Tabellen.
 - Komponentenbrowser mit Scanner-first-Suche, Filtern, Detailseite und
   Familienbaum.
@@ -395,7 +464,10 @@ v1.0 ist installierbar, dokumentiert und betreibbar.
 **Epics:**
 
 - Onboarding-Assistent "neues Institut in 30 Minuten".
-- Mandantentrennung, Rollen, Token-Ablage und Audit fuer mehrere Institute.
+- Mandantentrennung, Rollen, Credential-Ablage und Audit fuer mehrere
+  Institute. Persoenliche verschluesselte PDB-Credentials und gebundene
+  Worker-Identitaet sind seit 2026-08-24 umgesetzt (ADR 004); vollstaendiges
+  Row-/Query-Scoping aller lokalen Read-Modelle bleibt offen.
 - Beispielprofile fuer Endcap/Barrel und konfigurierbare Workflows.
 - i18n-Grundlage fuer EN/DE, mit Englisch als Produkt-Default.
 - Release-/Upgrade-Doku, Backup/Restore, Monitoring und Pilot-Checkliste.
@@ -405,6 +477,8 @@ v1.0 ist installierbar, dokumentiert und betreibbar.
 - Neues Institut braucht keine Codeaenderung fuer Namensschema, Workflows,
   Stage-/Test-Mappings oder Notifications.
 - Deployment funktioniert per dokumentiertem `docker compose up`.
+- Kein Web-/Worker-PDB-Pfad faellt auf globale oder fremde Credentials zurueck;
+  Backup/Restore umfasst DB und getrennten Master-Key.
 - v1.0-Pilot hat dokumentierte Akzeptanzkriterien, bekannte Risiken und
   Rollback-Pfad.
 
