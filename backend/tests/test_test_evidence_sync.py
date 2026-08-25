@@ -55,7 +55,7 @@ def test_fetch_empty_when_not_configured():
 
 
 def test_sync_evidence_endpoint_populates_and_feeds_stage_engine(
-    client: TestClient, session_factory
+    client: TestClient, session_factory, as_operator
 ):
     client.app.state.pdb_gateway = _FakeGateway(component=COMPONENT)
     resp = client.post("/api/components/20USEM00000001/sync-evidence").json()
@@ -72,9 +72,18 @@ def test_sync_evidence_endpoint_populates_and_feeds_stage_engine(
     assert again["created"] == 0 and again["unchanged"] == 3
 
 
-def test_sync_evidence_endpoint_noop_without_pdb(client: TestClient):
-    body = client.post("/api/components/20USEM00000001/sync-evidence").json()
-    assert body["created"] == 0 and body["total"] == 0
+def test_sync_evidence_endpoint_reports_a_missing_connection(client: TestClient, as_operator):
+    """Without a PDB connection this must say so, not report a successful zero.
+
+    "created: 0" is indistinguishable from "this module genuinely has no test
+    runs", which is how a whole institute ends up looking like every required
+    test is missing.
+    """
+    client.app.state.pdb_gateway = _FakeGateway(configured=False, component=COMPONENT)
+    response = client.post("/api/components/20USEM00000001/sync-evidence")
+
+    assert response.status_code == 503
+    assert "PDB" in response.json()["detail"]
 
 
 class _MultiClient:
@@ -102,7 +111,9 @@ def _module(sn: str) -> Component:
     )
 
 
-def test_institute_evidence_sync_covers_only_live_modules(client: TestClient, session_factory):
+def test_institute_evidence_sync_covers_only_live_modules(
+    client: TestClient, session_factory, as_operator
+):
     with session_factory() as session:
         session.add(_module("20USEM00000001"))
         session.add(_module("20USEM00000002"))

@@ -190,6 +190,28 @@ button {
   color: var(--ink2);
   font-size: 12.5px;
 }
+.me-account {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: -4px;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  text-align: left;
+}
+.me-account:hover {
+  color: var(--ink);
+  background: var(--surface2);
+  border-color: var(--line);
+}
+.me-account[aria-current="page"] {
+  color: var(--accent-hi);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
 .ava {
   width: 26px;
   height: 26px;
@@ -276,6 +298,80 @@ button {
   font-size: 12px;
   color: var(--ink2);
   white-space: nowrap;
+}
+.sync-job-compact {
+  margin-left: auto;
+  min-width: 190px;
+  max-width: 270px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 3px 8px;
+  color: var(--ink2);
+  background: var(--surface2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 9px 6px;
+  text-align: left;
+}
+.sync-job-compact:hover {
+  border-color: var(--accent);
+}
+.sync-job-compact + .sync {
+  margin-left: 0;
+}
+.sync-job-compact-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+.sync-job-compact-phase {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 11.5px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sync-job-compact-meta {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sync-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  flex: 0 0 auto;
+}
+[data-tone="success"] .sync-status-dot {
+  background: var(--good);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 15%, transparent);
+}
+[data-tone="error"] .sync-status-dot {
+  background: var(--crit);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--crit) 15%, transparent);
+}
+.sync-meter {
+  width: 100%;
+  height: 7px;
+  display: block;
+  accent-color: var(--accent);
+}
+.sync-meter.compact {
+  grid-column: 1 / -1;
+  height: 4px;
+}
+[data-tone="success"] .sync-meter {
+  accent-color: var(--good);
+}
+[data-tone="error"] .sync-meter {
+  accent-color: var(--crit);
 }
 .dot {
   width: 8px;
@@ -601,6 +697,97 @@ code {
   flex-wrap: wrap;
   margin-top: 10px;
 }
+
+/* Persisted component-sync telemetry: compact cockpit panel, no modal lock. */
+.sync-progress-panel {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--surface2);
+  color: var(--ink2);
+}
+.sync-progress-panel[data-tone="success"] {
+  border-left-color: var(--good);
+  background: color-mix(in srgb, var(--good) 7%, var(--surface));
+}
+.sync-progress-panel[data-tone="error"] {
+  border-left-color: var(--crit);
+  background: color-mix(in srgb, var(--crit) 7%, var(--surface));
+}
+.sync-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sync-progress-head > .btn {
+  margin-left: auto;
+}
+.sync-progress-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sync-progress-title strong,
+.sync-progress-head > strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+.sync-progress-times {
+  margin-left: auto;
+  display: flex;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.sync-progress-phase {
+  margin-top: 10px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+.sync-progress-panel > .sync-meter {
+  margin-top: 7px;
+}
+.sync-progress-meta {
+  margin-top: 3px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.sync-job-message,
+.sync-job-warning,
+.sync-job-result,
+.sync-job-error {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+.sync-job-message {
+  color: var(--muted);
+}
+.sync-job-warning {
+  color: var(--warn-text);
+}
+.sync-job-result {
+  color: var(--good-text);
+  font-weight: 600;
+}
+.sync-job-error {
+  color: var(--crit);
+  overflow-wrap: anywhere;
+}
+.sync-progress-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
 .error-text {
   color: var(--crit);
   font-size: 12px;
@@ -778,6 +965,22 @@ code {
   font: 700 13px var(--mono);
 }
 
+@media (max-width: 1180px) {
+  .sync-job-compact {
+    max-width: 210px;
+  }
+  .sync-job-compact-meta {
+    display: none;
+  }
+}
+
+@media (max-width: 980px) {
+  .crumb,
+  .sync {
+    display: none;
+  }
+}
+
 @media (max-width: 720px) {
   .frame {
     grid-template-columns: 1fr;
@@ -791,6 +994,22 @@ code {
   .rail-foot {
     flex-direction: row;
     margin: 0 0 0 auto;
+  }
+  .top {
+    gap: 8px;
+    padding: 10px 14px;
+  }
+  .scan kbd {
+    display: none;
+  }
+  .sync-job-compact {
+    min-width: 145px;
+    max-width: 180px;
+  }
+  .sync-progress-times {
+    width: 100%;
+    margin-left: 18px;
+    justify-content: space-between;
   }
 }
 
@@ -1394,6 +1613,173 @@ code {
   margin-top: 4px;
 }
 
+/* ---- Account: identity and personal PDB connection ---- */
+.account-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(420px, 2fr);
+  gap: 14px;
+  align-items: start;
+}
+.account-panel {
+  min-width: 0;
+  overflow: visible;
+  padding: 16px 18px;
+}
+.account-panel .section-title {
+  margin: 0;
+}
+.account-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+.account-panel-copy,
+.account-connection-hint,
+.account-secret-note,
+.account-disconnect-confirm p {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.account-panel-copy {
+  max-width: 62ch;
+  margin: 6px 0 0;
+}
+.account-kv {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 16px;
+  margin: 16px 0 0;
+}
+.account-kv dt,
+.account-connection-meta dt {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.account-kv dd,
+.account-connection-meta dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.connection-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.connection-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.connection-chip.green .connection-dot {
+  background: var(--good);
+}
+.connection-chip.red .connection-dot {
+  background: var(--crit);
+}
+.connection-chip.serious .connection-dot {
+  background: var(--serious);
+}
+.account-connection-hint {
+  margin: 16px 0 0;
+}
+.account-connection-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+  margin: 16px 0 0;
+}
+.account-connection-meta > div {
+  min-width: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+}
+.account-connection-meta dd {
+  margin-top: 3px;
+}
+.account-institutions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.account-credential-form {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.account-secret-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.account-secret-note {
+  margin: 10px 0 0;
+}
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+.account-disconnect-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--crit) 55%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--crit) 7%, var(--surface));
+}
+.account-disconnect-confirm strong {
+  color: var(--crit);
+  font-size: 12.5px;
+}
+.account-disconnect-confirm p {
+  margin: 3px 0 0;
+}
+.account-disconnect-confirm .account-actions {
+  flex: 0 0 auto;
+  margin-top: 0;
+}
+.account-operation-error {
+  margin-top: 14px;
+}
+
+@media (max-width: 900px) {
+  .account-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .account-panel-head,
+  .account-disconnect-confirm {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .account-secret-grid,
+  .account-connection-meta {
+    grid-template-columns: 1fr;
+  }
+  .connection-chip {
+    width: fit-content;
+  }
+  .account-actions,
+  .account-disconnect-confirm .account-actions {
+    width: 100%;
+  }
+  .account-actions .btn {
+    flex: 1 1 auto;
+  }
+}
+
 /* Signed-in user (rail bottom) */
 .me-id {
   display: flex;
@@ -1457,4 +1843,156 @@ code {
   .toast.show {
     animation: none;
   }
+}
+
+/* --- Mirrored test results (glue weight, metrology, IV) ------------------ */
+
+.run-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.run + .run {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+.run-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.run-type {
+  font: 600 12.5px var(--mono);
+  letter-spacing: 0.01em;
+}
+.run-date {
+  margin-left: auto;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* Measured values. auto-fit keeps two columns on a wide detail pane and
+   collapses to one when the pane is narrow, without a media query. */
+.measure-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 4px 16px;
+  margin: 0;
+}
+.measure {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 0;
+  border-bottom: 1px dotted var(--line);
+}
+.measure dt {
+  color: var(--ink2);
+  font-size: 12px;
+  /* Long PDB names ("Weight of glue under hybrid 1 [g]") must wrap rather
+     than push the value out of the column. */
+  min-width: 0;
+}
+.measure dd {
+  margin: 0;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.curve {
+  margin: 4px 0 10px;
+}
+.curve svg {
+  width: 100%;
+  max-width: 340px;
+  height: auto;
+  display: block;
+}
+.curve-axis {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.curve-line {
+  fill: none;
+  stroke: var(--series);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+.curve-tick {
+  fill: var(--muted);
+  font: 8px var(--mono);
+}
+.curve figcaption {
+  color: var(--muted);
+  font: 10.5px var(--mono);
+  margin-top: 2px;
+}
+
+.conditions {
+  margin-top: 8px;
+}
+.conditions summary {
+  cursor: pointer;
+  color: var(--ink2);
+  font-size: 12px;
+  padding: 2px 0;
+}
+.conditions[open] summary {
+  margin-bottom: 4px;
+}
+
+.img-grid.compact {
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  margin-top: 8px;
+}
+/* A known attachment whose bytes are not mirrored yet: shown, not hidden, so
+   the download action has something to point at. */
+.img-thumb.placeholder {
+  display: grid;
+  place-items: center;
+  cursor: default;
+  border-style: dashed;
+}
+.img-thumb.placeholder:hover {
+  border-color: var(--line);
+}
+.img-thumb.placeholder .img-tag {
+  position: static;
+  background: none;
+  color: var(--muted);
+  text-align: center;
+  white-space: normal;
+  padding: 4px;
+}
+
+/* Thumbnail column in the component list. Fixed width so the column does not
+   jump as images load, and so rows without one stay aligned. */
+.col-thumb {
+  width: 34px;
+  padding-right: 0;
+}
+.row-thumb {
+  width: 26px;
+  height: 26px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  display: block;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }

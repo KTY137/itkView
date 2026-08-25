@@ -1,0 +1,362 @@
+/**
+ * Mirrored PDB test runs with their measured values.
+ *
+ * Everything here reads the local mirror, never the PDB: opening a module must
+ * not wait on a network round trip. An empty section therefore means "nothing
+ * mirrored yet" and says so, rather than implying the tests do not exist.
+ *
+ * Values arrive keyed by PDB code (`GW_GLUE_H1`) with their description
+ * alongside (`Weight of glue under hybrid 1 [g]`). The description is what
+ * carries the unit, so it is always preferred for the label and the code is
+ * kept as the title attribute for anyone who works in PDB codes.
+ */
+
+import { useEffect, useState } from "react";
+
+import {
+  ApiError,
+  componentAttachmentUrl,
+  getComponentTests,
+  postComponentAttachmentSync,
+  type TestRunAttachment,
+  type TestRunDetail,
+} from "./api";
+import { t } from "./i18n";
+
+/** A measured value that is a numeric array — an IV sweep and friends. */
+function asNumericArray(value: unknown): number[] | null {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  const numbers = value.filter((entry): entry is number => typeof entry === "number");
+  return numbers.length === value.length ? numbers : null;
+}
+
+function formatScalar(value: unknown): string {
+  if (value === null || value === undefined) return t.testResults.valueMissing;
+  if (typeof value === "number") {
+    // Instrument values are small decimals; trim the float noise without
+    // rounding a genuine 0.1664 down to something that looks measured.
+    return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(4)));
+  }
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  return String(value);
+}
+
+function formatTimestamp(value: string | null): string {
+  if (value === null) return "—";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+}
+
+/** A minimal inline curve. No chart library: one polyline, its own axes. */
+function CurvePlot({ xs, ys, xLabel, yLabel }: {
+  xs: number[];
+  ys: number[];
+  xLabel: string;
+  yLabel: string;
+}) {
+  const width = 320;
+  const height = 150;
+  const pad = { left: 38, right: 8, top: 10, bottom: 24 };
+
+  const count = Math.min(xs.length, ys.length);
+  const xMin = Math.min(...xs.slice(0, count));
+  const xMax = Math.max(...xs.slice(0, count));
+  const yMin = Math.min(...ys.slice(0, count));
+  const yMax = Math.max(...ys.slice(0, count));
+  // A flat curve would divide by zero; give it a nominal span instead.
+  const xSpan = xMax - xMin || 1;
+  const ySpan = yMax - yMin || 1;
+
+  const points: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const x = pad.left + ((xs[index] - xMin) / xSpan) * (width - pad.left - pad.right);
+    const y = height - pad.bottom - ((ys[index] - yMin) / ySpan) * (height - pad.top - pad.bottom);
+    points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+  }
+
+  return (
+    <figure className="curve">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${yLabel} over ${xLabel}`}>
+        <line
+          className="curve-axis"
+          x1={pad.left}
+          y1={height - pad.bottom}
+          x2={width - pad.right}
+          y2={height - pad.bottom}
+        />
+        <line
+          className="curve-axis"
+          x1={pad.left}
+          y1={pad.top}
+          x2={pad.left}
+          y2={height - pad.bottom}
+        />
+        <polyline className="curve-line" points={points.join(" ")} />
+        <text className="curve-tick" x={pad.left} y={height - 8} textAnchor="start">
+          {formatScalar(xMin)}
+        </text>
+        <text className="curve-tick" x={width - pad.right} y={height - 8} textAnchor="end">
+          {formatScalar(xMax)}
+        </text>
+        <text className="curve-tick" x={pad.left - 4} y={pad.top + 8} textAnchor="end">
+          {formatScalar(yMax)}
+        </text>
+        <text className="curve-tick" x={pad.left - 4} y={height - pad.bottom} textAnchor="end">
+          {formatScalar(yMin)}
+        </text>
+      </svg>
+      <figcaption>
+        {yLabel} / {xLabel} · {t.testResults.curvePoints(count)}
+      </figcaption>
+    </figure>
+  );
+}
+
+function label(run: TestRunDetail, code: string): string {
+  return run.result_meta[code]?.name ?? code;
+}
+
+/** Curves first: an IV sweep is the point of the run, the scalars are context. */
+function RunCurves({ run }: { run: TestRunDetail }) {
+  const arrays = Object.entries(run.results)
+    .map(([code, value]) => [code, asNumericArray(value)] as const)
+    .filter((entry): entry is readonly [string, number[]] => entry[1] !== null);
+
+  if (arrays.length === 0) return null;
+
+  const byCode = new Map(arrays);
+  const voltage = byCode.get("VOLTAGE");
+  const current = byCode.get("CURRENT");
+
+  if (voltage && current) {
+    return (
+      <CurvePlot
+        xs={voltage}
+        ys={current}
+        xLabel={label(run, "VOLTAGE")}
+        yLabel={label(run, "CURRENT")}
+      />
+    );
+  }
+
+  // No known pairing: plot each series against its sample index, which still
+  // shows the shape and beats hiding the data behind a raw array dump.
+  return (
+    <>
+      {arrays.map(([code, series]) => (
+        <CurvePlot
+          key={code}
+          xs={series.map((_, index) => index)}
+          ys={series}
+          xLabel="#"
+          yLabel={label(run, code)}
+        />
+      ))}
+    </>
+  );
+}
+
+function RunScalars({ run }: { run: TestRunDetail }) {
+  const scalars = Object.entries(run.results).filter(([, value]) => asNumericArray(value) === null);
+  if (scalars.length === 0) return null;
+
+  return (
+    <dl className="measure-grid">
+      {scalars.map(([code, value]) => (
+        <div className="measure" key={code}>
+          <dt title={code}>{label(run, code)}</dt>
+          <dd className={value === null || value === undefined ? "muted" : "mono"}>
+            {formatScalar(value)}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function RunConditions({ run }: { run: TestRunDetail }) {
+  const entries = Object.entries(run.properties).filter(
+    ([, value]) => value !== null && value !== undefined && value !== "",
+  );
+  if (entries.length === 0) return null;
+
+  return (
+    <details className="conditions">
+      <summary>{t.testResults.conditions}</summary>
+      <dl className="measure-grid">
+        {entries.map(([code, value]) => (
+          <div className="measure" key={code}>
+            <dt title={code}>{code}</dt>
+            <dd className="mono">{formatScalar(value)}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  );
+}
+
+function RunAttachments({ sn, attachments, onOpen }: {
+  sn: string;
+  attachments: TestRunAttachment[];
+  onOpen: (attachment: TestRunAttachment) => void;
+}) {
+  if (attachments.length === 0) return null;
+
+  return (
+    <div className="img-grid compact">
+      {attachments.map((attachment) =>
+        attachment.stored && attachment.is_image ? (
+          <button
+            type="button"
+            className="img-thumb"
+            key={attachment.code}
+            title={attachment.filename ?? attachment.code}
+            onClick={() => onOpen(attachment)}
+          >
+            <img
+              src={componentAttachmentUrl(sn, attachment.code)}
+              alt={attachment.title ?? attachment.filename ?? t.images.untitled}
+              loading="lazy"
+            />
+          </button>
+        ) : (
+          <span className="img-thumb placeholder" key={attachment.code}>
+            <span className="img-tag">
+              {attachment.stored ? attachment.filename : t.images.notStored}
+            </span>
+          </span>
+        ),
+      )}
+    </div>
+  );
+}
+
+export function TestResultsSection({ sn, canWrite }: { sn: string; canWrite: boolean }) {
+  const [runs, setRuns] = useState<TestRunDetail[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [lightbox, setLightbox] = useState<TestRunAttachment | null>(null);
+
+  function load(signal?: AbortSignal) {
+    return getComponentTests(sn, signal)
+      .then((data) => {
+        setRuns(data);
+        setError(null);
+      })
+      .catch((err: unknown) => {
+        if (signal?.aborted) return;
+        setRuns([]);
+        setError(err instanceof ApiError ? err.message : t.testResults.loadError);
+      });
+  }
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setRuns(null);
+    setNotice(null);
+    setLightbox(null);
+    void load(ctrl.signal);
+    return () => ctrl.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sn]);
+
+  async function handleSyncAttachments() {
+    setSyncing(true);
+    setNotice(null);
+    try {
+      const result = await postComponentAttachmentSync(sn);
+      setNotice(t.images.syncDone(result.downloaded, result.total));
+      await load();
+    } catch (err: unknown) {
+      setNotice(err instanceof ApiError ? err.message : t.images.syncFailed);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  const hasAttachments = (runs ?? []).some((run) => run.attachments.length > 0);
+
+  return (
+    <>
+      <h3 className="section-title">{t.testResults.title}</h3>
+      <div className="panel">
+        {runs === null ? (
+          <p className="state-note">{t.common.loading}</p>
+        ) : error !== null ? (
+          <p className="state-note">{error}</p>
+        ) : runs.length === 0 ? (
+          <p className="state-note">
+            {t.testResults.empty} {t.testResults.hint}
+          </p>
+        ) : (
+          <>
+            {canWrite && hasAttachments && (
+              <div className="toolbar">
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={syncing}
+                  onClick={() => void handleSyncAttachments()}
+                >
+                  {syncing ? t.images.syncingAttachments : t.images.syncAttachments}
+                </button>
+              </div>
+            )}
+            {notice !== null && (
+              <div className="info-banner" role="status">
+                <span>{notice}</span>
+                <button type="button" className="btn" onClick={() => setNotice(null)}>
+                  OK
+                </button>
+              </div>
+            )}
+            <ul className="run-list">
+              {runs.map((run) => (
+                <li className="run" key={`${run.test_type}-${run.external_ref ?? "x"}`}>
+                  <div className="run-head">
+                    <strong className="run-type">{run.test_type}</strong>
+                    <span className={run.passed ? "chip green" : "chip red"}>
+                      {run.passed ? t.testResults.passed : t.testResults.failed}
+                    </span>
+                    {run.run_number !== null && (
+                      <span className="chip muted">{t.testResults.runNumber(run.run_number)}</span>
+                    )}
+                    <span className="muted run-date">{formatTimestamp(run.measured_at)}</span>
+                  </div>
+                  <RunCurves run={run} />
+                  <RunScalars run={run} />
+                  {Object.keys(run.results).length === 0 && (
+                    <p className="state-note">{t.testResults.noValues}</p>
+                  )}
+                  <RunAttachments sn={sn} attachments={run.attachments} onOpen={setLightbox} />
+                  <RunConditions run={run} />
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
+
+      {lightbox !== null && (
+        <div
+          className="img-lightbox"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setLightbox(null)}
+        >
+          <button type="button" className="img-lightbox-close" aria-label={t.images.close}>
+            ×
+          </button>
+          <img
+            src={componentAttachmentUrl(sn, lightbox.code)}
+            alt={lightbox.title ?? lightbox.filename ?? t.images.untitled}
+          />
+          <div className="img-lightbox-cap">
+            {lightbox.test_type} · {lightbox.filename ?? lightbox.code}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}

@@ -20,6 +20,7 @@ const en = {
     tools: "Tools & jigs",
     reminders: "Reminders",
     users: "Users",
+    account: "Account",
     groupAdmin: "Admin",
     operator: "Operator",
     scanPlaceholder: "Scan SN / RFID / local name…",
@@ -45,6 +46,39 @@ const en = {
     demoNote: "Backend not reachable — showing a built-in demo dataset.",
     none: "—",
   },
+  syncJob: {
+    title: "Component sync",
+    queued: "Queued",
+    fetching: "Fetching components from the PDB",
+    mapping: "Validating and mapping records",
+    upserting: "Updating the local mirror",
+    stageEvents: "Rebuilding stage history",
+    tools: "Refreshing tools and jigs",
+    committing: "Committing mirror snapshot",
+    complete: "Sync complete",
+    failed: "Sync failed",
+    interrupted: "Sync interrupted",
+    step: (current: number, total: number) => `Step ${current} of ${total}`,
+    count: (current: string, total: string, unit: string) =>
+      `${current} / ${total} ${unit}`,
+    countWithoutTotal: (current: string, unit: string) => `${current} ${unit}`,
+    waitingForTotal: "Waiting for the PDB total…",
+    elapsed: (duration: string) => `Elapsed ${duration}`,
+    lastUpdate: (duration: string) => `Last update ${duration} ago`,
+    progressLabel: (phase: string, current: number, total: number) =>
+      `${phase}: ${current} of ${total}`,
+    indeterminateLabel: (phase: string) => `${phase}: total not known yet`,
+    connectionLost: (error: string) => `Progress connection lost — retrying: ${error}`,
+    retryFailed: (error: string) => `Could not start the sync: ${error}`,
+    mirrorUnchanged: "The local mirror was not changed.",
+    openDetails: "Open component sync details",
+    retry: "Retry sync",
+    dismiss: "Dismiss",
+    componentsUnit: "components",
+    eventsUnit: "component histories",
+    toolsUnit: "tools",
+    itemsUnit: "items",
+  },
   components: {
     subtitle: "Browse and search the local PDB mirror. Scanner-first.",
     masterData: "Master data",
@@ -60,8 +94,11 @@ const en = {
     instituteCodePlaceholder: "e.g. TUDO",
     instituteNamePlaceholder: "e.g. TU Dortmund",
     institutePrefixPlaceholder: "e.g. TUDO-",
-    syncSelected: "Sync selected institute",
+    syncSelected: "Sync components",
+    syncingComponents: "Component sync running…",
+    checkingSync: "Checking sync status…",
     syncEvidenceInstitute: "Sync test evidence",
+    syncingEvidenceInstitute: "Syncing test evidence…",
     syncEvidenceInstituteDone: (created: number, processed: number) =>
       `Test evidence synced: ${created} new across ${processed} components.`,
     syncNeedsInstitute: "Select or create an institute before syncing.",
@@ -304,6 +341,28 @@ const en = {
     offlineHint: "Images load from the PDB when the backend is connected.",
     untitled: "image",
     close: "Close",
+    syncAttachments: "Download images",
+    syncingAttachments: "Downloading…",
+    syncDone: (downloaded: number, total: number) =>
+      `Downloaded ${downloaded} of ${total} attachment(s) to the local folder.`,
+    syncFailed: "Could not download the attachments",
+    notStored: "Not downloaded yet",
+    storedLocally: "Stored locally",
+  },
+  testResults: {
+    title: "Test results",
+    empty: "No test results mirrored yet.",
+    hint: "Use “Sync test evidence” to mirror this component's PDB test runs.",
+    loadError: "Could not load the mirrored test results",
+    passed: "passed",
+    failed: "failed",
+    runNumber: (value: string) => `run ${value}`,
+    noValues: "This run has no measured values.",
+    valueMissing: "not measured",
+    conditions: "Conditions",
+    curvePoints: (count: number) => `${count} points`,
+    voltage: "Voltage [V]",
+    current: "Current [nA]",
   },
   tools: {
     loadError: "Could not load the tool registry",
@@ -382,6 +441,65 @@ const en = {
     deactivate: "Deactivate",
     you: "you",
   },
+  account: {
+    subtitle: "Manage your identity and personal PDB connection.",
+    openSettings: "Open account settings",
+    requiresSignIn: "Account settings require a signed-in user.",
+    identityTitle: "Identity",
+    nameLabel: "Name",
+    emailLabel: "Email",
+    roleLabel: "Role",
+    instituteLabel: "Institute",
+    pdbTitle: "Personal PDB connection",
+    pdbDescription:
+      "Use your own PDB access codes (+4Auth) for remote reads and authorised actions.",
+    states: {
+      not_configured: "Not connected",
+      verified: "Connected",
+      invalid: "Access codes rejected",
+      unreachable: "PDB unavailable",
+    },
+    notConfiguredHint: "Connect your personal PDB account before using remote PDB actions.",
+    verifiedHint: "Your personal PDB connection was verified successfully.",
+    invalidHint: "The PDB rejected the saved access codes. Replace them to continue.",
+    unreachableHint:
+      "The PDB could not be reached. Your saved connection was kept; test it again later.",
+    instanceLabel: "PDB instance",
+    identityLabel: "PDB identity",
+    institutionsLabel: "PDB institutions",
+    lastCheckedLabel: "Last checked",
+    lastVerifiedLabel: "Last verified",
+    accessCode1Label: "Access code 1",
+    accessCode2Label: "Access code 2",
+    secretNote:
+      "The codes are sent to itkFlow for verification. Saved codes are never returned " +
+      "to this browser or displayed again.",
+    bothCodesRequired: "Enter both PDB access codes.",
+    connectAndTest: "Connect & test",
+    connecting: "Connecting…",
+    testConnection: "Test connection",
+    testing: "Testing…",
+    replaceCodes: "Replace access codes",
+    disconnect: "Disconnect",
+    disconnectQuestion: "Remove your personal PDB connection?",
+    disconnectHint:
+      "This removes only your saved PDB access codes. Your itkFlow account remains active.",
+    confirmDisconnect: "Remove connection",
+    disconnecting: "Removing…",
+    loadFailed: "Could not load the PDB connection",
+    connectFailed: "Could not connect the PDB account",
+    testFailed: "Could not verify the PDB connection",
+    disconnectFailed: "Could not remove the PDB connection",
+    invalidCredentials: "The PDB rejected these access codes. Check both codes and try again.",
+    pdbClientUnavailable:
+      "PDB support is not installed correctly on this itkFlow server. Contact the administrator.",
+    pdbUnavailable: "The PDB could not be reached. Check your network and try again.",
+    notConfigured: "No personal PDB connection is configured.",
+    connectedToast: "Personal PDB connection verified.",
+    savedToast: "Personal PDB connection updated.",
+    testPassedToast: "PDB connection verified.",
+    disconnectedToast: "Personal PDB connection removed.",
+  },
   auth: {
     signInTitle: "Sign in to itkFlow",
     signInSubtitle: "Sign in to record production steps and push reviewed writes.",
@@ -431,9 +549,18 @@ export function formatCount(n: number): string {
   return n.toLocaleString("en-GB");
 }
 
+/**
+ * Backend datetimes are UTC. SQLite may omit the offset even for timezone-aware
+ * columns, so make that implicit UTC explicit before handing the value to JS.
+ */
+export function parseApiTimestamp(iso: string): Date {
+  const hasOffset = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso);
+  return new Date(hasOffset ? iso : `${iso}Z`);
+}
+
 /** Compact relative time ("just now", "12 min ago", "3 h ago", "2 d ago"). */
 export function formatRelative(iso: string): string {
-  const then = new Date(iso).getTime();
+  const then = parseApiTimestamp(iso).getTime();
   if (Number.isNaN(then)) return iso;
   const secs = Math.round((Date.now() - then) / 1000);
   if (secs < 45) return "just now";
@@ -446,7 +573,7 @@ export function formatRelative(iso: string): string {
 
 /** Locale-aware timestamp formatting (English default locale). */
 export function formatTimestamp(iso: string): string {
-  const date = new Date(iso);
+  const date = parseApiTimestamp(iso);
   if (Number.isNaN(date.getTime())) return iso;
   return date.toLocaleString("en-GB", {
     year: "numeric",
@@ -455,4 +582,21 @@ export function formatTimestamp(iso: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/** Compact duration for live job telemetry (e.g. "12s", "2m 08s", "1h 04m"). */
+export function formatDuration(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+/** Age of a server timestamp, using the same compact telemetry vocabulary. */
+export function formatAge(iso: string, nowMs = Date.now()): string {
+  const timestamp = parseApiTimestamp(iso).getTime();
+  if (Number.isNaN(timestamp)) return iso;
+  return formatDuration(Math.max(0, Math.floor((nowMs - timestamp) / 1_000)));
 }

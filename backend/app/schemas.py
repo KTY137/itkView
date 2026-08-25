@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from app.ingestion import ResultSummary
 from app.outbox import OutboxStatus
@@ -63,6 +63,41 @@ class ComponentSyncOut(BaseModel):
     unchanged: int
     stale: int
     total: int
+
+
+SyncJobStatus = Literal["queued", "running", "succeeded", "failed", "interrupted"]
+SyncJobPhase = Literal[
+    "queued",
+    "fetching",
+    "mapping",
+    "upserting",
+    "stage_events",
+    "tools",
+    "committing",
+    "complete",
+]
+
+
+class SyncJobOut(BaseModel):
+    """Pollable state of a background component-mirror sync."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    kind: Literal["components"]
+    institute_code: str
+    status: SyncJobStatus
+    phase: SyncJobPhase
+    current: int
+    total: int | None
+    percent: float | None
+    message: str
+    result: ComponentSyncOut | None
+    error: str | None
+    created_at: datetime
+    started_at: datetime | None
+    updated_at: datetime
+    finished_at: datetime | None
 
 
 class ToolSyncOut(BaseModel):
@@ -280,6 +315,35 @@ class MeOut(BaseModel):
     csrf_token: str
 
 
+# --- Personal PDB connection ------------------------------------------------
+
+PdbConnectionState = Literal[
+    "not_configured",
+    "verified",
+    "invalid",
+    "unreachable",
+]
+
+
+class PdbCredentialsPut(BaseModel):
+    """Write-only Plus4U/PDB access-code pair for the signed-in account."""
+
+    access_code1: SecretStr = Field(min_length=1, max_length=1000)
+    access_code2: SecretStr = Field(min_length=1, max_length=1000)
+
+
+class PdbConnectionOut(BaseModel):
+    """Non-secret metadata; stored access codes are never returned by the API."""
+
+    configured: bool
+    state: PdbConnectionState
+    instance: str
+    identity: str | None
+    institutions: list[str]
+    last_checked_at: datetime | None
+    verified_at: datetime | None
+
+
 # --- Tools / jigs (docs/07) ------------------------------------------------
 
 ToolStatus = Literal["active", "flagged", "blacklisted"]
@@ -402,4 +466,44 @@ class InstituteEvidenceSyncOut(BaseModel):
     created: int
     updated: int
     unchanged: int
+    total: int
+
+
+class TestRunAttachmentOut(BaseModel):
+    """One mirrored attachment. `stored` distinguishes "known" from "on disk"."""
+
+    code: str
+    test_type: str
+    test_run_ref: str | None
+    filename: str | None
+    content_type: str | None
+    title: str | None
+    size_bytes: int | None
+    stored: bool
+    is_image: bool
+
+
+class TestRunDetailOut(BaseModel):
+    """A mirrored test run with its measured values.
+
+    `results` and `properties` are keyed by PDB code; `result_meta` carries the
+    human name, which is where the unit lives ("Weight of glue ... [g]").
+    """
+
+    test_type: str
+    passed: bool
+    external_ref: str | None
+    measured_at: datetime | None
+    run_number: str | None
+    results: dict[str, Any]
+    result_meta: dict[str, Any]
+    properties: dict[str, Any]
+    attachments: list[TestRunAttachmentOut]
+
+
+class AttachmentSyncOut(BaseModel):
+    component_sn: str
+    downloaded: int
+    reused: int
+    failed: int
     total: int

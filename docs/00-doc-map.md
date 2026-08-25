@@ -30,6 +30,8 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 | `docs/adr/001-outbox-status-contract.md` | Outbox-Statusvertrag |
 | `docs/adr/002-async-outbox-worker.md` | Async-Outbox-Worker, Retry/Backoff |
 | `docs/adr/003-pdb-dummy-write-scope.md` | `pdb_write_scope=dummy_only` |
+| `docs/adr/004-personal-pdb-credentials.md` | Persoenliche PDB-Credentials, Verschluesselung, Identitaetsbindung |
+| `docs/adr/005-desktop-packaging.md` | Desktop-Paketierung: Tauri-Shell, PyInstaller-Sidecar, SPA-Hosting |
 
 ## Reverse-Index: Code -> zustaendiges Doc
 
@@ -37,8 +39,13 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 |---|---|
 | `backend/app/auth.py`, `models.User`/`UserSession`, `/api/auth`, `/api/users` | `06` |
 | `backend/app/pdb_gateway.py`, `pdb_sync.py`, `sync.py` (Mirror) | `02` (Phase 1), `09` |
+| `backend/app/pdb_test_evidence.py`, `test_run_evidence.py`, `models.TestRunEvidence` | `04`, `09` |
+| `backend/app/attachment_store.py`, `models.TestRunAttachment`, `pdb_attachments.py` | `04`, `09` |
+| `backend/app/desktop_server.py`, `static_spa.py`, `desktop/` (Tauri) | `adr/005`, README |
+| `backend/app/pdb_credentials.py`, `models.PdbCredential` | `06`, `adr/004` |
 | `backend/app/pdb_scope.py` | `adr/003`, `09` |
 | `backend/app/outbox_worker.py`, `run_worker.py` | `adr/002` |
+| `models.OutboxPdbPrincipal`, `backend/app/pdb_submit.py` | `adr/002`, `adr/004` |
 | `models.OutboxAction`/`AuditEvent`, Outbox-Status | `adr/001` |
 | `backend/app/ingestion.py`, `pdb_upload.py` | `02` (Phase 2) |
 | `backend/app/domain/stages.py`, Stage-Suggestion | `04`, `05` |
