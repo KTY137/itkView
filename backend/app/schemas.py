@@ -448,6 +448,8 @@ class ComponentImageOut(BaseModel):
     id: str
     title: str
     test_type: str | None
+    # The download route needs the owning run, so it has to survive the listing.
+    test_run_ref: str | None = None
     filename: str | None
     content_type: str | None
 
