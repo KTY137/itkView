@@ -827,6 +827,420 @@ def test_evidence_job_retries_a_flaky_component_instead_of_failing_the_sweep(
         assert session.scalar(select(func.count(TestRunEvidence.id))) == 1
 
 
+def _add_module(session_factory, sn: str) -> None:
+    with session_factory() as session:
+        session.add(
+            Component(
+                sn=sn,
+                component_type="MODULE",
+                type_code="R5M0",
+                stage="GLUED",
+                location="TUDO",
+                institute_code="TUDO",
+            )
+        )
+        session.commit()
+
+
+def _wait_for(predicate, timeout: float = 8.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        result = predicate()
+        if result:
+            return result
+        time.sleep(0.02)
+    raise AssertionError("condition was not reached in time")
+
+
+def test_evidence_fetch_retry_keeps_the_job_heartbeat_fresh(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
+):
+    """The quiet stretch between fetch attempts must carry a heartbeat.
+
+    Three 60s attempts plus backoff exceed the 3-minute startup-recovery
+    grace; without a heartbeat before each retry a second app instance would
+    kill a live evidence job as orphaned.
+    """
+    monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    _add_module(session_factory, "20USEM00000401")
+    client.app.state.sync_job_manager = RecordingManager()
+    job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
+    observed: list[str] = []
+
+    class _Client(_EvidenceClient):
+        def __init__(self):
+            super().__init__()
+            self.failed_once = False
+
+        def get(self, action, json=None):
+            if action == "getComponent":
+                if not self.failed_once:
+                    self.failed_once = True
+                    raise ConnectionResetError("Connection reset by peer")
+                with session_factory() as session:
+                    observed.append(session.get(SyncJob, job_id).message)
+            return super().get(action, json=json)
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, access_codes: _EvidenceGateway(_Client()),
+        job_id,
+    )
+
+    assert client.get(f"/api/sync/jobs/{job_id}").json()["status"] == "succeeded"
+    # The durable message the retry attempt saw proves the heartbeat was
+    # written *before* the backoff, not after the component finally answered.
+    assert observed and "retry" in observed[0].lower()
+
+
+def test_attachment_phase_heartbeats_during_a_flaky_download(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
+):
+    """A single component with slow/flaky attachments must not go quiet for
+    the whole download phase: the heartbeat fires per file and per retry."""
+    monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
+    monkeypatch.setattr("app.attachment_store.sleep", lambda seconds: None)
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    _add_module(session_factory, "20USEM00000402")
+    client.app.state.sync_job_manager = RecordingManager()
+    job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
+    observed: list[str] = []
+
+    class _Client(_EvidenceClient):
+        def __init__(self):
+            super().__init__()
+            self.attachment_calls = 0
+
+        def get(self, action, json=None):
+            if action == "getTestRunAttachment":
+                self.attachment_calls += 1
+                if self.attachment_calls == 1:
+                    raise ConnectionResetError("Connection reset by peer")
+                with session_factory() as session:
+                    observed.append(session.get(SyncJob, job_id).message)
+            return super().get(action, json=json)
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, access_codes: _EvidenceGateway(_Client()),
+        job_id,
+    )
+
+    status = client.get(f"/api/sync/jobs/{job_id}").json()
+    assert status["status"] == "succeeded"
+    assert status["result"]["attachments_downloaded"] == 1
+    assert observed and "still working" in observed[0].lower()
+
+
+def test_stale_component_lease_is_taken_over_at_acquire(session_factory, tudo: dict):
+    """Crash + immediate restart leaves a fresh-looking zombie behind: startup
+    recovery (rightly) skips it, so the next acquire must claim its lease."""
+    from datetime import timedelta
+
+    with session_factory() as session:
+        zombie = SyncJob(
+            kind="components",
+            institute_code="TUDO",
+            status="running",
+            phase="fetching",
+            message="Fetching components.",
+            requested_by="tester",
+            active_key="components",
+            updated_at=utcnow() - timedelta(hours=1),
+        )
+        session.add(zombie)
+        session.commit()
+        zombie_id = zombie.id
+
+    with session_factory() as session:
+        lease = acquire_component_sync_lease(
+            session,
+            institute_code="TUDO",
+            requested_by="operator@example.org",
+            user_id=None,
+        )
+
+    assert lease.created is True
+    assert lease.job.id != zombie_id
+    with session_factory() as session:
+        old = session.get(SyncJob, zombie_id)
+        assert old.status == "interrupted"
+        assert old.active_key is None
+        new = session.get(SyncJob, lease.job.id)
+        assert new.status == "queued"
+        assert new.active_key == "components"
+
+
+def test_stale_evidence_lease_is_taken_over_at_acquire(session_factory, tudo: dict):
+    from datetime import timedelta
+
+    with session_factory() as session:
+        zombie = SyncJob(
+            kind="evidence",
+            institute_code="TUDO",
+            status="running",
+            phase="fetching",
+            message="Fetching evidence.",
+            requested_by="tester",
+            active_key="evidence:TUDO",
+            updated_at=utcnow() - timedelta(hours=1),
+        )
+        session.add(zombie)
+        session.commit()
+        zombie_id = zombie.id
+
+    with session_factory() as session:
+        lease = acquire_evidence_sync_lease(
+            session,
+            institute_code="TUDO",
+            requested_by="operator@example.org",
+            user_id=None,
+        )
+
+    assert lease.created is True and lease.job.id != zombie_id
+    with session_factory() as session:
+        assert session.get(SyncJob, zombie_id).status == "interrupted"
+        assert session.get(SyncJob, zombie_id).active_key is None
+
+
+def test_live_lease_is_not_taken_over_at_acquire(session_factory, tudo: dict):
+    """The takeover must never race a job that is merely between heartbeats."""
+    with session_factory() as session:
+        live = SyncJob(
+            kind="components",
+            institute_code="TUDO",
+            status="running",
+            phase="fetching",
+            message="Fetching components.",
+            requested_by="tester",
+            active_key="components",
+            updated_at=utcnow(),
+        )
+        session.add(live)
+        session.commit()
+        live_id = live.id
+
+    with session_factory() as session:
+        lease = acquire_component_sync_lease(
+            session,
+            institute_code="TUDO",
+            requested_by="operator@example.org",
+            user_id=None,
+        )
+
+    assert lease.created is False
+    assert lease.job.id == live_id
+
+
+def test_mirrored_flat_fingerprints_chunk_large_scopes(session_factory, monkeypatch):
+    """Production scopes reach thousands of serial numbers; the IN clause is
+    read in bounded chunks. Shrinking the chunk proves the seams are correct."""
+    from app.sync_jobs import _mirrored_flat_fingerprints
+
+    monkeypatch.setattr("app.sync_jobs.FINGERPRINT_CHUNK_SIZE", 2)
+    with session_factory() as session:
+        for index in range(5):
+            session.add(
+                TestRunEvidence(
+                    component_sn=f"20USEM0000050{index}",
+                    test_type="VISUAL_INSPECTION",
+                    passed=True,
+                    source="pdb",
+                    external_ref=f"run-{index}",
+                    payload={"detail_synced": True, "state": "ready", "problems": False},
+                )
+            )
+        # A shallow row must keep taking the detail round trip.
+        session.add(
+            TestRunEvidence(
+                component_sn="20USEM00000500",
+                test_type="OTHER",
+                passed=True,
+                source="pdb",
+                external_ref="run-shallow",
+                payload={},
+            )
+        )
+        session.commit()
+
+    with session_factory() as session:
+        fingerprints = _mirrored_flat_fingerprints(
+            session, [f"20USEM0000050{index}" for index in range(5)]
+        )
+
+    assert set(fingerprints) == {f"run-{index}" for index in range(5)}
+
+
+# --- bounded automatic re-queue after a transient job failure ---------------
+
+
+def _evidence_jobs(session_factory):
+    with session_factory() as session:
+        return list(
+            session.scalars(
+                select(SyncJob).where(SyncJob.kind == "evidence").order_by(SyncJob.id)
+            )
+        )
+
+
+def _component_jobs(session_factory):
+    with session_factory() as session:
+        return list(
+            session.scalars(
+                select(SyncJob).where(SyncJob.kind == "components").order_by(SyncJob.id)
+            )
+        )
+
+
+def test_evidence_job_transient_failure_schedules_one_automatic_retry(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
+):
+    """A short outage must not leave the evidence mirror waiting for a human
+    click — and the automatic retry must never loop."""
+    monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
+    monkeypatch.setattr("app.sync_jobs.SYNC_AUTO_RETRY_DELAY_SECONDS", 0.0)
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    _add_module(session_factory, "20USEM00000601")
+    client.app.state.sync_job_manager = RecordingManager()
+    job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
+
+    class _DownGateway:
+        is_configured = True
+
+        def client(self):
+            raise PdbSyncUnavailable("unused")
+
+    class _DownClient:
+        def get(self, action, json=None):
+            raise ConnectionResetError("Connection reset by peer")
+
+    manager = SyncJobManager(
+        session_factory,
+        client.app.state.settings,
+        evidence_gateway_factory=lambda settings, codes: _EvidenceGateway(_DownClient()),
+    )
+    try:
+        manager.start_evidence(job_id)
+
+        jobs = _wait_for(
+            lambda: (
+                lambda rows: rows
+                if len(rows) == 2 and all(job.status == "failed" for job in rows)
+                else None
+            )(_evidence_jobs(session_factory))
+        )
+        original, retry = jobs
+        assert original.id == job_id
+        assert retry.requested_by.startswith("automatic retry")
+        assert retry.user_id == original.user_id
+        assert retry.institute_code == "TUDO"
+
+        # Bounded: the failed automatic retry must not spawn a third attempt.
+        time.sleep(0.3)
+        assert len(_evidence_jobs(session_factory)) == 2
+    finally:
+        manager.shutdown()
+
+
+def test_component_job_transient_failure_schedules_one_automatic_retry(
+    client: TestClient, session_factory, tudo: dict, as_operator, monkeypatch
+):
+    monkeypatch.setattr("app.sync_jobs.SYNC_AUTO_RETRY_DELAY_SECONDS", 0.0)
+    client.app.state.sync_job_manager = RecordingManager()
+    job_id = client.post("/api/sync/jobs/components/TUDO").json()["id"]
+
+    def outage_fetcher(settings, institute, access_codes, report):
+        raise PdbSyncUnavailable("PDB component page 1 failed (transient network error).")
+
+    manager = SyncJobManager(session_factory, client.app.state.settings)
+    try:
+        manager.start(job_id, outage_fetcher)
+
+        jobs = _wait_for(
+            lambda: (
+                lambda rows: rows
+                if len(rows) == 2 and all(job.status == "failed" for job in rows)
+                else None
+            )(_component_jobs(session_factory))
+        )
+        original, retry = jobs
+        assert original.id == job_id
+        assert retry.requested_by.startswith("automatic retry")
+        assert retry.user_id == original.user_id
+
+        time.sleep(0.3)
+        assert len(_component_jobs(session_factory)) == 2
+    finally:
+        manager.shutdown()
+
+
+def test_permanent_component_failure_does_not_schedule_a_retry(
+    client: TestClient, session_factory, tudo: dict, as_operator, monkeypatch
+):
+    """A bug or data problem will not fix itself in sixty seconds; only
+    connectivity-shaped (Pdb*Unavailable) failures earn the automatic retry."""
+    monkeypatch.setattr("app.sync_jobs.SYNC_AUTO_RETRY_DELAY_SECONDS", 0.0)
+    client.app.state.sync_job_manager = RecordingManager()
+    job_id = client.post("/api/sync/jobs/components/TUDO").json()["id"]
+
+    def broken_fetcher(settings, institute, access_codes, report):
+        raise RuntimeError("mapping bug")
+
+    manager = SyncJobManager(session_factory, client.app.state.settings)
+    try:
+        manager.start(job_id, broken_fetcher)
+        _wait_for(
+            lambda: any(job.status == "failed" for job in _component_jobs(session_factory))
+        )
+        time.sleep(0.3)
+        assert len(_component_jobs(session_factory)) == 1
+    finally:
+        manager.shutdown()
+
+
+def test_automatic_retry_converges_on_an_existing_manual_lease(
+    client: TestClient, session_factory, tudo: dict, as_operator
+):
+    """If a person already queued a new sync, the automatic retry must join it
+    instead of stacking a second job (single-flight lease stays authoritative)."""
+    from app.models import InstituteProfile
+    from app.sync_jobs import EvidenceSyncContext
+
+    with session_factory() as session:
+        user_id = session.scalar(select(User.id))
+        manual = acquire_evidence_sync_lease(
+            session,
+            institute_code="TUDO",
+            requested_by="operator@example.org",
+            user_id=user_id,
+        )
+        institute = session.scalar(
+            select(InstituteProfile).where(InstituteProfile.code == "TUDO")
+        )
+        session.expunge(institute)
+    assert manual.created is True
+
+    manager = SyncJobManager(session_factory, client.app.state.settings)
+    started: list[int] = []
+    manager.start_evidence = lambda job_id: started.append(job_id)
+    try:
+        manager._start_evidence_retry(
+            EvidenceSyncContext(
+                institute=institute,
+                user_id=user_id,
+                requested_by="operator@example.org",
+            )
+        )
+    finally:
+        manager.shutdown()
+
+    assert started == []
+    assert len(_evidence_jobs(session_factory)) == 1
+
+
 def test_evidence_job_still_fails_honestly_when_a_component_never_answers(
     client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
 ):

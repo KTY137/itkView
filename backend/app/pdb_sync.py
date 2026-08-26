@@ -224,6 +224,12 @@ def fetch_for_institute(
         # mapper keeps its defensive state check for malformed responses.
         "state": "ready",
     }
+    # Institute scoping is never overridable from the profile: a stray
+    # `currentLocation` in `pdb_filters` would silently AND-restrict the owned
+    # listing and the prune pass would stale-flag every missing component —
+    # configuration-triggered silent data loss.
+    base_filters.pop("institute", None)
+    base_filters.pop("currentLocation", None)
     # "Owned by us" and "located here" are fetched as two separate listings and
     # merged locally, rather than through the server's `useOrInLocationSearch`.
     # Measured against production: the OR search paginates inconsistently — a
@@ -231,7 +237,6 @@ def fetch_for_institute(
     # 2539 distinct ones, silently omitting the rest (every jig/tool among
     # them). Each single-scope listing came back complete and duplicate-free.
     scopes = (
-        # Institute scoping is never overridable from the profile.
         {"institute": [institute.code]},
         {"currentLocation": [institute.code]},
     )

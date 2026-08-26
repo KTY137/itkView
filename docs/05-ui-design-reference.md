@@ -64,6 +64,21 @@ im Frontend-i18n-Modul liegt.
    ausschliesslich auf der Komponentendetailseite.
 5. **Dashboard:** KPI-Kacheln (Module in Arbeit, Staged offen, Tests
    ausstehend, Yield) plus Charts (Module je Stage, Durchsatz/Woche).
+5b. **Statistics — Messwert-Sektion (2026-08-26):** Unter den Prozess-Charts
+   (Durchsatz, Stage-Dwell, Rework) aggregiert ein `Measurements`-Block die
+   gespiegelten Testlauf-Messwerte des Instituts. Zwei Auswahlfelder
+   (`Test type`, `Result`, bei Arrays zusaetzlich `X axis`) werden **aus den
+   Daten** befuellt (`GET /api/stats/measurements/dimensions`) — kein Testtyp
+   und kein Result-Code steht im Code (harte Regel 4). Array-Ergebnisse
+   erscheinen als **ueberlagerte Kurven, ein Polyline je Testlauf** (alle
+   IV-Kurven des Instituts in einem Chart), gepaart gegen das gewaehlte
+   X-Result, sonst gegen den Sample-Index. Skalare Ergebnisse (Klebegewicht,
+   Bow, I_500V …) erscheinen als Verteilungshistogramm mit Kennzahl-Kacheln
+   (n, Median, Mittel, P25–P75, Min–Max). Farbe traegt nur die
+   Pass/Fail-Identitaet: bestandene Laeufe in `--series` mit niedriger Deckung,
+   fehlgeschlagene in `--crit` **plus gestrichelter Linie** (Identitaet nie nur
+   ueber Farbe), beide in der Legende; Hover-Ziel ist eine breitere unsichtbare
+   Zwillingslinie. Achsen tragen die Einheit aus `result_meta.name`.
 6. **Account / persoenliche PDB-Verbindung + Preferences:** Klick auf den angemeldeten
    User-Block in der Rail oeffnet einen eigenen Screen; Logout bleibt eine
    getrennte Aktion. Links stehen lokale Identitaet/Rolle/Institut, rechts die

@@ -403,3 +403,50 @@ def test_fetch_progress_does_not_restart_for_the_second_scope(monkeypatch):
     assert counters == sorted(counters), f"progress went backwards: {counters}"
     assert counters[-1] == 5, "the final count covers both listings"
     assert seen[-1][1] == 5, "the reported total covers both listings"
+
+
+def test_profile_filters_cannot_override_the_scope_keys(monkeypatch):
+    """`pdb_filters` from the institute profile must never narrow or widen the
+    institute/currentLocation scoping — a stray `currentLocation` in the
+    profile would silently AND-restrict the owned listing and stale-flag the
+    missing components (review finding, 2026-08-26)."""
+    client = FilterAwareClient(
+        {
+            "institute": {0: page(0, 0, [])},
+            "currentLocation": {0: page(0, 0, [])},
+        }
+    )
+    codes = PdbAccessCodes(access_code1="user-code-1", access_code2="user-code-2")
+
+    class FakeGateway:
+        is_configured = True
+
+        def __init__(self, settings, *, access_codes):
+            pass
+
+        def client(self):
+            return client
+
+    monkeypatch.setattr("app.pdb_sync.PdbGateway", FakeGateway)
+    institute = InstituteProfile(
+        code="TUDO",
+        name="TU Dortmund",
+        local_name_prefix="TUDO-",
+        settings={
+            "pdb_filters": {
+                "currentLocation": ["CERN"],
+                "institute": ["CERN"],
+                "componentType": ["MODULE"],  # legitimate narrowing survives
+            }
+        },
+    )
+
+    fetch_for_institute(Settings(_env_file=None), institute, codes)
+
+    for call in client.calls:
+        filter_map = call["filterMap"]
+        scope_values = [filter_map.get("institute"), filter_map.get("currentLocation")]
+        assert ["CERN"] not in scope_values, filter_map
+        present = [v for v in scope_values if v is not None]
+        assert present == [["TUDO"]], filter_map
+        assert filter_map["componentType"] == ["MODULE"]

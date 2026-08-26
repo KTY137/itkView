@@ -20,6 +20,20 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 
 - Monorepo steht mit `backend/`, `frontend/`, `agent/`, `deploy/`, CI- und
   Docker-Grundstruktur.
+- **Messwert-Statistik auf der Statistics-Seite (2026-08-26):** Neue Endpunkte
+  `GET /api/stats/measurements/dimensions` und `GET /api/stats/measurements`
+  (`app/measurement_stats.py`) aggregieren die gespiegelten Testlauf-Messwerte
+  eines Instituts: Array-Ergebnisse als ueberlagerte Kurven (alle IV-Kurven in
+  einem Chart, gepaart gegen ein waehlbares X-Result), skalare Ergebnisse als
+  Verteilung mit Kennzahlen. Testtypen und Result-Codes werden aus den Daten
+  entdeckt, nie hartkodiert. UI: `Measurements`-Block im StatisticsScreen mit
+  Inline-SVG (Pass/Fail zusaetzlich ueber Strichelung kodiert, Palette gegen
+  Hell/Dunkel validiert). Details docs/05 §5b.
+- **Staged-Preview-Preference wirkt sofort (2026-08-26, Bugfix):** Die
+  Account-Einstellung `Staged preview: Tabs|Inline|Off` wurde nur beim Mount
+  gelesen — der Staged-Tab schien nach dem Umschalten „verschwunden", bis man
+  neu lud. `stagedPreview.ts` benachrichtigt jetzt Abonnenten im selben Tab
+  (`storage`-Events feuern nur in anderen Tabs).
 - **Desktop kann Outbox-Aktionen wirklich pushen (2026-08-26):** Das Bundle
   laeuft als ein Prozess und startete keinen Outbox-Worker — eine in der UI
   gepushte Aktion erreichte `submitted` und blieb dort fuer immer liegen, sah

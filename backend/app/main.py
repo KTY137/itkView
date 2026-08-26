@@ -50,9 +50,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.router.add_event_handler("shutdown", app.state.reminder_scheduler.stop)
     else:
         app.state.reminder_scheduler = None
-    # Same split for PDB submission: Compose has `app.run_worker`, the desktop
-    # bundle and the dev launcher have to drain the outbox themselves or a
-    # reviewed action never reaches the PDB (docs/11).
+    # Same split for PDB submission: Compose has `app.run_worker`; the desktop
+    # bundle drains the outbox itself or a reviewed action never reaches the
+    # PDB. The dev launcher deliberately keeps this off (docs/11).
     if settings.outbox_processor == "app":
         app.state.outbox_processor = OutboxProcessor(app.state.session_factory, settings)
         app.router.add_event_handler("startup", app.state.outbox_processor.start)

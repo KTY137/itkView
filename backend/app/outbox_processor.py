@@ -1,9 +1,11 @@
 """Drain the outbox from inside the API process.
 
-Compose runs `app.run_worker` as its own service. The desktop bundle and the
-dev launcher are a single process, so without this an action reviewed in the UI
-advances to `submitted` and then stops: the PDB write silently never happens,
-and the staged change looks pushed while nothing reached the collaboration.
+Compose runs `app.run_worker` as its own service. The desktop bundle is a
+single process, so without this an action reviewed in the UI advances to
+`submitted` and then stops: the PDB write silently never happens, and the
+staged change looks pushed while nothing reached the collaboration. (The dev
+launcher deliberately keeps the drain off — development sessions should not
+submit; `python -m app.run_worker --once` exists for a deliberate manual pass.)
 This is the same split the reminder scheduler already makes (docs/11), and
 `Settings.outbox_processor` decides which process owns the work.
 

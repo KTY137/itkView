@@ -1,8 +1,26 @@
-import { useEffect, useState } from "react";
-import { ApiError, getProductionStats, getStatsDimensions } from "../api";
-import type { ProductionStats, ProductionStatsQuery, StatsDimensions } from "../api";
+import { useEffect, useMemo, useState } from "react";
+import {
+  ApiError,
+  getMeasurementDimensions,
+  getMeasurementSeries,
+  getProductionStats,
+  getStatsDimensions,
+} from "../api";
+import type {
+  MeasurementDimensions,
+  MeasurementSeries,
+  ProductionStats,
+  ProductionStatsQuery,
+  StatsDimensions,
+} from "../api";
 import { makeDemoProductionStats, makeDemoStatsDimensions } from "../demoData";
 import { formatCount, t } from "../i18n";
+import {
+  compactNumber,
+  curveGeometry,
+  defaultXResult,
+  histogramBins,
+} from "../measurements";
 import StageLegend from "../StageLegend";
 import { roleLabel, stageChipClass, stageLabel } from "../ui";
 
@@ -202,9 +220,281 @@ export default function StatisticsScreen() {
               )}
             </section>
           </div>
+
+          <MeasurementsSection />
         </>
       )}
     </div>
+  );
+}
+
+/** Mirrored measurement aggregation: every run of one result code in a single
+ * chart. Which test types and result codes exist is discovered from the data
+ * (hard rule #4) — nothing here knows what an "IV" test is called. */
+function MeasurementsSection() {
+  const [dims, setDims] = useState<MeasurementDimensions | null>(null);
+  const [testType, setTestType] = useState<string>("");
+  const [resultCode, setResultCode] = useState<string>("");
+  const [xCode, setXCode] = useState<string>("");
+  const [series, setSeries] = useState<MeasurementSeries | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    getMeasurementDimensions(ctrl.signal)
+      .then((data) => {
+        setDims(data);
+        const first = data.test_types[0];
+        if (first !== undefined) {
+          setTestType((current) => (current === "" ? first.test_type : current));
+        }
+      })
+      .catch(() => setDims({ test_types: [] }));
+    return () => ctrl.abort();
+  }, []);
+
+  const results = useMemo(
+    () => dims?.test_types.find((entry) => entry.test_type === testType)?.results ?? [],
+    [dims, testType],
+  );
+
+  useEffect(() => {
+    if (results.length === 0) return;
+    setResultCode((current) =>
+      results.some((entry) => entry.code === current) ? current : results[0].code,
+    );
+  }, [results]);
+
+  useEffect(() => {
+    const picked = results.find((entry) => entry.code === resultCode);
+    if (picked === undefined) return;
+    setXCode(picked.kind === "array" ? (defaultXResult(results, resultCode) ?? "") : "");
+  }, [results, resultCode]);
+
+  useEffect(() => {
+    if (testType === "" || resultCode === "") return;
+    const ctrl = new AbortController();
+    setLoading(true);
+    setError(null);
+    getMeasurementSeries(
+      { test_type: testType, result: resultCode, x_result: xCode || undefined },
+      ctrl.signal,
+    )
+      .then((data) => {
+        setSeries(data);
+        setLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (ctrl.signal.aborted) return;
+        if (err instanceof ApiError && err.isNetwork) setSeries(null);
+        else setError(errorMessage(err));
+        setLoading(false);
+      });
+    return () => ctrl.abort();
+  }, [testType, resultCode, xCode]);
+
+  if (dims === null || dims.test_types.length === 0) return null;
+  const arrayCodes = results.filter((entry) => entry.kind === "array");
+
+  return (
+    <section className="chart-card">
+      <h2>{t.stats.measurementsTitle}</h2>
+      <p className="state-note">{t.stats.measurementsSubtitle}</p>
+      <div className="toolbar stats-filters">
+        <label className="field">
+          <span className="field-label">{t.stats.measurementTestLabel}</span>
+          <select className="select-input" value={testType} onChange={(e) => setTestType(e.target.value)}>
+            {dims.test_types.map((entry) => (
+              <option key={entry.test_type} value={entry.test_type}>
+                {entry.test_type}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span className="field-label">{t.stats.measurementResultLabel}</span>
+          <select className="select-input" value={resultCode} onChange={(e) => setResultCode(e.target.value)}>
+            {results.map((entry) => (
+              <option key={entry.code} value={entry.code}>
+                {entry.name ?? entry.code}
+              </option>
+            ))}
+          </select>
+        </label>
+        {series?.kind === "array" && arrayCodes.length > 1 && (
+          <label className="field">
+            <span className="field-label">{t.stats.measurementXLabel}</span>
+            <select className="select-input" value={xCode} onChange={(e) => setXCode(e.target.value)}>
+              <option value="">{t.stats.measurementXIndex}</option>
+              {arrayCodes
+                .filter((entry) => entry.code !== resultCode)
+                .map((entry) => (
+                  <option key={entry.code} value={entry.code}>
+                    {entry.name ?? entry.code}
+                  </option>
+                ))}
+            </select>
+          </label>
+        )}
+      </div>
+
+      {error !== null ? (
+        <p className="state-note">{`${t.stats.measurementLoadError}: ${error}`}</p>
+      ) : loading || series === null ? (
+        <p className="state-note">{t.common.loading}</p>
+      ) : series.kind === "array" && series.curves.length > 0 ? (
+        <CurveOverlay series={series} />
+      ) : series.kind === "scalar" && series.values.length > 0 ? (
+        <ScalarDistribution series={series} />
+      ) : (
+        <p className="state-note">{t.stats.measurementEmpty}</p>
+      )}
+    </section>
+  );
+}
+
+const CURVE_W = 640;
+const CURVE_H = 260;
+
+/** All runs of one array result overlaid. One recessive hue for the passed
+ * population; failed runs use the reserved critical hue plus a dashed stroke
+ * (identity never rides on colour alone) and both appear in the legend. */
+function CurveOverlay({ series }: { series: MeasurementSeries }) {
+  const geometry = useMemo(() => curveGeometry(series.curves, CURVE_W, CURVE_H), [series]);
+  if (geometry === null) return <p className="state-note">{t.stats.measurementEmpty}</p>;
+  const passed = series.curves.filter((curve) => curve.passed).length;
+  const failed = series.curves.length - passed;
+  const yLabel = series.result_name ?? series.result_code;
+  const xLabel =
+    series.x_result === null || series.curves.every((curve) => curve.x === null)
+      ? t.stats.measurementXIndex
+      : (series.x_name ?? series.x_result);
+
+  return (
+    <>
+      <div className="curve-legend" aria-hidden="true">
+        <span className="curve-key">
+          <svg width="18" height="6">
+            <line x1="0" y1="3" x2="18" y2="3" className="curve-line" />
+          </svg>
+          {t.stats.measurementPassed(passed)}
+        </span>
+        {failed > 0 && (
+          <span className="curve-key">
+            <svg width="18" height="6">
+              <line x1="0" y1="3" x2="18" y2="3" className="curve-line failed" />
+            </svg>
+            {t.stats.measurementFailed(failed)}
+          </span>
+        )}
+        <span className="curve-count">{t.stats.measurementCurves(series.curves.length)}</span>
+      </div>
+      <div className="curve-wrap">
+        <svg
+          viewBox={`-56 -8 ${CURVE_W + 72} ${CURVE_H + 40}`}
+          className="curve-chart"
+          role="img"
+          aria-label={`${yLabel} vs ${xLabel} — ${t.stats.measurementCurves(series.curves.length)}`}
+        >
+          <g className="curve-grid">
+            {[0.25, 0.5, 0.75].map((fraction) => (
+              <line
+                key={fraction}
+                x1={0}
+                x2={CURVE_W}
+                y1={CURVE_H * fraction}
+                y2={CURVE_H * fraction}
+              />
+            ))}
+            <rect x={0} y={0} width={CURVE_W} height={CURVE_H} />
+          </g>
+          {series.curves.map((curve, index) => (
+            <g key={curve.external_ref ?? `${curve.component_sn}-${index}`}>
+              <polyline
+                points={geometry.points[index]}
+                className={curve.passed ? "curve-line" : "curve-line failed"}
+              >
+                <title>
+                  {`${curve.local_name ?? curve.component_sn}${curve.measured_at ? ` · ${curve.measured_at.slice(0, 10)}` : ""}${curve.passed ? "" : " · failed"}`}
+                </title>
+              </polyline>
+              {/* Wider invisible twin: an 8px hit target for the 2px line. */}
+              <polyline points={geometry.points[index]} className="curve-hit">
+                <title>
+                  {`${curve.local_name ?? curve.component_sn}${curve.measured_at ? ` · ${curve.measured_at.slice(0, 10)}` : ""}${curve.passed ? "" : " · failed"}`}
+                </title>
+              </polyline>
+            </g>
+          ))}
+          <g className="curve-axis" aria-hidden="true">
+            <text x={-8} y={10} textAnchor="end">
+              {compactNumber(geometry.yMax)}
+            </text>
+            <text x={-8} y={CURVE_H} textAnchor="end">
+              {compactNumber(geometry.yMin)}
+            </text>
+            <text x={0} y={CURVE_H + 18} textAnchor="start">
+              {compactNumber(geometry.xMin)}
+            </text>
+            <text x={CURVE_W} y={CURVE_H + 18} textAnchor="end">
+              {compactNumber(geometry.xMax)}
+            </text>
+            <text x={CURVE_W / 2} y={CURVE_H + 34} textAnchor="middle" className="curve-axis-name">
+              {xLabel}
+            </text>
+            <text
+              x={-42}
+              y={CURVE_H / 2}
+              textAnchor="middle"
+              className="curve-axis-name"
+              transform={`rotate(-90 -42 ${CURVE_H / 2})`}
+            >
+              {yLabel}
+            </text>
+          </g>
+        </svg>
+      </div>
+      {series.truncated && (
+        <p className="state-note">{t.stats.measurementTruncated(series.curves.length)}</p>
+      )}
+    </>
+  );
+}
+
+/** Scalar result: summary tiles plus an equal-width histogram. */
+function ScalarDistribution({ series }: { series: MeasurementSeries }) {
+  const bins = useMemo(() => histogramBins(series.values, 12), [series]);
+  const summary = series.summary;
+  return (
+    <>
+      {summary !== null && (
+        <div className="metric-grid">
+          <Metric label={t.stats.measurementCount} value={String(summary.count)} />
+          <Metric label={t.stats.measurementMedian} value={compactNumber(summary.median)} />
+          <Metric label={t.stats.measurementMean} value={compactNumber(summary.mean)} />
+          <Metric
+            label={t.stats.measurementSpread}
+            value={`${compactNumber(summary.p25)} – ${compactNumber(summary.p75)}`}
+          />
+          <Metric
+            label={t.stats.measurementRange}
+            value={`${compactNumber(summary.min)} – ${compactNumber(summary.max)}`}
+          />
+        </div>
+      )}
+      <h3 className="field-label">{`${t.stats.measurementHistogram} — ${series.result_name ?? series.result_code}`}</h3>
+      <VerticalBars
+        data={bins.map((bin) => ({
+          label: compactNumber((bin.start + bin.end) / 2),
+          value: bin.count,
+        }))}
+        title={series.result_name ?? series.result_code}
+      />
+      {series.truncated && (
+        <p className="state-note">{t.stats.measurementTruncated(series.values.length)}</p>
+      )}
+    </>
   );
 }
 

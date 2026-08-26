@@ -1,7 +1,7 @@
 """Helpers for local test-run evidence mirrored from external sources."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -37,6 +37,14 @@ class EvidenceSyncStats:
         return self.created + self.updated + self.unchanged
 
 
+def _as_naive_utc(value: datetime | None) -> datetime | None:
+    """PostgreSQL returns aware timestamps, records carry naive UTC — the
+    change detector must not report a phantom update for the same instant."""
+    if value is not None and value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
 def _find_existing(session: Session, record: TestRunEvidenceRecord) -> TestRunEvidence | None:
     if record.external_ref:
         return session.scalar(
@@ -50,6 +58,10 @@ def _find_existing(session: Session, record: TestRunEvidenceRecord) -> TestRunEv
             TestRunEvidence.source == record.source,
             TestRunEvidence.component_sn == record.component_sn,
             TestRunEvidence.test_type == record.test_type,
+            # A ref-less record may only ever match a ref-less row: grabbing a
+            # referenced row would overwrite its mirrored detail with the
+            # shallow latest-state payload.
+            TestRunEvidence.external_ref.is_(None),
         )
     )
 
@@ -88,7 +100,7 @@ def upsert_test_run_evidence(
             existing.component_sn != record.component_sn
             or existing.test_type != record.test_type
             or existing.passed != record.passed
-            or existing.measured_at != record.measured_at
+            or _as_naive_utc(existing.measured_at) != _as_naive_utc(record.measured_at)
             or payload_changed
         )
         if changed:
