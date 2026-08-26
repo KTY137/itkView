@@ -50,14 +50,25 @@ def test_settings_default_to_a_database_in_the_data_dir(data_dir, monkeypatch):
     assert settings.pdb_credential_encryption_key is not None
 
 
-def test_settings_keep_the_safe_pdb_default(data_dir, monkeypatch):
+def test_settings_enable_production_reads_by_default(data_dir, monkeypatch):
     for name in ("ITKFLOW_PDB_INSTANCE", "ITKFLOW_ALLOW_PRODUCTION"):
         monkeypatch.delenv(name, raising=False)
     settings = desktop_server.build_settings(data_dir, None)
-    # The packaged app must not become a shortcut around the double opt-in.
-    assert settings.pdb_instance == "test"
-    assert settings.allow_production is False
+    # The desktop bundle is an end-user artifact: production reads work out of
+    # the box (owner decision, docs/09). Nothing contacts the PDB until a
+    # person connects their own access codes, and writes stay dummy_only.
+    assert settings.pdb_instance == "production"
+    assert settings.allow_production is True
     assert settings.pdb_write_scope == "dummy_only"
+
+
+def test_settings_respect_an_explicit_pdb_environment(data_dir, monkeypatch):
+    # A deliberately-set environment always wins over the bundle default.
+    monkeypatch.setenv("ITKFLOW_PDB_INSTANCE", "offline")
+    monkeypatch.delenv("ITKFLOW_ALLOW_PRODUCTION", raising=False)
+    settings = desktop_server.build_settings(data_dir, None)
+    assert settings.pdb_instance == "offline"
+    assert settings.allow_production is False
 
 
 def test_settings_let_the_bundle_fire_its_own_reminders(data_dir, monkeypatch):

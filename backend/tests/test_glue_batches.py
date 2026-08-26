@@ -6,7 +6,7 @@ from authutil import authenticate
 from fastapi.testclient import TestClient
 
 from app.domain.glue import pot_life_state
-from app.models import GlueBatch
+from app.models import GlueBatch, InstituteProfile
 
 
 def make_batch(client: TestClient, **overrides) -> dict:
@@ -78,6 +78,106 @@ def test_glue_batch_list_filters(as_operator: TestClient):
 
     by_q = as_operator.get("/api/glue-batches", params={"q": "pe1"}).json()
     assert [b["batch_no"] for b in by_q] == ["PE1"]
+
+
+def test_glue_batch_list_and_scan_filter_by_parent_institute(
+    as_operator: TestClient, session_factory, tudo: dict
+):
+    with session_factory() as session:
+        other = InstituteProfile(code="FZU", name="FZU", local_name_prefix="FZU-")
+        session.add(other)
+        session.flush()
+        session.add_all(
+            [
+                GlueBatch(
+                    institute_id=tudo["id"],
+                    glue_type="POLARIS_EPOXY",
+                    batch_no="SHARED-BATCH",
+                    pdb_sn="20USEGT0000199",
+                    status="in_use",
+                ),
+                GlueBatch(
+                    institute_id=other.id,
+                    glue_type="TRUE_BLUE",
+                    batch_no="SHARED-BATCH",
+                    pdb_sn="20USEGT0000199",
+                    status="in_use",
+                ),
+            ]
+        )
+        session.commit()
+
+    tudo_rows = as_operator.get(
+        "/api/glue-batches", params={"status": "in_use", "institute": "tudo"}
+    )
+    assert tudo_rows.status_code == 200
+    assert [batch["glue_type"] for batch in tudo_rows.json()] == ["POLARIS_EPOXY"]
+
+    fzu_scan = as_operator.get(
+        "/api/glue-batches/scan",
+        params={"code": "shared-batch", "institute": "fzu"},
+    )
+    assert fzu_scan.status_code == 200
+    assert fzu_scan.json()["glue_type"] == "TRUE_BLUE"
+
+    assert as_operator.get(
+        "/api/glue-batches", params={"institute": "UNKNOWN"}
+    ).json() == []
+    assert (
+        as_operator.get(
+            "/api/glue-batches/scan",
+            params={"code": "SHARED-BATCH", "institute": "UNKNOWN"},
+        ).status_code
+        == 404
+    )
+
+
+def test_glue_batch_mutations_reject_foreign_institute_ids_without_side_effects(
+    client: TestClient, session_factory, tudo: dict
+):
+    authenticate(
+        client,
+        session_factory,
+        role="operator",
+        institute_id=tudo["id"],
+        email="scoped-glue-operator@example.test",
+    )
+    with session_factory() as session:
+        other = InstituteProfile(code="FZU", name="FZU", local_name_prefix="FZU-")
+        session.add(other)
+        session.flush()
+        batch = GlueBatch(
+            institute_id=other.id,
+            glue_type="POLARIS_EPOXY",
+            batch_no="FOREIGN-BATCH",
+            status="new",
+            note="unchanged",
+        )
+        session.add(batch)
+        session.commit()
+        batch_id = batch.id
+
+    requests = [
+        client.patch(
+            f"/api/glue-batches/{batch_id}",
+            json={"status": "empty", "note": "must not change"},
+        ),
+        client.post(f"/api/glue-batches/{batch_id}/mix", json={"pot_life_minutes": 10}),
+        client.post(
+            f"/api/glue-batches/{batch_id}/usage",
+            json={"component_sn": "20USEM00000436", "amount_mg": 12.5},
+        ),
+    ]
+    assert [response.status_code for response in requests] == [403, 403, 403]
+
+    with session_factory() as session:
+        stored = session.get(GlueBatch, batch_id)
+        assert stored is not None
+        assert stored.status == "new"
+        assert stored.note == "unchanged"
+        assert stored.mixed_at is None
+        assert stored.pot_life_minutes is None
+        assert stored.usages == []
 
 
 def test_mix_starts_pot_life_from_profile_default(

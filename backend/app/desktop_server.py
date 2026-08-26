@@ -139,11 +139,21 @@ def build_settings(data_dir: Path, static_dir: Path | None):
         # The bundle ships one process, so the API has to fire due reminders
         # itself — the worker default would mean they never fire here (docs/11).
         "reminder_scheduler": os.environ.get("ITKFLOW_REMINDER_SCHEDULER", "app"),
+        # …and for the same reason it has to submit approved outbox actions
+        # itself; otherwise a pushed change stops at `submitted` forever.
+        "outbox_processor": os.environ.get("ITKFLOW_OUTBOX_PROCESSOR", "app"),
     }
     if static_dir is not None:
         overrides["static_dir"] = str(static_dir)
-    # Everything else (PDB instance, opt-ins, write scope) keeps its documented
-    # default and can only be changed by the environment, deliberately.
+    # The desktop bundle is an end-user artifact: production *reads* are on by
+    # default (owner decision, docs/09) — nothing contacts the PDB until a
+    # person connects their own access codes, and writes stay `dummy_only`
+    # regardless. The environment still wins when either variable is set
+    # explicitly (init kwargs would shadow env, hence the guard).
+    if "ITKFLOW_PDB_INSTANCE" not in os.environ and "ITKFLOW_ALLOW_PRODUCTION" not in os.environ:
+        overrides["pdb_instance"] = "production"
+        overrides["allow_production"] = True
+    # Everything else (write scope in particular) keeps its documented default.
     return Settings(**overrides)
 
 

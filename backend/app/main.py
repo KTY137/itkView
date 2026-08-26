@@ -13,6 +13,7 @@ from app.api import router
 from app.config import Settings, get_settings
 from app.db import Base, ensure_phase0_sqlite_schema, make_engine, make_session_factory
 from app.notifications import make_notifier
+from app.outbox_processor import OutboxProcessor
 from app.pdb_sync import fetch_for_institute
 from app.reminders import ReminderScheduler
 from app.static_spa import mount_spa
@@ -49,6 +50,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.router.add_event_handler("shutdown", app.state.reminder_scheduler.stop)
     else:
         app.state.reminder_scheduler = None
+    # Same split for PDB submission: Compose has `app.run_worker`, the desktop
+    # bundle and the dev launcher have to drain the outbox themselves or a
+    # reviewed action never reaches the PDB (docs/11).
+    if settings.outbox_processor == "app":
+        app.state.outbox_processor = OutboxProcessor(app.state.session_factory, settings)
+        app.router.add_event_handler("startup", app.state.outbox_processor.start)
+        app.router.add_event_handler("shutdown", app.state.outbox_processor.stop)
+    else:
+        app.state.outbox_processor = None
     app.state.sync_job_manager = SyncJobManager(app.state.session_factory, settings)
     app.router.add_event_handler("shutdown", app.state.sync_job_manager.shutdown)
     # FastAPI/Starlette in this environment stores included routers lazily as

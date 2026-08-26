@@ -1,8 +1,10 @@
 """Tests for the jig/tool registry and type-filtered quick-select (docs/07)."""
 
+import pytest
 from authutil import login_as
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth import hash_password
@@ -351,6 +353,85 @@ def test_tool_sync_endpoint_uses_existing_mirror(
     assert client.get("/api/tools/scan", params={"code": "20USERT0607040"}).json()[
         "kind"
     ] == "jig"
+
+
+def test_tool_sync_keeps_identical_component_codes_isolated_per_institute(
+    client: TestClient, session_factory, tudo
+):
+    with session_factory() as session:
+        fzu = InstituteProfile(code="FZU", name="FZU", local_name_prefix="FZU-")
+        session.add(fzu)
+        session.flush()
+        sync_components(session, [tool_component()])
+
+        tudo_profile = session.get(InstituteProfile, tudo["id"])
+        assert tudo_profile is not None
+        first = sync_tools_from_components(session, tudo_profile)
+        session.commit()
+        tudo_tool_id = session.scalar(
+            select(Tool.id).where(
+                Tool.institute_id == tudo_profile.id,
+                Tool.code == "20USERT0605004",
+            )
+        )
+
+        second = sync_tools_from_components(session, fzu)
+        session.commit()
+        rows = list(
+            session.scalars(
+                select(Tool)
+                .where(Tool.code == "20USERT0605004")
+                .order_by(Tool.institute_id)
+            )
+        )
+
+    assert first.created == 1
+    assert second.created == 1
+    assert len(rows) == 2
+    assert {row.institute_id for row in rows} == {tudo["id"], fzu.id}
+    assert next(row.id for row in rows if row.institute_id == tudo["id"]) == tudo_tool_id
+
+    tudo_rows = client.get("/api/tools", params={"institute": "TUDO"}).json()
+    fzu_rows = client.get("/api/tools", params={"institute": "FZU"}).json()
+    assert [row["code"] for row in tudo_rows] == ["20USERT0605004"]
+    assert [row["code"] for row in fzu_rows] == ["20USERT0605004"]
+    assert tudo_rows[0]["id"] != fzu_rows[0]["id"]
+
+
+def test_tool_schema_rejects_duplicate_code_inside_one_institute(session_factory, tudo):
+    with session_factory() as session:
+        session.add_all(
+            [
+                Tool(
+                    institute_id=tudo["id"],
+                    kind="jig",
+                    code="SAME-CODE",
+                    compatible_types=[],
+                ),
+                Tool(
+                    institute_id=tudo["id"],
+                    kind="panel",
+                    code="SAME-CODE",
+                    compatible_types=[],
+                ),
+            ]
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+
+
+def test_tool_sync_endpoint_rejects_cross_institute_operator(
+    client: TestClient, session_factory, tudo
+):
+    with session_factory() as session:
+        session.add(InstituteProfile(code="FZU", name="FZU", local_name_prefix="FZU-"))
+        session.commit()
+    email, password = add_operator(session_factory, tudo["id"])
+    login_as(client, email, password)
+
+    response = client.post("/api/sync/tools/FZU")
+    assert response.status_code == 403
+    assert response.json()["detail"] == "You can only modify data for your own institute."
 
 
 def test_tool_sync_extracts_side_suffixed_r_types(client: TestClient, session_factory, tudo):

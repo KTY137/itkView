@@ -28,7 +28,7 @@ from app.auth import (
     session_expiry,
     verify_password,
 )
-from app.config import Settings
+from app.config import ProductionAccessError, Settings
 from app.domain.glue import pot_life_state
 from app.domain.stages import DEFAULT_STAGE_ORDER
 from app.ingestion import ParsedTestRun, missing_required_properties, parse_payload
@@ -473,6 +473,11 @@ def _pdb_failure_state(error: Exception) -> Literal["invalid", "unreachable"]:
 def _verified_pdb_metadata(request: Request, access_codes: PdbAccessCodes) -> dict:
     try:
         raw = _personal_pdb_gateway(request, access_codes).verify_connection()
+    except ProductionAccessError as exc:
+        # Configuration, not weather: an offline instance (or a refused opt-in)
+        # must not masquerade as a network outage — that confusion is exactly
+        # what the retired test-instance default used to produce.
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     except PdbClientUnavailable:
         raise HTTPException(
             status_code=500,
@@ -1576,11 +1581,32 @@ def _glue_usage_counts(db: Session, batch_ids: list[int]) -> dict[int, int]:
     return {batch_id: count for batch_id, count in rows}
 
 
+def _require_glue_batch_scope(db: Session, user: User, batch: GlueBatch) -> None:
+    """Keep every glue mutation inside the signed-in user's institute.
+
+    Legacy institute-less rows remain manageable by an unbound administrator,
+    but an institute-bound operator may never claim or mutate them implicitly.
+    """
+
+    if batch.institute_id is None:
+        if user.institute_id is not None:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only modify data for your own institute.",
+            )
+        return
+    institute = db.get(InstituteProfile, batch.institute_id)
+    if institute is None:
+        raise HTTPException(status_code=409, detail="The glue batch has no valid institute.")
+    _require_institute_scope(user, institute)
+
+
 @router.get("/api/glue-batches", response_model=list[GlueBatchOut], tags=["glue"])
 def list_glue_batches(
     status: str | None = None,
     glue_type: str | None = None,
     q: str | None = None,
+    institute: str | None = None,
     db: Session = Depends(get_db),
 ) -> list[GlueBatchOut]:
     stmt = select(GlueBatch).order_by(GlueBatch.status, GlueBatch.glue_type, GlueBatch.batch_no)
@@ -1597,26 +1623,42 @@ def list_glue_batches(
                 func.lower(GlueBatch.glue_type).like(needle),
             )
         )
+    if institute:
+        profile = db.scalar(
+            select(InstituteProfile).where(
+                func.lower(InstituteProfile.code) == institute.strip().lower()
+            )
+        )
+        if profile is None:
+            return []
+        stmt = stmt.where(GlueBatch.institute_id == profile.id)
     batches = list(db.scalars(stmt))
     counts = _glue_usage_counts(db, [batch.id for batch in batches])
     return [_glue_batch_out(batch, counts.get(batch.id, 0)) for batch in batches]
 
 
 @router.get("/api/glue-batches/scan", response_model=GlueBatchOut, tags=["glue"])
-def scan_glue_batch(code: str, db: Session = Depends(get_db)) -> GlueBatchOut:
+def scan_glue_batch(
+    code: str,
+    institute: str | None = None,
+    db: Session = Depends(get_db),
+) -> GlueBatchOut:
     """Resolve a scanned value to a batch by PDB serial or batch number,
     case-insensitively (scanner-first, same contract as the tool scan)."""
     needle = code.strip()
     if needle == "":
         raise HTTPException(status_code=422, detail="Empty scan value.")
-    batch = db.scalar(
-        select(GlueBatch).where(
-            or_(
-                func.lower(GlueBatch.pdb_sn) == needle.lower(),
-                func.lower(GlueBatch.batch_no) == needle.lower(),
-            )
+    stmt = select(GlueBatch).where(
+        or_(
+            func.lower(GlueBatch.pdb_sn) == needle.lower(),
+            func.lower(GlueBatch.batch_no) == needle.lower(),
         )
     )
+    if institute:
+        stmt = stmt.join(InstituteProfile).where(
+            func.lower(InstituteProfile.code) == institute.strip().lower()
+        )
+    batch = db.scalar(stmt)
     if batch is None:
         raise HTTPException(status_code=404, detail=f"No glue batch matches scan '{code}'.")
     counts = _glue_usage_counts(db, [batch.id])
@@ -1665,6 +1707,7 @@ def update_glue_batch(
     batch = db.get(GlueBatch, batch_id)
     if batch is None:
         raise HTTPException(status_code=404, detail=f"Glue batch {batch_id} not found.")
+    _require_glue_batch_scope(db, user, batch)
     changed: dict[str, object] = {}
     for field in (
         "batch_no",
@@ -1711,6 +1754,7 @@ def mix_glue_batch(
     batch = db.get(GlueBatch, batch_id)
     if batch is None:
         raise HTTPException(status_code=404, detail=f"Glue batch {batch_id} not found.")
+    _require_glue_batch_scope(db, user, batch)
     if batch.status in ("expired", "empty"):
         raise HTTPException(
             status_code=409, detail=f"Glue batch {batch_id} is {batch.status} — mix a fresh one."
@@ -1776,6 +1820,7 @@ def record_glue_usage(
     batch = db.get(GlueBatch, batch_id)
     if batch is None:
         raise HTTPException(status_code=404, detail=f"Glue batch {batch_id} not found.")
+    _require_glue_batch_scope(db, user, batch)
     if batch.status in ("expired", "empty"):
         raise HTTPException(
             status_code=409,
@@ -2207,6 +2252,7 @@ def sync_tools_for_institute(
     institute = db.scalar(select(InstituteProfile).where(InstituteProfile.code == institute_code))
     if institute is None:
         raise HTTPException(status_code=404, detail=f"Institute '{institute_code}' not found.")
+    _require_institute_scope(user, institute)
 
     stats = sync_tools_from_components(db, institute)
     db.commit()
@@ -3626,7 +3672,11 @@ def list_reminders(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ) -> list[Reminder]:
-    stmt = select(Reminder).order_by(Reminder.active.desc(), Reminder.next_due_at)
+    stmt = (
+        select(Reminder)
+        .where(Reminder.deleted_at.is_(None))
+        .order_by(Reminder.active.desc(), Reminder.next_due_at)
+    )
     if user.institute_id is not None:
         stmt = stmt.where(Reminder.institute_id == user.institute_id)
     if active is not None:
@@ -3673,7 +3723,7 @@ def update_reminder(
     user: User = Depends(require_operator),
 ) -> Reminder:
     reminder = db.get(Reminder, reminder_id)
-    if reminder is None:
+    if reminder is None or reminder.deleted_at is not None:
         raise HTTPException(status_code=404, detail=f"Reminder {reminder_id} not found.")
     if user.institute_id is not None and reminder.institute_id != user.institute_id:
         raise HTTPException(status_code=403, detail="You can only edit your own reminders.")
@@ -3713,7 +3763,7 @@ def delete_reminder(
     user: User = Depends(require_operator),
 ) -> Response:
     reminder = db.get(Reminder, reminder_id)
-    if reminder is None:
+    if reminder is None or reminder.deleted_at is not None:
         raise HTTPException(status_code=404, detail=f"Reminder {reminder_id} not found.")
     if user.institute_id is not None and reminder.institute_id != user.institute_id:
         raise HTTPException(status_code=403, detail="You can only delete your own reminders.")
@@ -3726,7 +3776,11 @@ def delete_reminder(
             detail={"title": reminder.title},
         )
     )
-    db.delete(reminder)
+    # A fired occurrence is a durable acknowledgement task. Hiding the
+    # schedule must not orphan or erase that operational history, and an open
+    # occurrence must still be able to escalate with its original title.
+    reminder.active = False
+    reminder.deleted_at = utcnow()
     db.commit()
     return Response(status_code=204)
 

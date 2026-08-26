@@ -57,6 +57,16 @@ def test_heartbeat_freshness_includes_the_boundary(client, session_factory):
             OUTBOX_WORKER,
             now=NOW - timedelta(seconds=60),
         )
+        job = SyncJob(
+            kind="components",
+            institute_code="TUDO",
+            status="running",
+            phase="fetching",
+            message="fetching",
+            requested_by="operator@example.org",
+            updated_at=NOW - timedelta(seconds=60),
+        )
+        session.add(job)
         session.commit()
         snapshot = collect_ops_health(session, settings, institute=None, now=NOW)
         worker = next(row for row in snapshot["heartbeats"] if row["service"] == OUTBOX_WORKER)
@@ -66,14 +76,17 @@ def test_heartbeat_freshness_includes_the_boundary(client, session_factory):
         assert worker["status"] == "healthy"
         assert worker["age_seconds"] == 60
         assert scheduler["status"] == "disabled"
+        assert snapshot["sync"]["stale_active"] == 0
 
         row = session.get(ServiceHeartbeat, OUTBOX_WORKER)
         assert row is not None
         row.last_seen_at = NOW - timedelta(seconds=61)
+        job.updated_at = NOW - timedelta(seconds=61)
         session.commit()
         snapshot = collect_ops_health(session, settings, institute=None, now=NOW)
         worker = next(row for row in snapshot["heartbeats"] if row["service"] == OUTBOX_WORKER)
         assert worker["status"] == "stale"
+        assert snapshot["sync"]["stale_active"] == 1
         assert snapshot["status"] == "critical"
 
 
@@ -162,7 +175,7 @@ def _seed_tenant_ops(session, institute: InstituteProfile, *, suffix: str, issue
     session.add(
         IngestFile(
             filename=f"result-{suffix}.json",
-            sha256=suffix * 64,
+            sha256=suffix[-1] * 64,
             size_bytes=2,
             status="triage" if issues else "received",
             component_sn=component.sn,

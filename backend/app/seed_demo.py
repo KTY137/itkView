@@ -89,7 +89,12 @@ def seed(database_url: str, fixture_path: Path = DEMO_FIXTURE_PATH) -> SyncStats
         tudo = session.scalar(select(InstituteProfile).where(InstituteProfile.code == "TUDO"))
         if tudo is not None:
             for spec in DEMO_TOOLS:
-                exists = session.scalar(select(Tool).where(Tool.code == spec["code"]))
+                exists = session.scalar(
+                    select(Tool).where(
+                        Tool.institute_id == tudo.id,
+                        Tool.code == spec["code"],
+                    )
+                )
                 if exists is None:
                     session.add(Tool(institute_id=tudo.id, **spec))
 

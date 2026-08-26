@@ -18,7 +18,12 @@ import type {
   ToolUpdateBody,
 } from "../api";
 import { useAuth } from "../auth";
-import { makeDemoTools, scanDemoTool } from "../demoData";
+import {
+  makeDemoTools,
+  removeDemoTool,
+  resetDemoTools,
+  upsertDemoTool,
+} from "../demoData";
 import { t } from "../i18n";
 
 const STATUSES: ToolStatus[] = ["active", "flagged", "blacklisted"];
@@ -153,9 +158,8 @@ export default function ToolsScreen() {
 
   function replaceTool(next: Tool) {
     if (demo) {
-      demoStore.current = demoStore.current.some((tool) => tool.id === next.id)
-        ? demoStore.current.map((tool) => (tool.id === next.id ? next : tool))
-        : [...demoStore.current, next];
+      upsertDemoTool(next);
+      demoStore.current = makeDemoTools();
       setTools(filterToolRows(demoStore.current, kind, fits, status));
       setScanned((current) => (current?.id === next.id ? next : current));
       return;
@@ -179,7 +183,12 @@ export default function ToolsScreen() {
     setScanMiss(null);
     try {
       const tool = demo
-        ? scanDemoTool(code)
+        ? (demoStore.current.find(
+            (item) =>
+              item.code.toUpperCase() === code.toUpperCase() ||
+              (item.rfid ?? "").toUpperCase() === code.toUpperCase() ||
+              (item.label ?? "").toUpperCase() === code.toUpperCase(),
+          ) ?? null)
         : await scanTool(code, selectedInstitute || undefined);
       if (tool === null) throw new Error(t.tools.scanNotFound(code));
       setScanned(tool);
@@ -203,6 +212,7 @@ export default function ToolsScreen() {
     setSyncNotice(null);
     try {
       if (demo) {
+        resetDemoTools();
         demoStore.current = makeDemoTools();
         setTools(filterToolRows(demoStore.current, kind, fits, status));
         setSyncNotice(t.tools.demoSyncComplete);
@@ -285,7 +295,8 @@ export default function ToolsScreen() {
     try {
       if (!demo) await deleteTool(tool.id);
       if (demo) {
-        demoStore.current = demoStore.current.filter((item) => item.id !== tool.id);
+        removeDemoTool(tool.id);
+        demoStore.current = makeDemoTools();
       }
       setTools((current) => current.filter((item) => item.id !== tool.id));
       setScanned((current) => (current?.id === tool.id ? null : current));

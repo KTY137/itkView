@@ -440,6 +440,29 @@ fire in the `app` case; the worker uses its own `ITKFLOW_WORKER_POLL_SECONDS`.
 For a manual pass: `python -m app.run_worker --once` performs one outbox pass
 and one reminder tick; `python -m app.run_worker` keeps polling.
 
+### Which process submits the outbox
+
+The same split applies to PDB submission, and for the same reason:
+`ITKFLOW_OUTBOX_PROCESSOR` selects the draining process.
+
+| Value | Drains the outbox | Used by |
+|---|---|---|
+| `worker` (default) | the standalone `app.run_worker` service | Compose, which runs that process |
+| `app` | the API process, on a background task (`app.outbox_processor`) | the desktop bundle, which runs no worker |
+| `off` | nobody | tests |
+
+Without this, a packaged install could review and push a change up to
+`submitted` — and then nothing would ever submit it. The staged action looked
+pushed while nothing had reached the collaboration, which is the worst possible
+failure mode for a production record.
+
+The safety model is unchanged: the in-process drain never receives
+deployment-wide service credentials, so every write runs as the PDB identity
+bound when the action was approved (ADR 004), and `pdb_write_scope=dummy_only`
+still confines writes to itkFlow-registered DUMMY components (ADR 003).
+Reminders stay with `ReminderScheduler` in this shape, so they are not ticked
+twice.
+
 ### Reminder and notification API
 
 | Method and path | Purpose |

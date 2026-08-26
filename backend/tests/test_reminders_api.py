@@ -70,6 +70,57 @@ def test_reminder_writes_require_operator(client: TestClient, as_viewer: TestCli
     assert response.status_code == 403
 
 
+def test_deleting_schedule_preserves_open_occurrence(
+    client: TestClient, session_factory, tudo: dict
+):
+    authenticate(
+        client,
+        session_factory,
+        role="operator",
+        institute_id=tudo["id"],
+        email="durable-task@example.org",
+    )
+    due_at = datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc)
+    with session_factory() as session:
+        reminder = Reminder(
+            title="Durable task",
+            schedule_kind="once",
+            next_due_at=due_at,
+            created_by="durable-task@example.org",
+            institute_id=tudo["id"],
+        )
+        session.add(reminder)
+        session.flush()
+        occurrence = ReminderOccurrence(
+            reminder_id=reminder.id,
+            institute_id=tudo["id"],
+            due_at=due_at,
+            fired_at=due_at,
+        )
+        session.add(occurrence)
+        session.commit()
+        reminder_id = reminder.id
+        occurrence_id = occurrence.id
+
+    deleted = client.delete(f"/api/reminders/{reminder_id}")
+    assert deleted.status_code == 204, deleted.text
+    assert client.get("/api/reminders").json() == []
+    open_tasks = client.get(
+        "/api/reminder-occurrences",
+        params={"open_only": "true"},
+    )
+    assert open_tasks.status_code == 200, open_tasks.text
+    assert [item["id"] for item in open_tasks.json()] == [occurrence_id]
+
+    with session_factory() as session:
+        stored_reminder = session.get(Reminder, reminder_id)
+        stored_occurrence = session.get(ReminderOccurrence, occurrence_id)
+        assert stored_reminder is not None
+        assert stored_reminder.deleted_at is not None
+        assert stored_reminder.active is False
+        assert stored_occurrence is not None
+
+
 def test_channels_endpoint_lists_names_without_urls(
     client: TestClient, session_factory, tudo: dict
 ):

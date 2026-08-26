@@ -208,6 +208,7 @@ def collect_ops_health(
         select(func.count())
         .select_from(ReminderOccurrence)
         .where(
+            ReminderOccurrence.acknowledged_at.is_(None),
             or_(
                 ReminderOccurrence.delivery_status == "failed",
                 ReminderOccurrence.escalation_error.is_not(None),

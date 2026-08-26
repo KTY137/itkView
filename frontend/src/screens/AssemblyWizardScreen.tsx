@@ -31,6 +31,7 @@ import { formatDuration, t } from "../i18n";
 import { describeComponent, stageLabel } from "../ui";
 
 type ScanRole = "parent" | "child";
+type ResourceScanRole = "tool" | "glue";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -81,7 +82,25 @@ export default function AssemblyWizardScreen({
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [staging, setStaging] = useState(false);
   const componentScanRequest = useRef<Record<ScanRole, number>>({ parent: 0, child: 0 });
+  const resourceScanRequest = useRef<Record<ResourceScanRole, number>>({ tool: 0, glue: 0 });
+  const resourceScanController = useRef<Record<ResourceScanRole, AbortController | null>>({
+    tool: null,
+    glue: null,
+  });
   const previewRequest = useRef(0);
+
+  useEffect(
+    () => () => {
+      componentScanRequest.current.parent += 1;
+      componentScanRequest.current.child += 1;
+      resourceScanRequest.current.tool += 1;
+      resourceScanRequest.current.glue += 1;
+      resourceScanController.current.tool?.abort();
+      resourceScanController.current.glue?.abort();
+      previewRequest.current += 1;
+    },
+    [],
+  );
 
   useEffect(() => {
     setPreview(null);
@@ -116,7 +135,10 @@ export default function AssemblyWizardScreen({
         },
         controller.signal,
       ),
-      getGlueBatches({ status: "in_use" }, controller.signal),
+      getGlueBatches(
+        { status: "in_use", institute: parent.institute_code },
+        controller.signal,
+      ),
     ])
       .then(([loadedTools, loadedGlue]) => {
         setTools(loadedTools);
@@ -138,10 +160,39 @@ export default function AssemblyWizardScreen({
     setPreviewing(false);
   }
 
+  function invalidateResourceScan(role: ResourceScanRole) {
+    resourceScanRequest.current[role] += 1;
+    resourceScanController.current[role]?.abort();
+    resourceScanController.current[role] = null;
+  }
+
+  function invalidateParentDependents() {
+    componentScanRequest.current.child += 1;
+    invalidateResourceScan("tool");
+    invalidateResourceScan("glue");
+  }
+
+  function clearParentDependents() {
+    setChild(null);
+    setChildText("");
+    setToolScan("");
+    setGlueScan("");
+    setToolId("");
+    setGlueBatchId("");
+  }
+
   async function resolveComponent(role: ScanRole) {
     const raw = (role === "parent" ? parentText : childText).trim();
     if (raw === "") return;
     const requestId = ++componentScanRequest.current[role];
+    if (role === "parent") {
+      invalidateParentDependents();
+      clearParentDependents();
+      setParent(null);
+    } else {
+      setChild(null);
+    }
+    clearPreview();
     setScanBusy(role);
     setScanError(null);
     try {
@@ -156,13 +207,10 @@ export default function AssemblyWizardScreen({
       if (role === "parent") {
         setParent(component);
         setParentText(component.sn);
-        setChild(null);
-        setChildText("");
       } else {
         setChild(component);
         setChildText(component.sn);
       }
-      clearPreview();
     } catch (error: unknown) {
       if (requestId !== componentScanRequest.current[role]) return;
       setScanError(
@@ -184,9 +232,16 @@ export default function AssemblyWizardScreen({
     event.preventDefault();
     const value = toolScan.trim();
     if (value === "" || parent === null) return;
+    invalidateResourceScan("tool");
+    const requestId = resourceScanRequest.current.tool;
+    const controller = new AbortController();
+    resourceScanController.current.tool = controller;
     setScanError(null);
     try {
-      const tool = demo ? scanDemoTool(value) : await scanTool(value, parent.institute_code);
+      const tool = demo
+        ? scanDemoTool(value)
+        : await scanTool(value, parent.institute_code, controller.signal);
+      if (requestId !== resourceScanRequest.current.tool) return;
       if (tool === null) throw new Error(t.tools.scanNotFound(value));
       if (tool.status !== "active" || !tool.compatible_types.includes(parent.type_code)) {
         setScanError(t.assembly.toolScanRejected(tool.code, parent.type_code));
@@ -199,14 +254,23 @@ export default function AssemblyWizardScreen({
       setToolScan("");
       clearPreview();
     } catch (error: unknown) {
+      if (requestId !== resourceScanRequest.current.tool || controller.signal.aborted) return;
       setScanError(errorMessage(error));
+    } finally {
+      if (requestId === resourceScanRequest.current.tool) {
+        resourceScanController.current.tool = null;
+      }
     }
   }
 
   async function handleGlueScan(event: FormEvent) {
     event.preventDefault();
     const value = glueScan.trim();
-    if (value === "") return;
+    if (value === "" || parent === null) return;
+    invalidateResourceScan("glue");
+    const requestId = resourceScanRequest.current.glue;
+    const controller = new AbortController();
+    resourceScanController.current.glue = controller;
     setScanError(null);
     try {
       const batch = demo
@@ -215,7 +279,8 @@ export default function AssemblyWizardScreen({
               item.batch_no.toUpperCase() === value.toUpperCase() ||
               (item.pdb_sn ?? "").toUpperCase() === value.toUpperCase(),
           ) ?? null)
-        : await scanGlueBatch(value);
+        : await scanGlueBatch(value, parent.institute_code, controller.signal);
+      if (requestId !== resourceScanRequest.current.glue) return;
       if (batch === null) throw new Error(t.assembly.glueScanNotFound(value));
       if (batch.status !== "in_use" || batch.pot_life_expired) {
         setScanError(t.assembly.glueScanRejected(batch.batch_no));
@@ -228,7 +293,12 @@ export default function AssemblyWizardScreen({
       setGlueScan("");
       clearPreview();
     } catch (error: unknown) {
+      if (requestId !== resourceScanRequest.current.glue || controller.signal.aborted) return;
       setScanError(errorMessage(error));
+    } finally {
+      if (requestId === resourceScanRequest.current.glue) {
+        resourceScanController.current.glue = null;
+      }
     }
   }
 
@@ -326,11 +396,11 @@ export default function AssemblyWizardScreen({
                 value={parentText}
                 onChange={(event) => {
                   componentScanRequest.current.parent += 1;
+                  invalidateParentDependents();
                   setScanBusy(null);
                   setParentText(event.target.value);
                   setParent(null);
-                  setChildText("");
-                  setChild(null);
+                  clearParentDependents();
                   clearPreview();
                 }}
                 placeholder={t.assembly.parentPlaceholder}
@@ -398,6 +468,7 @@ export default function AssemblyWizardScreen({
             className="select-input"
             value={toolId}
             onChange={(event) => {
+              invalidateResourceScan("tool");
               setToolId(event.target.value);
               clearPreview();
             }}
@@ -417,7 +488,10 @@ export default function AssemblyWizardScreen({
             <input
               className="search-input mono"
               value={toolScan}
-              onChange={(event) => setToolScan(event.target.value)}
+              onChange={(event) => {
+                invalidateResourceScan("tool");
+                setToolScan(event.target.value);
+              }}
               placeholder={t.assembly.toolScanPlaceholder}
               disabled={parent === null}
               aria-label={t.assembly.toolScanLabel}
@@ -435,6 +509,7 @@ export default function AssemblyWizardScreen({
             className="select-input"
             value={glueBatchId}
             onChange={(event) => {
+              invalidateResourceScan("glue");
               setGlueBatchId(event.target.value);
               clearPreview();
             }}
@@ -460,7 +535,10 @@ export default function AssemblyWizardScreen({
             <input
               className="search-input mono"
               value={glueScan}
-              onChange={(event) => setGlueScan(event.target.value)}
+              onChange={(event) => {
+                invalidateResourceScan("glue");
+                setGlueScan(event.target.value);
+              }}
               placeholder={t.assembly.glueScanPlaceholder}
               disabled={parent === null}
               aria-label={t.assembly.glueScanLabel}

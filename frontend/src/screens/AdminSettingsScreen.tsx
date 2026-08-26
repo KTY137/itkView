@@ -18,6 +18,10 @@ type ChannelDraft = {
   key: string;
   originalName: string | null;
   originalKind: NotificationChannelKind | null;
+  originalSmtpHost: string | null;
+  originalSmtpPort: string | null;
+  originalSmtpSecurity: "ssl" | "starttls" | null;
+  originalSmtpUsername: string | null;
   name: string;
   kind: NotificationChannelKind;
   url: string;
@@ -237,11 +241,23 @@ function channelRows(value: unknown): ChannelDraft[] {
     ) return [];
     const rawUrl = config.url;
     const channel = typeof config.channel === "string" ? config.channel : "";
+    const smtpHost = typeof config.smtp_host === "string" ? config.smtp_host : "";
+    const smtpPort =
+      typeof config.smtp_port === "number" || typeof config.smtp_port === "string"
+        ? String(config.smtp_port)
+        : "587";
+    const smtpSecurity = config.smtp_security === "ssl" ? "ssl" : "starttls";
+    const smtpUsername =
+      typeof config.smtp_username === "string" ? config.smtp_username : "";
     return [
       {
         key: rowId("admin-channel"),
         originalName: name,
         originalKind: rawKind,
+        originalSmtpHost: rawKind === "email" ? smtpHost : null,
+        originalSmtpPort: rawKind === "email" ? smtpPort : null,
+        originalSmtpSecurity: rawKind === "email" ? smtpSecurity : null,
+        originalSmtpUsername: rawKind === "email" ? smtpUsername : null,
         name,
         kind: rawKind,
         // The API promises a masked value. Be defensive if an older API ever
@@ -250,14 +266,10 @@ function channelRows(value: unknown): ChannelDraft[] {
         hasStoredSecret: typeof rawUrl === "string" && rawUrl.trim() !== "",
         channel,
         chatId: typeof config.chat_id === "string" ? config.chat_id : "",
-        smtpHost: typeof config.smtp_host === "string" ? config.smtp_host : "",
-        smtpPort:
-          typeof config.smtp_port === "number" || typeof config.smtp_port === "string"
-            ? String(config.smtp_port)
-            : "587",
-        smtpSecurity: config.smtp_security === "ssl" ? "ssl" : "starttls",
-        smtpUsername:
-          typeof config.smtp_username === "string" ? config.smtp_username : "",
+        smtpHost,
+        smtpPort,
+        smtpSecurity,
+        smtpUsername,
         smtpPassword: "",
         hasStoredSmtpPassword:
           typeof config.smtp_password === "string" && config.smtp_password.trim() !== "",
@@ -481,7 +493,12 @@ function validateAndBuildUpdate(
       } else if (
         row.hasStoredSmtpPassword &&
         row.originalName === channelName &&
-        row.originalKind === "email"
+        row.originalKind === "email" &&
+        username !== "" &&
+        row.originalSmtpHost === host &&
+        row.originalSmtpPort === String(port) &&
+        row.originalSmtpSecurity === row.smtpSecurity &&
+        row.originalSmtpUsername === username
       ) {
         password = MASKED_SECRET;
       }
@@ -941,6 +958,10 @@ export default function AdminSettingsScreen({
                         key: rowId("admin-channel"),
                         originalName: null,
                         originalKind: null,
+                        originalSmtpHost: null,
+                        originalSmtpPort: null,
+                        originalSmtpSecurity: null,
+                        originalSmtpUsername: null,
                         name: "",
                         kind: "mattermost",
                         url: "",
@@ -1200,6 +1221,11 @@ export default function AdminSettingsScreen({
                           />
                           {row.hasStoredSmtpPassword &&
                             row.originalKind === "email" &&
+                            row.smtpUsername.trim() !== "" &&
+                            row.originalSmtpHost === row.smtpHost.trim() &&
+                            row.originalSmtpPort === String(Number(row.smtpPort)) &&
+                            row.originalSmtpSecurity === row.smtpSecurity &&
+                            row.originalSmtpUsername === row.smtpUsername.trim() &&
                             row.smtpPassword === "" && (
                             <span className="muted admin-settings-secret-hint">
                               {labels.channelStoredSecretHint}

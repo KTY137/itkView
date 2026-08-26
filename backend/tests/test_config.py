@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import ProductionAccessError, Settings
+from app.pdb_credentials import PdbAccessCodes
 from app.pdb_gateway import PdbGateway
 
 
@@ -10,11 +11,19 @@ def make_settings(**kwargs) -> Settings:
     return Settings(_env_file=None, **kwargs)
 
 
-def test_default_is_the_pdb_test_instance():
+def test_default_is_offline_and_reaches_no_pdb():
     settings = make_settings()
-    assert settings.pdb_instance == "test"
+    assert settings.pdb_instance == "offline"
     assert settings.allow_production is False
-    assert "itkpd-test" in settings.pdb_ui_url
+    with pytest.raises(ProductionAccessError, match="[Nn]o PDB"):
+        _ = settings.pdb_ui_url
+
+
+def test_the_retired_test_instance_is_gone():
+    # The historical PDB test service no longer exists; "test" is not a valid
+    # configuration anymore and must fail loudly instead of pretending.
+    with pytest.raises(ValidationError):
+        make_settings(pdb_instance="test")
 
 
 def test_production_without_explicit_opt_in_is_refused():
@@ -30,21 +39,21 @@ def test_production_with_double_opt_in_is_possible():
         _ = settings.pdb_ui_url
 
 
-def test_test_api_url_must_not_be_a_production_host():
-    with pytest.raises(ProductionAccessError, match="production host"):
-        make_settings(pdb_test_api_url="https://itkpd.unicornuniversity.net/")
-
-
-def test_test_api_url_must_use_https():
-    with pytest.raises(ProductionAccessError, match="https"):
-        make_settings(pdb_test_api_url="http://somewhere.example.org/")
-
-
 def test_gateway_refuses_unconfigured_client():
     gateway = PdbGateway(make_settings())
-    assert gateway.instance == "test"
+    assert gateway.instance == "offline"
     assert gateway.is_configured is False
     with pytest.raises(ProductionAccessError, match="access codes"):
+        gateway.client()
+
+
+def test_gateway_refuses_a_client_while_offline_even_with_codes():
+    gateway = PdbGateway(
+        make_settings(),
+        access_codes=PdbAccessCodes("offline-code-1", "offline-code-2"),
+    )
+    assert gateway.is_configured is True
+    with pytest.raises(ProductionAccessError, match="[Nn]o PDB"):
         gateway.client()
 
 
@@ -67,6 +76,13 @@ def test_gateway_double_checks_the_production_guard():
     object.__setattr__(settings, "pdb_instance", "production")
     with pytest.raises(ProductionAccessError):
         PdbGateway(settings)
+
+
+def test_sync_page_attempts_are_configurable_and_bounded():
+    assert make_settings().sync_page_max_attempts == 3
+    assert make_settings(sync_page_max_attempts=7).sync_page_max_attempts == 7
+    with pytest.raises(ValidationError):
+        make_settings(sync_page_max_attempts=0)
 
 
 def test_ops_heartbeat_threshold_is_local_and_bounded():

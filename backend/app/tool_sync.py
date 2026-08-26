@@ -98,7 +98,12 @@ def sync_tools_from_components(session: Session, institute: InstituteProfile) ->
     desired_codes = sorted({desired["code"] for desired in desired_rows})
     for offset in range(0, len(desired_codes), 500):
         code_chunk = desired_codes[offset : offset + 500]
-        for tool in session.scalars(select(Tool).where(Tool.code.in_(code_chunk))):
+        for tool in session.scalars(
+            select(Tool).where(
+                Tool.institute_id == institute.id,
+                Tool.code.in_(code_chunk),
+            )
+        ):
             existing_by_code[tool.code] = tool
 
     created = updated = unchanged = 0

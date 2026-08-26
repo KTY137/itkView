@@ -216,24 +216,68 @@ def fetch_for_institute(
         raise PdbSyncUnavailable("The personal PDB connection could not be opened.") from None
 
     profile_filters = (institute.settings or {}).get("pdb_filters") or {}
-    data = {
-        "filterMap": {
-            **DEFAULT_PDB_FILTERS,
-            **profile_filters,
-            # Deleted/uninitialised components cannot enter the mirror. Asking
-            # the PDB for ready rows only avoids transferring them, while the
-            # mapper keeps its defensive state check for malformed responses.
-            "state": "ready",
-            # Institute scoping is never overridable from the profile.
-            "institute": [institute.code],
-            "currentLocation": [institute.code],
-        },
-        # Match components at the institute OR owned by it (as zFlow did).
-        "useOrInLocationSearch": True,
-        "outputType": "full",  # includes parents, needed for assembly links
+    base_filters = {
+        **DEFAULT_PDB_FILTERS,
+        **profile_filters,
+        # Deleted/uninitialised components cannot enter the mirror. Asking
+        # the PDB for ready rows only avoids transferring them, while the
+        # mapper keeps its defensive state check for malformed responses.
+        "state": "ready",
     }
+    # "Owned by us" and "located here" are fetched as two separate listings and
+    # merged locally, rather than through the server's `useOrInLocationSearch`.
+    # Measured against production: the OR search paginates inconsistently — a
+    # TUDO listing reported 3799 components and returned 3799 rows, but only
+    # 2539 distinct ones, silently omitting the rest (every jig/tool among
+    # them). Each single-scope listing came back complete and duplicate-free.
+    scopes = (
+        # Institute scoping is never overridable from the profile.
+        {"institute": [institute.code]},
+        {"currentLocation": [institute.code]},
+    )
     try:
-        payloads = _fetch_pages(client, data, progress)
+        payloads: list[dict] = []
+        seen_serials: set[str] = set()
+        fetched_before = 0
+        for scope in scopes:
+            scope_progress: SyncProgress | None = None
+            if progress is not None:
+                # Two listings, one progress bar: offset the second scope's
+                # counter instead of sending the UI back to zero halfway
+                # through, which reads as a stalled or restarted job. The
+                # reported total grows when the second listing announces its
+                # own size — that number cannot be known before asking.
+                def scope_progress(  # noqa: B023 — base pinned per iteration
+                    phase: str,
+                    current: int,
+                    total: int | None,
+                    message: str | None = None,
+                    _base: int = fetched_before,
+                ) -> None:
+                    progress(
+                        phase,
+                        _base + current,
+                        None if total is None else _base + total,
+                        message,
+                    )
+
+            scope_payloads = _fetch_pages(
+                client,
+                {
+                    "filterMap": {**base_filters, **scope},
+                    "outputType": "full",  # includes parents, for assembly links
+                },
+                scope_progress,
+                max_attempts=settings.sync_page_max_attempts,
+            )
+            fetched_before += len(scope_payloads)
+            for payload in scope_payloads:
+                serial = payload.get("serialNumber")
+                if isinstance(serial, str) and serial:
+                    if serial in seen_serials:
+                        continue  # owned *and* located here: keep one copy
+                    seen_serials.add(serial)
+                payloads.append(payload)
         # Parents reference components by internal object id; resolving those
         # links to serial numbers needs the whole batch mapped up front.
         id_to_sn = build_id_to_sn(payloads)
@@ -259,6 +303,8 @@ def _fetch_pages(
     client: Any,
     data: dict[str, Any],
     progress: SyncProgress | None = None,
+    *,
+    max_attempts: int | None = None,
 ) -> list[dict]:
     """Fetch ``listComponents`` explicitly, one bounded page at a time.
 
@@ -268,6 +314,7 @@ def _fetch_pages(
     a short result is rejected before the caller can prune the mirror.
     """
 
+    attempt_budget = max_attempts or PDB_PAGE_MAX_ATTEMPTS
     payloads: list[dict] = []
     expected: int | None = None
     frozen_page_size: int | None = None
@@ -294,7 +341,7 @@ def _fetch_pages(
                     len(payloads),
                     page_total,
                     f"PDB page {page_number} request failed; retrying attempt "
-                    f"{failed_attempt + 1} of {PDB_PAGE_MAX_ATTEMPTS}.",
+                    f"{failed_attempt + 1} of {attempt_budget}.",
                 )
 
         response = _request_page(
@@ -302,6 +349,7 @@ def _fetch_pages(
             page_request,
             page_index,
             retry_progress=retry_progress,
+            max_attempts=attempt_budget,
         )
         items, page_info, terminal_list = _extract_page(response)
 
@@ -381,6 +429,22 @@ def _fetch_pages(
             f"Paginated component listing incomplete: fetched {len(payloads)} "
             f"of {expected} reported components; refusing a truncated sync."
         )
+
+    # Row count alone is not proof of completeness: a live listing returned the
+    # promised number of rows while repeating some components and omitting
+    # others, which passed every check above and silently truncated the mirror.
+    serials = [
+        payload.get("serialNumber")
+        for payload in payloads
+        if isinstance(payload.get("serialNumber"), str) and payload.get("serialNumber")
+    ]
+    repeated = len(serials) - len(set(serials))
+    if repeated:
+        raise PdbSyncUnavailable(
+            f"Paginated component listing returned {repeated} duplicate "
+            f"component rows; the same number of components is therefore "
+            f"missing. Refusing an incomplete sync."
+        )
     return payloads
 
 
@@ -390,11 +454,13 @@ def _request_page(
     page_index: int,
     *,
     retry_progress: Callable[[int, Exception], None] | None = None,
+    max_attempts: int | None = None,
 ) -> Any:
     """Request one read-only page with bounded exponential retry."""
 
+    attempt_budget = max_attempts or PDB_PAGE_MAX_ATTEMPTS
     last_error: Exception | None = None
-    for attempt in range(1, PDB_PAGE_MAX_ATTEMPTS + 1):
+    for attempt in range(1, attempt_budget + 1):
         try:
             return client.get(
                 "listComponents",
@@ -403,7 +469,7 @@ def _request_page(
             )
         except Exception as exc:  # itkdb wraps requests errors in several types
             last_error = exc
-            if attempt < PDB_PAGE_MAX_ATTEMPTS and _is_transient_page_error(exc):
+            if attempt < attempt_budget and _is_transient_page_error(exc):
                 # Keep the durable job heartbeat fresh while a slow PDB page is
                 # retried. The UI can then distinguish a retry from a frozen
                 # worker even though no new component has completed yet.

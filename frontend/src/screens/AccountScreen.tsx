@@ -33,7 +33,10 @@ function connectionError(error: unknown, fallback: string): string {
   if (error instanceof ApiError) {
     if (error.status === 422) return t.account.invalidCredentials;
     if (error.status === 500) return t.account.pdbClientUnavailable;
-    if (error.status === 503 || error.isNetwork) return t.account.pdbUnavailable;
+    // A 503 carries an honest server-side reason (e.g. "no PDB configured on
+    // this deployment") — prefer it over the generic network hint.
+    if (error.status === 503) return error.detail ?? t.account.pdbUnavailable;
+    if (error.isNetwork) return t.account.pdbUnavailable;
     if (error.status === 409) return error.detail ?? t.account.notConfigured;
   }
   return `${fallback}: ${errorMessage(error)}`;

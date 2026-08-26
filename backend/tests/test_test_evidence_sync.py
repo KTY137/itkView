@@ -209,3 +209,142 @@ def test_institute_evidence_sync_covers_only_live_modules(
     with session_factory() as session:
         assert satisfied_test_results(session, "20USEM00000001")["MODULE_BOW"] is True
         assert satisfied_test_results(session, "20USEM00000002")["MODULE_BOW"] is True
+
+
+class _CountingDetailClient:
+    """getComponent plus a per-run getTestRun counter for incremental tests."""
+
+    def __init__(self, component):
+        self._component = component
+        self.detail_calls = []
+
+    def get(self, action, json=None):
+        if action == "getComponent":
+            return self._component
+        if action == "getTestRun":
+            self.detail_calls.append(json["testRun"])
+            return {"runNumber": f"run-{json['testRun']}"}
+        raise AssertionError(f"unexpected request {action}")
+
+
+def _known_flat(records):
+    from app.pdb_test_evidence import flat_fingerprint
+
+    return {
+        r.external_ref: flat_fingerprint(
+            passed=r.passed,
+            measured_at=r.measured_at,
+            state=(r.payload or {}).get("state"),
+            problems=(r.payload or {}).get("problems"),
+        )
+        for r in records
+    }
+
+
+def test_detail_fetch_skips_runs_whose_flat_state_is_already_mirrored():
+    gateway = _FakeGateway(component=COMPONENT)
+    counting = _CountingDetailClient(COMPONENT)
+    gateway._client = counting
+
+    first = fetch_test_run_evidence(gateway, "20USEM00000001", with_detail=True)
+    assert sorted(counting.detail_calls) == ["R1", "R2", "R3"]
+    assert all(r.payload.get("detail_synced") is True for r in first)
+    assert all(not r.detail_omitted for r in first)
+
+    counting.detail_calls.clear()
+    second = fetch_test_run_evidence(
+        gateway, "20USEM00000001", with_detail=True, known_flat=_known_flat(first)
+    )
+    assert counting.detail_calls == []
+    assert {r.external_ref for r in second} == {"R1", "R2", "R3"}
+    assert all(r.detail_omitted for r in second)
+
+
+def test_detail_fetch_refetches_a_run_whose_flat_state_changed():
+    import copy
+
+    gateway = _FakeGateway(component=COMPONENT)
+    counting = _CountingDetailClient(COMPONENT)
+    gateway._client = counting
+    first = fetch_test_run_evidence(gateway, "20USEM00000001", with_detail=True)
+
+    changed = copy.deepcopy(COMPONENT)
+    changed["tests"][0]["testRuns"][0]["passed"] = False  # R1 flips
+    counting._component = changed
+    counting.detail_calls.clear()
+
+    second = fetch_test_run_evidence(
+        gateway, "20USEM00000001", with_detail=True, known_flat=_known_flat(first)
+    )
+    assert counting.detail_calls == ["R1"]
+    by_ref = {r.external_ref: r for r in second}
+    assert not by_ref["R1"].detail_omitted
+    assert by_ref["R2"].detail_omitted and by_ref["R3"].detail_omitted
+
+
+def test_upsert_keeps_the_mirrored_detail_for_detail_omitted_records(client, session_factory):
+    from datetime import datetime
+
+    from app.test_run_evidence import TestRunEvidenceRecord, upsert_test_run_evidence
+
+    measured = datetime(2026, 2, 8, 15, 15, 39)
+    detailed = TestRunEvidenceRecord(
+        component_sn="20USEM00000001",
+        test_type="MODULE_METROLOGY",
+        passed=True,
+        external_ref="R1",
+        measured_at=measured,
+        payload={"state": "ready", "problems": False, "results": {"BOW": 1}, "detail_synced": True},
+    )
+    with session_factory() as session:
+        upsert_test_run_evidence(session, [detailed])
+        session.commit()
+
+    # A skipped re-sync must not wipe the mirrored measurement payload.
+    flat_only = TestRunEvidenceRecord(
+        component_sn="20USEM00000001",
+        test_type="MODULE_METROLOGY",
+        passed=True,
+        external_ref="R1",
+        measured_at=measured,
+        payload={"state": "ready", "problems": False},
+        detail_omitted=True,
+    )
+    with session_factory() as session:
+        stats = upsert_test_run_evidence(session, [flat_only])
+        session.commit()
+    assert stats.unchanged == 1
+
+    with session_factory() as session:
+        from app.models import TestRunEvidence
+
+        row = session.scalar(select(TestRunEvidence).where(TestRunEvidence.external_ref == "R1"))
+        assert row.payload.get("results") == {"BOW": 1}
+        assert row.payload.get("detail_synced") is True
+
+
+class _FlakyDetailClient:
+    """getComponent works; the per-run detail request fails."""
+
+    def get(self, action, json=None):
+        if action == "getComponent":
+            return COMPONENT
+        if action == "getTestRun":
+            raise RuntimeError("detail request failed")
+        raise AssertionError(f"unexpected request {action}")
+
+
+def test_a_failed_detail_fetch_is_not_recorded_as_mirrored():
+    """A detail miss must stay retryable, not be frozen as 'already synced'.
+
+    Marking it synced would make every later sweep skip the run, so measured
+    values and attachments for it would never arrive.
+    """
+    gateway = _FakeGateway(component=COMPONENT)
+    gateway._client = _FlakyDetailClient()
+
+    records = fetch_test_run_evidence(gateway, "20USEM00000001", with_detail=True)
+
+    assert records, "the runs themselves must still be mirrored"
+    assert all(not r.payload.get("detail_synced") for r in records)
+    assert all(not r.detail_omitted for r in records)

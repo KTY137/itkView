@@ -83,6 +83,7 @@ def _existing_channel_secret(
     field: str,
     *,
     kind: str,
+    matching: dict[str, Any] | None = None,
 ) -> str | None:
     if not isinstance(existing, dict):
         return None
@@ -91,6 +92,8 @@ def _existing_channel_secret(
         return None
     existing_kind = config.get("kind")
     if not isinstance(existing_kind, str) or existing_kind.strip().lower() != kind:
+        return None
+    if matching is not None and any(config.get(key) != value for key, value in matching.items()):
         return None
     secret = config.get(field)
     if not isinstance(secret, str) or not secret or secret.strip() == REDACTED_URL:
@@ -189,6 +192,7 @@ def _notification_channels(value: Any, existing: Any) -> dict[str, dict[str, str
                 )
             username_raw = raw_config.get("smtp_username")
             password_raw = raw_config.get("smtp_password")
+            host = _smtp_host(raw_config.get("smtp_host"))
             username = (
                 _clean_string(username_raw, label="SMTP username", max_length=254)
                 if username_raw is not None
@@ -200,10 +204,16 @@ def _notification_channels(value: Any, existing: Any) -> dict[str, dict[str, str
                     name,
                     "smtp_password",
                     kind=kind,
+                    matching={
+                        "smtp_host": host,
+                        "smtp_port": port,
+                        "smtp_security": security,
+                        "smtp_username": username,
+                    },
                 )
                 if password is None:
                     raise InstituteSettingsValidationError(
-                        "A new authenticated email channel requires an SMTP password."
+                        "A new or changed authenticated email channel requires an SMTP password."
                     )
             elif password_raw is None:
                 password = None
@@ -215,7 +225,7 @@ def _notification_channels(value: Any, existing: Any) -> dict[str, dict[str, str
                 )
             config: dict[str, Any] = {
                 "kind": kind,
-                "smtp_host": _smtp_host(raw_config.get("smtp_host")),
+                "smtp_host": host,
                 "smtp_port": port,
                 "smtp_security": security,
                 "from_address": _email_address(

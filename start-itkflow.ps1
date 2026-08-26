@@ -29,7 +29,7 @@ if ([string]::IsNullOrWhiteSpace($LocalDataDirectory)) {
 $CredentialDirectory = Join-Path $LocalDataDirectory "itkflow"
 $CredentialKeyPath = Join-Path $CredentialDirectory "pdb-credential.key"
 $RunStamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$ExpectedPdbInstance = "test"
+$ExpectedPdbInstance = "offline"
 if ($EnableProductionReads) {
     $ExpectedPdbInstance = "production"
 }
@@ -494,7 +494,7 @@ try {
         Write-Host "PDB mode: production reads enabled; the outbox worker is not started."
     }
     else {
-        Write-Host "PDB mode: offline/test target; remote Sync is unavailable."
+        Write-Host "PDB mode: offline (no PDB configured); remote sync is unavailable."
     }
 
     Write-Host "Starting itkFlow backend on ${BindAddress}:${BackendPort} ..."

@@ -208,7 +208,7 @@ def test_component_sync_endpoint_uses_configured_fetcher(
     client: TestClient, tudo: dict, as_operator
 ):
     def fake_fetcher(settings, institute, access_codes, progress):
-        assert settings.pdb_instance == "test"
+        assert settings.pdb_instance == "offline"
         assert institute.code == "TUDO"
         return FetchResult(
             records=[

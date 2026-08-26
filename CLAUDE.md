@@ -21,14 +21,18 @@ Team: `docs/03-agent-team.md`.
 1. **`references/zeuthenflow` NIEMALS ausführen oder importieren** — nur mit Read/Grep lesen.
    Schon ein Import baut DB-Verbindungen auf. Der Ordner ist eine anonymisierte Lese-Referenz
    (siehe `references/zeuthenflow/ANONYMIZATION.md`); sein `.git` enthält noch Originaldaten — nicht anfassen.
-2. **PDB-Schreibschutz (es gibt keine Testinstanz mehr).** Lesende Zugriffe auf die produktive
-   PDB nur mit doppeltem Opt-in (`ITKFLOW_PDB_INSTANCE=production` + `ITKFLOW_ALLOW_PRODUCTION=true`);
-   der Default erreicht keine PDB. **Schreiboperationen ausschließlich gegen von itkFlow selbst
-   registrierte DUMMY-Batch-Testkomponenten** (nur Module/Hybride; **niemals Sensoren oder ASICs
-   registrieren** — dafür gibt es keinen Dummy-Mechanismus, das korrumpiert Seriennummern).
-   Technisch erzwungen via `pdb_write_scope=dummy_only` (`backend/app/pdb_scope.py`); echte
-   Produktions-Writes sind bewusst nicht implementiert. Details:
-   `docs/09-pdb-production-strategy.md`, `docs/adr/003-pdb-dummy-write-scope.md`.
+2. **PDB-Schutzmodell (es gibt keine Testinstanz mehr).** Der Code-Default ist
+   `pdb_instance=offline` und erreicht keine PDB — das gilt für Dev, Tests und jede
+   Agenten-Session; **Agenten setzen die Produktions-Opt-ins (`ITKFLOW_PDB_INSTANCE=production`
+   + `ITKFLOW_ALLOW_PRODUCTION=true`) niemals selbst.** Die ausgelieferten Endnutzer-Artefakte
+   (Desktop-Bundle, Compose) aktivieren Produktions-**Reads** ab Werk (Owner-Entscheidung
+   2026-08-26, docs/09); PDB-Traffic entsteht trotzdem erst, wenn eine Person ihre
+   persönlichen Access-Codes verbindet. **Schreiboperationen ausschließlich gegen von itkFlow
+   selbst registrierte DUMMY-Batch-Testkomponenten** (nur Module/Hybride; **niemals Sensoren
+   oder ASICs registrieren** — dafür gibt es keinen Dummy-Mechanismus, das korrumpiert
+   Seriennummern). Technisch erzwungen via `pdb_write_scope=dummy_only`
+   (`backend/app/pdb_scope.py`); echte Produktions-Writes sind bewusst nicht implementiert.
+   Details: `docs/09-pdb-production-strategy.md`, `docs/adr/003-pdb-dummy-write-scope.md`.
 3. **Keine Secrets/Tokens/personenbezogene Daten** in Repo, Logs, Fixtures oder Doku.
    Beispieldaten nur anonymisiert (Schema wie in der Referenz: `Anna Abel <anna.abel@example.org>`).
 4. **Kein Institut-Hardcoding.** `TUDO`/`DESYZ`, lokale Namensschemata, Stage-/Test-Mappings,

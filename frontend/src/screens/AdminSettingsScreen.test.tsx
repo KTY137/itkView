@@ -128,6 +128,27 @@ function institute(code: string, channelName: string): Institute {
 const alpha = institute("ALPHA", "ops-alpha");
 const beta = institute("BETA", "ops-beta");
 
+function authenticatedEmailInstitute(): Institute {
+  return {
+    ...alpha,
+    settings: {
+      ...alpha.settings,
+      notification_channels: {
+        emailOps: {
+          kind: "email",
+          smtp_host: "smtp.example.org",
+          smtp_port: 587,
+          smtp_security: "starttls",
+          smtp_username: "itkflow",
+          smtp_password: "***",
+          from_address: "itkflow@example.org",
+          to_address: "ops@example.org",
+        },
+      },
+    },
+  };
+}
+
 describe("AdminSettingsScreen notification secrets", () => {
   it("tests the saved channel for the selected institute and preserves its masked secret", async () => {
     const user = userEvent.setup();
@@ -303,6 +324,59 @@ describe("AdminSettingsScreen notification secrets", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Webhook URL is required.");
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("requires a fresh SMTP password when the saved connection target changes", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AdminSettingsScreen
+        institutes={[authenticatedEmailInstitute()]}
+        selectedCode="ALPHA"
+        onSelectedCodeChange={vi.fn()}
+        onSave={onSave}
+        onTestChannel={vi.fn().mockResolvedValue(undefined)}
+        labels={labels}
+      />,
+    );
+
+    const host = await screen.findByLabelText("SMTP host");
+    await user.clear(host);
+    await user.type(host, "attacker.example.org");
+    expect(screen.queryByText("Saved secret is unchanged.")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("SMTP password is required.");
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("can deliberately remove SMTP authentication without reusing the stored password", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AdminSettingsScreen
+        institutes={[authenticatedEmailInstitute()]}
+        selectedCode="ALPHA"
+        onSelectedCodeChange={vi.fn()}
+        onSave={onSave}
+        onTestChannel={vi.fn().mockResolvedValue(undefined)}
+        labels={labels}
+      />,
+    );
+
+    const username = await screen.findByLabelText("SMTP username");
+    await user.clear(username);
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[1].settings.notification_channels.emailOps).toEqual({
+      kind: "email",
+      smtp_host: "smtp.example.org",
+      smtp_port: 587,
+      smtp_security: "starttls",
+      from_address: "itkflow@example.org",
+      to_address: "ops@example.org",
+    });
   });
 });
 
