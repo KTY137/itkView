@@ -196,3 +196,70 @@ def ensure_phase0_sqlite_schema(engine: Engine) -> None:
                     "ON reminder (deleted_at)"
                 )
             )
+        if "test_run_evidence" in tables:
+            evidence_columns = {
+                row[1] for row in connection.execute(text("PRAGMA table_info(test_run_evidence)"))
+            }
+            if "run_state" not in evidence_columns:
+                connection.execute(
+                    text("ALTER TABLE test_run_evidence ADD COLUMN run_state VARCHAR(32)")
+                )
+            # Backfill from the payload the mirror already stores, so an
+            # existing database gets its withdrawn runs marked without waiting
+            # for a full re-sync (on the owner's mirror: 102 of 14 759 rows).
+            # Done in SQL on purpose — the payload column holds multi-megabyte
+            # IV/response-curve blobs, and reading them into Python to look at
+            # one key would pull hundreds of megabytes through the driver.
+            # Only NULL rows are touched, so this never overwrites a state a
+            # newer sync has already written and is safe to repeat on every
+            # start.
+            #
+            # Every state is written, not only the withdrawn ones, precisely so
+            # that the repeat is cheap: measured on the owner's 630 MB mirror,
+            # writing all 14 759 states costs 27s once and 0.1s on every later
+            # start, whereas a withdrawn-only backfill leaves ~14 700 rows NULL
+            # and pays a 5.3s payload scan at *every* start forever. The
+            # one-off sits well inside the desktop shell's 120s health wait.
+            try:
+                connection.execute(
+                    text(
+                        "UPDATE test_run_evidence "
+                        "SET run_state = json_extract(payload, '$.state') "
+                        "WHERE run_state IS NULL "
+                        "AND json_extract(payload, '$.state') IS NOT NULL"
+                    )
+                )
+            except OperationalError as error:
+                # SQLite built without JSON1. Degrading to "no state known"
+                # keeps every run counting as valid — the pre-fix behaviour —
+                # instead of failing startup, but it must not be silent.
+                print(
+                    "[schema] could not backfill test_run_evidence.run_state "
+                    f"({error.orig}); withdrawn PDB runs stay unmarked until the "
+                    "next evidence sync",
+                    flush=True,
+                )
+        if "test_run_attachment" in tables:
+            # Repair rows whose content type a re-sweep blanked (a PDB listing
+            # declares none, and the reuse path used to overwrite the type the
+            # download had sniffed). `is_image` derives from content_type, so
+            # those rows went invisible in every gallery although their bytes
+            # were untouched. The stored file name still carries the extension
+            # that only a real image type could have produced, so the type is
+            # recoverable without contacting the PDB. Downloaded rows only —
+            # a row that was never fetched has nothing to recover from.
+            for suffix, content_type in (
+                (".jpg", "image/jpeg"),
+                (".jpeg", "image/jpeg"),
+                (".png", "image/png"),
+                (".tif", "image/tiff"),
+                (".tiff", "image/tiff"),
+            ):
+                connection.execute(
+                    text(
+                        "UPDATE test_run_attachment SET content_type = :content_type "
+                        "WHERE content_type IS NULL AND downloaded_at IS NOT NULL "
+                        "AND relative_path IS NOT NULL AND relative_path LIKE :pattern"
+                    ),
+                    {"content_type": content_type, "pattern": f"%{suffix}"},
+                )

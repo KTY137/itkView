@@ -611,4 +611,96 @@ describe("ModuleWorksheet", () => {
       expect(screen.queryByLabelText(/GW1/)).not.toBeInTheDocument();
     });
   });
+
+  describe("child-component evidence", () => {
+    // Only 720 of 14 759 mirrored runs hang on MODULE components; the rest sit
+    // on the children, and for an R5 ring module the metrology / glue weight /
+    // PS IV live on its two half-modules. The page shows that evidence — as
+    // the child's, never folded into the module's own rows.
+    const withChildren: ComponentPreviewWorksheet = {
+      ...worksheet,
+      children: [
+        {
+          sn: "20USE5L0000031",
+          component_type: "MODULE",
+          type_code: "R5M1",
+          local_name: "EXA-R5M1-0002",
+          rows: [
+            {
+              test_type: "MODULE_METROLOGY",
+              latest: {
+                external_ref: "run-child-metro",
+                measured_at: "2026-08-21T09:00:00Z",
+                run_number: "2",
+                passed: false,
+                scalars: [{ code: "SHIELDBOX_HEIGHT", name: "Shield box height [um]", value: 88 }],
+                arrays: [
+                  {
+                    code: "HYBRID_GLUE_THICKNESS",
+                    name: "Hybrid glue thickness [um]",
+                    points: 14,
+                    kind: "map",
+                  },
+                ],
+                attachment_count: 1,
+              },
+              run_count: 2,
+              withdrawn_count: 3,
+            },
+          ],
+        },
+        {
+          sn: "20USES40000771",
+          component_type: "SENSOR",
+          type_code: "ATLAS18R5",
+          local_name: null,
+          rows: [],
+        },
+      ],
+    };
+
+    it("renders one group per child with its serial, decoded type and local name", () => {
+      renderWorksheet({ worksheet: withChildren });
+
+      expect(screen.getByText(t.worksheet.childrenTitle)).toBeInTheDocument();
+      expect(screen.getByText("20USE5L0000031")).toBeInTheDocument();
+      expect(screen.getByText("Module · Endcap R5, pos 1")).toBeInTheDocument();
+      expect(screen.getByText("EXA-R5M1-0002")).toBeInTheDocument();
+      expect(screen.getByText("MODULE_METROLOGY")).toBeInTheDocument();
+      // A child with nothing mirrored still gets a group and says so.
+      expect(screen.getByText("20USES40000771")).toBeInTheDocument();
+      expect(screen.getByText(t.worksheet.childrenEmpty)).toBeInTheDocument();
+    });
+
+    it("keeps the compactness contract: scalars inline, maps as a count chip, run and withdrawn counts", () => {
+      renderWorksheet({ worksheet: withChildren });
+
+      expect(screen.getByText("Shield box height [um]")).toBeInTheDocument();
+      expect(screen.getByText("88")).toBeInTheDocument();
+      expect(screen.getByText("⌁ 14 entries")).toBeInTheDocument();
+      expect(screen.getByText(t.worksheet.childRunCount(2))).toBeInTheDocument();
+      expect(screen.getByText(t.worksheet.childWithdrawn(3))).toBeInTheDocument();
+    });
+
+    it("makes no requirement claim for the parent: the child's run shows its own verdict, with no status chip or edit affordance", () => {
+      renderWorksheet({ worksheet: withChildren });
+
+      const childSection = screen.getByText(t.worksheet.childrenTitle).closest("section");
+      expect(childSection).not.toBeNull();
+      // The child's own pass/fail, not a "missing"/"pending" requirement state.
+      expect(childSection).toHaveTextContent(t.worksheet.statusFailed);
+      expect(childSection).not.toHaveTextContent(t.worksheet.statusMissing);
+      expect(
+        screen.queryByRole("button", { name: "Record MODULE_METROLOGY" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Show MODULE_METROLOGY runs" }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("renders nothing extra when the server sends no children block at all", () => {
+      renderWorksheet();
+      expect(screen.queryByText(t.worksheet.childrenTitle)).not.toBeInTheDocument();
+    });
+  });
 });

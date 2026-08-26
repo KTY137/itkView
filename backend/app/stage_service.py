@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.domain.stages import StageEvaluation, evaluate_stage, stage_model_from_settings
 from app.models import Component, InstituteProfile, OutboxAction, TestRunEvidence
 from app.outbox import OutboxStatus
+from app.test_run_evidence import live_runs_only
 
 
 def satisfied_test_results(session: Session, sn: str) -> dict[str, bool]:
@@ -20,11 +21,16 @@ def satisfied_test_results(session: Session, sn: str) -> dict[str, bool]:
     uploads. Confirmed local uploads are applied after external evidence, so a
     freshly confirmed outbox action can satisfy the workflow immediately even
     before the next PDB mirror sync.
+
+    Runs the PDB has withdrawn are not evidence and are excluded here, which is
+    what makes a stage gate honest: if every run of a required test type has
+    been retracted, the requirement reads `missing` again rather than keeping
+    the verdict of a measurement nobody stands behind any more.
     """
     results: dict[str, bool] = {}
     evidence_rows = session.scalars(
         select(TestRunEvidence)
-        .where(TestRunEvidence.component_sn == sn)
+        .where(TestRunEvidence.component_sn == sn, live_runs_only())
         .order_by(
             # SQLite sorts NULLs first in ASC by default; PostgreSQL sorts them
             # last. Pin NULLS FIRST explicitly so both engines agree that a

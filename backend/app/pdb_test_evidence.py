@@ -74,6 +74,18 @@ def _parse_dt(value: Any) -> datetime | None:
     return parsed
 
 
+def _state(value: Any) -> str | None:
+    """Narrow the PDB's run state to the mirrored column's type.
+
+    Anything that is not a non-empty string (missing, null, an unexpected
+    object) becomes ``None`` — "unknown", which counts as still valid. Guessing
+    a state from a malformed field would be worse than admitting we have none.
+    """
+    if isinstance(value, str) and value.strip():
+        return value.strip()[:32]
+    return None
+
+
 def _passed(run: dict) -> bool:
     passed = run.get("passed")
     if isinstance(passed, bool):
@@ -286,6 +298,10 @@ def fetch_test_run_evidence(
                 "state": run.get("state"),
                 "problems": run.get("problems"),
             }
+            # Also mirrored as a first-class column so a withdrawn run can be
+            # excluded from evidence in SQL; the payload copy stays because the
+            # incremental sweep fingerprints the payload (`sync_jobs`).
+            run_state = _state(run.get("state"))
             passed = _passed(run)
             measured_at = _parse_dt(run.get("date") or run.get("cts") or run.get("stateTs"))
             detail_omitted = False
@@ -314,6 +330,7 @@ def fetch_test_run_evidence(
                     source="pdb",
                     external_ref=str(run_id) if run_id else None,
                     measured_at=measured_at,
+                    run_state=run_state,
                     payload=payload,
                     detail_omitted=detail_omitted,
                 )

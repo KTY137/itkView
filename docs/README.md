@@ -189,10 +189,15 @@ heutigen Code beschreibt.
 
 - [`2026-08-26-zflow-sheet-transcription.md`](superpowers/research/2026-08-26-zflow-sheet-transcription.md)
   — woertliche Abschrift der TUDO- und DESYZ-Modulblaetter samt Referenzblatt
-  „Daten" (Klebeformeln, Zieltabellen, Werkzeug-Dropdowns). **Stand:** gueltig
-  als Quelle, ausdruecklich Quelle und nicht Interpretation; sie ist die
-  Grundlage fuer die Zeilen, die itkFlow ersetzen muss, und fuer die
-  Slot-Definitionen in [`07`](07-jig-tool-quickselect.md).
+  „Daten" (Klebeformeln, Zieltabellen, Werkzeug-Dropdowns). **Stand:** bleibt als
+  Protokoll der Screenshots stehen, ist aber **ueberholt**, wo die
+  Volltext-Analyse unten widerspricht.
+- [`2026-08-27-tudo-sheet-live.md`](superpowers/research/2026-08-27-tudo-sheet-live.md)
+  — Volltext-Analyse des echten Google-Sheets (18 Blaetter): vollstaendiges
+  Zeileninventar des aktiven TUDO-Modulblatts, das Referenzblatt „Daten" Zelle
+  fuer Zelle, verifizierte Klebeformeln, Nutzungsstatistik, zFlow-Ausgabeblatt
+  und PDB-Property-Namen. **Stand:** maßgeblich; **hat Vorrang vor der
+  Abschrift**, wo beide sich unterscheiden.
 
 ---
 

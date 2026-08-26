@@ -4,10 +4,42 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import TestRunEvidence, utcnow
+
+#: The PDB's own state for a test run that has been withdrawn. `getComponent`
+#: keeps returning such a run, so it reaches the mirror like any other; it must
+#: not be read as evidence that a test was performed.
+WITHDRAWN_RUN_STATE = "deleted"
+
+
+def is_withdrawn(run_state: str | None) -> bool:
+    """Whether a mirrored run has been retracted in the PDB.
+
+    Deliberately an exact match on the single withdrawn state rather than
+    "anything that is not `ready`": `requestedToDelete` is a pending request
+    that the PDB has not acted on, and treating a still-served run as gone
+    would be the same class of false statement in the other direction.
+    ``None`` (unknown state — a pre-backfill row, or a non-PDB source) counts
+    as valid, so this can never delete evidence it has no information about.
+    """
+    return run_state == WITHDRAWN_RUN_STATE
+
+
+def live_runs_only() -> ColumnElement[bool]:
+    """SQL predicate for the runs the PDB still stands behind.
+
+    The SQL twin of `is_withdrawn`; expressed as an explicit NULL-or-not-equal
+    pair rather than ``!=`` because a plain inequality is false for NULL in
+    both SQLite and PostgreSQL and would silently drop every row whose state is
+    unknown.
+    """
+    return or_(
+        TestRunEvidence.run_state.is_(None),
+        TestRunEvidence.run_state != WITHDRAWN_RUN_STATE,
+    )
 
 
 @dataclass(frozen=True)
@@ -21,6 +53,10 @@ class TestRunEvidenceRecord:
     external_ref: str | None = None
     measured_at: datetime | None = None
     payload: dict[str, Any] | None = None
+    # The source's own lifecycle state for this run; see
+    # `models.TestRunEvidence.run_state`. ``None`` means the source does not
+    # report one.
+    run_state: str | None = None
     # True when the per-run detail fetch was skipped because the mirrored row
     # already holds it: the upsert then never touches the stored payload.
     detail_omitted: bool = False
@@ -88,6 +124,7 @@ def upsert_test_run_evidence(
                     source=record.source,
                     external_ref=record.external_ref,
                     measured_at=record.measured_at,
+                    run_state=record.run_state,
                     payload=payload,
                     synced_at=utcnow(),
                 )
@@ -101,6 +138,10 @@ def upsert_test_run_evidence(
             or existing.test_type != record.test_type
             or existing.passed != record.passed
             or _as_naive_utc(existing.measured_at) != _as_naive_utc(record.measured_at)
+            # A withdrawal is exactly the change that must never be skipped: it
+            # arrives on the cheap listing path, so `detail_omitted` may be set
+            # and the payload comparison alone would call the row unchanged.
+            or existing.run_state != record.run_state
             or payload_changed
         )
         if changed:
@@ -108,6 +149,7 @@ def upsert_test_run_evidence(
             existing.test_type = record.test_type
             existing.passed = record.passed
             existing.measured_at = record.measured_at
+            existing.run_state = record.run_state
             if not record.detail_omitted:
                 existing.payload = payload
             existing.synced_at = utcnow()

@@ -176,6 +176,15 @@ class TestRunEvidence(Base):
     passed: Mapped[bool] = mapped_column(Boolean)
     source: Mapped[str] = mapped_column(String(24), default="pdb", index=True)
     external_ref: Mapped[str | None] = mapped_column(String(64), default=None)
+    # The run's own lifecycle state as the PDB reports it ("ready", "deleted",
+    # "requestedToDelete", ...). The PDB keeps serving a withdrawn run, so
+    # without this column a retracted measurement is indistinguishable from a
+    # valid one and counts as evidence: on the real TUDO mirror that is 102 of
+    # 14 759 runs, 13% of all GLUE_WEIGHT and 25% of all MODULE_BOW.
+    # `app.test_run_evidence.WITHDRAWN_RUN_STATE` owns the interpretation;
+    # NULL means "unknown", which is deliberately treated as still valid so a
+    # non-PDB or not-yet-backfilled source never silently loses its evidence.
+    run_state: Mapped[str | None] = mapped_column(String(32), default=None)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     measured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

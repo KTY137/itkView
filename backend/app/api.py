@@ -3239,6 +3239,9 @@ def component_test_details(
                 external_ref=evidence.external_ref,
                 measured_at=evidence.measured_at,
                 run_number=str(run_number) if run_number is not None else None,
+                # Withdrawn runs stay in this list; the state is what tells a
+                # reader not to treat them as evidence (see TestRunDetailOut).
+                run_state=evidence.run_state,
                 results=payload.get("results") or {},
                 result_meta=payload.get("result_meta") or {},
                 properties=payload.get("properties") or {},

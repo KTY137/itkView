@@ -34,7 +34,9 @@ import type {
   TestSchemaFieldCollection,
   TestTypeSchema,
   WorksheetArraySummary,
+  WorksheetChildGroup,
   WorksheetGroup,
+  WorksheetLatestRun,
   WorksheetRow,
   WorksheetStagedRef,
 } from "./api";
@@ -44,7 +46,7 @@ import { manualEntryPayload, useTestStaging } from "./testStaging";
 import TestForm, { requiredCodes } from "./TestForm";
 import type { TestFormSubmitPayload } from "./TestForm";
 import { formatScalar, RunAttachments, RunConditions, RunCurves, RunScalars } from "./TestResults";
-import { outboxStatusChipClass, stageChipClass, stageLabel } from "./ui";
+import { describeComponent, outboxStatusChipClass, stageChipClass, stageLabel } from "./ui";
 
 export type ModuleWorksheetProps = {
   componentSn: string;
@@ -293,8 +295,7 @@ function mergedStaged(
   return [...row.staged, ...extra.filter((ref) => !existingIds.has(ref.outbox_action_id))];
 }
 
-function ValuesCell({ row }: { row: WorksheetRow }) {
-  const latest = row.latest;
+function ValuesCell({ latest }: { latest: WorksheetLatestRun | null }) {
   if (latest === null) {
     return <span className="muted">{t.common.none}</span>;
   }
@@ -322,6 +323,86 @@ function ValuesCell({ row }: { row: WorksheetRow }) {
         </span>
       ))}
     </span>
+  );
+}
+
+/**
+ * The evidence measured on the component's children, one read-only table per
+ * child. On real data this is where nearly all of a module's history lives —
+ * only 720 of 14 759 mirrored runs hang on MODULE components; the rest sit on
+ * sensors, hybrids, powerboards, and for an R5 ring module on the two
+ * half-modules that carry its metrology, glue weight and PS IV.
+ *
+ * Kept visibly separate from the stage groups above, and deliberately without
+ * a Status column or an edit affordance: a requirement check is a statement
+ * about *this* component, and recording a result belongs on the child's own
+ * page where the serial in the payload would be right.
+ */
+function ChildEvidence({ groups }: { groups: readonly WorksheetChildGroup[] }) {
+  if (groups.length === 0) return null;
+  return (
+    <section className="ws-children">
+      <h3 className="section-title">{t.worksheet.childrenTitle}</h3>
+      <p className="state-note">{t.worksheet.childrenIntro}</p>
+      {groups.map((child) => (
+        <div className="panel ws-group-panel" key={child.sn}>
+          <div className="ws-group-head">
+            <span className="chip neutral">
+              {describeComponent({
+                component_type: child.component_type,
+                type_code: child.type_code,
+              })}
+            </span>
+            <span className="mono">{child.sn}</span>
+            {child.local_name !== null && <span className="muted">{child.local_name}</span>}
+          </div>
+          {child.rows.length === 0 ? (
+            <p className="state-note">{t.worksheet.childrenEmpty}</p>
+          ) : (
+            <table className="data-table ws-table">
+              <thead>
+                <tr>
+                  <th scope="col">{t.worksheet.colTest}</th>
+                  <th scope="col">{t.worksheet.colValues}</th>
+                  <th scope="col">{t.worksheet.colResult}</th>
+                  <th scope="col">{t.worksheet.colDate}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {child.rows.map((row) => (
+                  <tr className="ws-row" key={row.test_type}>
+                    <td className="mono">{row.test_type}</td>
+                    <td>
+                      <ValuesCell latest={row.latest} />
+                    </td>
+                    <td>
+                      {row.latest === null ? (
+                        <span className="muted">{t.common.none}</span>
+                      ) : (
+                        <span className={row.latest.passed === true ? "chip green" : "chip red"}>
+                          {row.latest.passed === true
+                            ? t.worksheet.statusPassed
+                            : t.worksheet.statusFailed}
+                        </span>
+                      )}
+                      <span className="muted"> {t.worksheet.childRunCount(row.run_count)}</span>
+                      {row.withdrawn_count > 0 && (
+                        <span className="chip amber">
+                          {t.worksheet.childWithdrawn(row.withdrawn_count)}
+                        </span>
+                      )}
+                    </td>
+                    <td className={row.latest?.measured_at ? undefined : "muted"}>
+                      {formatMeasuredAt(row.latest?.measured_at ?? null)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      ))}
+    </section>
   );
 }
 
@@ -397,6 +478,7 @@ export default function ModuleWorksheet({
     () => worksheet.groups.filter((group) => group.rows.length > 0),
     [worksheet],
   );
+  const childGroups = useMemo(() => worksheet.children ?? [], [worksheet]);
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [runsRequested, setRunsRequested] = useState(false);
@@ -633,9 +715,15 @@ export default function ModuleWorksheet({
   }
 
   if (visibleGroups.length === 0) {
+    // A component can legitimately have nothing of its own and still have all
+    // of its evidence on the children (39 of the owner's 265 modules), so the
+    // empty note must not swallow the child section.
     return (
-      <div className="panel">
-        <p className="state-note">{t.worksheet.empty}</p>
+      <div className="module-worksheet">
+        <div className="panel">
+          <p className="state-note">{t.worksheet.empty}</p>
+        </div>
+        <ChildEvidence groups={childGroups} />
       </div>
     );
   }
@@ -692,7 +780,7 @@ export default function ModuleWorksheet({
                       >
                         <td className="mono">{row.test_type}</td>
                         <td>
-                          <ValuesCell row={row} />
+                          <ValuesCell latest={row.latest} />
                         </td>
                         <td>
                           <span className={STATUS_CHIP_CLASS[row.status]}>
@@ -907,6 +995,7 @@ export default function ModuleWorksheet({
           </div>
         </section>
       ))}
+      <ChildEvidence groups={childGroups} />
       {lightbox !== null && (
         <ImageLightbox sn={componentSn} attachment={lightbox} onClose={() => setLightbox(null)} />
       )}
