@@ -4,20 +4,29 @@ The preview is deliberately PDB-inert: it projects staged writes over the
 current local read model, so a component page can show the operator what would
 change without performing a network request or mutating either mirror or
 outbox state.
+
+Payload contract: the preview carries only what the module page needs *before*
+the operator asks for detail — the projected stage, the requirement checks, the
+compact worksheet, and the ghost entries for staged-but-unpushed uploads.
+Mirrored runs are summarised in the worksheet and are otherwise served by
+``GET /api/components/{sn}/tests``, which the page fetches lazily when the
+collapsed "All mirrored runs" section is opened. Raw measured values (an IV
+sweep is tens of kilobytes on its own) must therefore never be added back to
+the preview response.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 from sqlalchemy.orm import Session
 
 from app.assembly import ASSEMBLY_ACTION_KIND, evaluate_assembly
-from app.attachment_store import attachment_read_model, known_attachments
-from app.domain.stages import stage_model_from_settings
+from app.attachment_store import known_attachments
+from app.domain.stages import StageModel, stage_model_from_settings
 from app.models import Component, IngestFile, InstituteProfile, OutboxAction, TestRunEvidence
 from app.outbox import TERMINAL
 from app.stage_service import satisfied_test_results
@@ -41,22 +50,58 @@ def _targets_component(action: OutboxAction, sn: str) -> bool:
     )
 
 
+def _open_actions_for(session: Session, sn: str) -> list[OutboxAction]:
+    """Open (non-terminal) outbox actions targeting ``sn``, oldest first.
+
+    The set of open actions is site-wide, so loading all of them and filtering
+    in Python grows with the institute's whole backlog on every module page
+    open. The serial is stored inside the action's JSON payload under one of
+    three keys, and no JSON path operator is portable across SQLite and
+    PostgreSQL here (the column is a generic ``JSON``), so the query narrows
+    with a plain substring match on the serialized payload — supported by both
+    engines via ``CAST(payload AS VARCHAR) LIKE '%sn%'``.
+
+    That match is a deliberate *superset*: any payload whose ``sn`` /
+    ``component_sn`` / ``parent_sn`` equals the serial necessarily contains the
+    serial verbatim in its JSON text (serials are plain ASCII, so no escaping
+    can hide them), while payloads that merely mention the serial under some
+    other key (``child_sn``, ...) survive the SQL and are then rejected by
+    ``_targets_component``, which stays the only authority on membership.
+    """
+    statement = (
+        select(OutboxAction)
+        .where(
+            OutboxAction.status.not_in([status.value for status in TERMINAL]),
+            cast(OutboxAction.payload, String).contains(sn, autoescape=True),
+        )
+        .order_by(OutboxAction.created_at, OutboxAction.id)
+    )
+    return [action for action in session.scalars(statement) if _targets_component(action, sn)]
+
+
+def _status_for(test_type: str, results: Mapping[str, bool], pending: frozenset[str]) -> str:
+    """Shared passed/failed/missing/pending rule.
+
+    Used by both the requirement checks and the worksheet rows so the two
+    projections of the same open work can never disagree.
+    """
+    if test_type in pending:
+        return "pending"
+    if test_type not in results:
+        return "missing"
+    return "passed" if results[test_type] else "failed"
+
+
 def _checks(
     stage: str,
     results: Mapping[str, bool],
-    profile_settings: Mapping[str, Any],
+    model: StageModel,
     *,
     pending: frozenset[str] = frozenset(),
 ) -> list[dict[str, str]]:
-    model = stage_model_from_settings(profile_settings)
     checks: list[dict[str, str]] = []
     for required_stage, test_type in model.requirements_through(stage):
-        if test_type in pending:
-            status = "pending"
-        elif test_type not in results:
-            status = "missing"
-        else:
-            status = "passed" if results[test_type] else "failed"
+        status = _status_for(test_type, results, pending)
         checks.append({"stage": required_stage, "test_type": test_type, "status": status})
     return checks
 
@@ -152,29 +197,15 @@ def _action_submittability(
     return evaluation.submittable, evaluation.submittable_reason
 
 
-def _evidence_test(
-    row: TestRunEvidence,
-    attachments: list[dict[str, Any]],
-) -> dict[str, Any]:
-    payload = row.payload if isinstance(row.payload, dict) else {}
-    return {
-        "test_type": row.test_type,
-        "passed": bool(row.passed),
-        "external_ref": row.external_ref,
-        "measured_at": row.measured_at,
-        "synced_at": row.synced_at,
-        "source": row.source,
-        "run_number": payload.get("run_number"),
-        "properties": payload.get("properties") or {},
-        "results": payload.get("results") or {},
-        "result_meta": payload.get("result_meta") or {},
-        # Only expose the local attachment index.  The raw evidence payload may
-        # contain public share URLs or transient EOS metadata and is not an API
-        # representation.
-        "attachments": attachments,
-        "ghost": False,
-        "outbox_action_id": None,
-    }
+def _safe_run_number(value: Any) -> str | int | None:
+    """Narrow an untrusted value to the `run_number: str | int | None` schema
+    field. Mirrored and staged payloads are external data; anything outside
+    that type (a float, a dict, ...) must become ``None`` here rather than
+    reach Pydantic validation, or it 500s the whole component page instead of
+    just omitting one field."""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    return value
 
 
 def _datetime_value(value: Any) -> datetime | None:
@@ -206,11 +237,9 @@ def _ghost_test(action: OutboxAction, ingest: IngestFile | None) -> dict[str, An
     measured_at = _datetime_value(ingest_payload.get("date")) or _datetime_value(
         action_payload.get("measured_at")
     )
-    run_number = ingest_payload.get("runNumber")
-    if isinstance(run_number, bool) or not isinstance(run_number, (str, int)):
-        run_number = action_payload.get("run_number")
-    if isinstance(run_number, bool) or not isinstance(run_number, (str, int)):
-        run_number = None
+    run_number = _safe_run_number(ingest_payload.get("runNumber"))
+    if run_number is None:
+        run_number = _safe_run_number(action_payload.get("run_number"))
 
     properties = ingest_payload.get("properties")
     results = ingest_payload.get("results")
@@ -232,6 +261,193 @@ def _ghost_test(action: OutboxAction, ingest: IngestFile | None) -> dict[str, An
     }
 
 
+def _worksheet_latest_run(
+    row: TestRunEvidence,
+    attachment_counts: Mapping[str | None, int],
+) -> dict[str, Any]:
+    """Project one mirrored run to the compact worksheet shape.
+
+    Arrays *and* dict-valued results (real metrology payloads carry dicts of
+    per-position measurements, e.g. glue thickness per pad) are reduced to a
+    point/entry count here and never rebuilt anywhere else in the worksheet —
+    neither the raw list nor the raw dict may leave the server, or the row-spam
+    this feature exists to remove comes right back through a dict instead of a
+    list.
+    """
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    raw_results = payload.get("results")
+    raw_results = raw_results if isinstance(raw_results, dict) else {}
+    raw_meta = payload.get("result_meta")
+    raw_meta = raw_meta if isinstance(raw_meta, dict) else {}
+    scalars: list[dict[str, Any]] = []
+    arrays: list[dict[str, Any]] = []
+    for code, value in raw_results.items():
+        meta_entry = raw_meta.get(code)
+        name = meta_entry.get("name") if isinstance(meta_entry, dict) else None
+        if not isinstance(name, str) or not name:
+            name = code
+        if isinstance(value, (list, tuple, set)):
+            arrays.append({"code": code, "name": name, "points": len(value), "kind": "array"})
+        elif isinstance(value, dict):
+            arrays.append({"code": code, "name": name, "points": len(value), "kind": "map"})
+        else:
+            scalars.append({"code": code, "name": name, "value": value})
+    # Real VISUAL_INSPECTION-style payloads front-load unfilled slots (None):
+    # a plain None-first rendering would show the operator three blanks before
+    # the one value that matters. Stable-partition non-null values first,
+    # keeping each partition's original insertion order — never a sort, so
+    # equal-priority entries never reshuffle relative to each other.
+    scalars = [s for s in scalars if s["value"] is not None] + [
+        s for s in scalars if s["value"] is None
+    ]
+    return {
+        "external_ref": row.external_ref,
+        "measured_at": row.measured_at,
+        "run_number": _safe_run_number(payload.get("run_number")),
+        "passed": bool(row.passed),
+        "scalars": scalars,
+        "arrays": arrays,
+        "attachment_count": attachment_counts.get(row.external_ref, 0),
+    }
+
+
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _comparable_time(value: datetime | None) -> datetime:
+    """Make a stored timestamp safely orderable in Python.
+
+    The SQLite dialect loads DateTime columns as naive values while
+    freshly-assigned ORM attributes stay timezone-aware, and comparing the two
+    raises TypeError. Both are UTC by convention (``models.utcnow``), so naive
+    values are pinned to UTC and ``None`` sorts before everything — the same
+    NULLS-FIRST-ascending order the SQL queries use.
+    """
+    if value is None:
+        return _EPOCH
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _worksheet_row(
+    test_type: str,
+    *,
+    results: Mapping[str, bool],
+    pending: frozenset[str],
+    staged_by_test: Mapping[str, list[dict[str, Any]]],
+    evidence_by_type: Mapping[str, list[TestRunEvidence]],
+    attachment_counts: Mapping[str | None, int],
+) -> dict[str, Any]:
+    runs = evidence_by_type.get(test_type, [])
+    latest = None
+    if runs:
+        # Newest by measured_at with NULLs losing to any dated run; ties break
+        # on synced_at then id. This selection happens in Python via an
+        # explicit tuple key, so it is engine-independent by construction; it
+        # is deliberately kept identical to the winner
+        # `app.stage_service.satisfied_test_results` picks (its SQL ORDER BY
+        # pins NULLS FIRST for measured_at explicitly, so both engines agree
+        # with the ranking here), so the row's status and its `latest` run
+        # never disagree about which run is current.
+        newest = max(
+            runs,
+            key=lambda run: (
+                run.measured_at is not None,
+                _comparable_time(run.measured_at),
+                _comparable_time(run.synced_at),
+                run.id,
+            ),
+        )
+        latest = _worksheet_latest_run(newest, attachment_counts)
+    return {
+        "test_type": test_type,
+        "status": _status_for(test_type, results, pending),
+        "latest": latest,
+        "staged": list(staged_by_test.get(test_type, ())),
+        "run_count": len(runs),
+    }
+
+
+def _build_worksheet(
+    component: Component,
+    model: StageModel,
+    results: Mapping[str, bool],
+    *,
+    pending: frozenset[str],
+    staged_by_test: Mapping[str, list[dict[str, Any]]],
+    evidence_rows: list[TestRunEvidence],
+    attachment_counts: Mapping[str | None, int],
+) -> dict[str, Any]:
+    """One group per stage in the institute's model (incl. future stages).
+
+    A trailing ``stage: None`` "Additional" group covers test types no stage
+    requires that nonetheless have visible work — mirrored evidence, a staged
+    upload, or a confirmed-but-not-yet-mirrored result; it is omitted entirely
+    when there is nothing to show.
+    """
+    evidence_by_type: dict[str, list[TestRunEvidence]] = {}
+    for row in evidence_rows:
+        if row.test_type:
+            evidence_by_type.setdefault(row.test_type, []).append(row)
+
+    current_index = (
+        model.order.index(component.stage) if component.stage in model.order else None
+    )
+
+    def _row(test_type: str) -> dict[str, Any]:
+        return _worksheet_row(
+            test_type,
+            results=results,
+            pending=pending,
+            staged_by_test=staged_by_test,
+            evidence_by_type=evidence_by_type,
+            attachment_counts=attachment_counts,
+        )
+
+    groups: list[dict[str, Any]] = []
+    required_test_types: set[str] = set()
+    for index, stage in enumerate(model.order):
+        stage_tests = model.required_tests.get(stage, ())
+        required_test_types.update(stage_tests)
+        if current_index is None:
+            # An off-model current stage (e.g. FAILED, or any other
+            # institute-specific terminal stage the ordered model never lists)
+            # is the common case on real production data, not an edge case —
+            # we cannot know how far such a component actually progressed
+            # through the ordered stages, so the honest default is to show the
+            # whole sheet as reached/readable rather than dim it as entirely
+            # not-yet-reached.
+            reached = True
+        else:
+            reached = index <= current_index
+        groups.append(
+            {
+                "stage": stage,
+                "reached": reached,
+                "rows": [_row(test_type) for test_type in stage_tests],
+            }
+        )
+
+    # Union of everything that could show a row: mirrored evidence, open staged
+    # uploads and confirmed-but-not-yet-mirrored results (`results` also holds
+    # confirmed local uploads, see `satisfied_test_results`) — not evidence
+    # alone, or a staged/confirmed non-required test type has nowhere to
+    # render and the operator's work becomes invisible.
+    additional_test_types = set(evidence_by_type) | set(staged_by_test) | set(results)
+    additional = sorted(additional_test_types - required_test_types)
+    if additional:
+        groups.append(
+            {
+                "stage": None,
+                "reached": True,
+                "rows": [_row(test_type) for test_type in additional],
+            }
+        )
+
+    return {"groups": groups}
+
+
 def build_component_preview(
     session: Session,
     component: Component,
@@ -241,20 +457,18 @@ def build_component_preview(
 
     Stage moves are applied oldest first. Pending test uploads override the
     corresponding projected requirement check with the explicit ``pending``
-    state; they never masquerade as already passed evidence.
+    state; they never masquerade as already passed evidence, and they are the
+    only runs in ``projected.ghost_tests`` — they exist nowhere else, whereas
+    mirrored runs are already served in full by the dedicated tests endpoint.
     """
     profile_settings = _profile_settings(session, component)
+    # Built once and threaded through: checks (current and projected) and the
+    # worksheet must reason about the exact same stage model, structurally,
+    # not merely by chance re-parsing identical settings three times.
+    model = stage_model_from_settings(profile_settings)
     results = satisfied_test_results(session, component.sn)
 
-    actions = [
-        action
-        for action in session.scalars(
-            select(OutboxAction)
-            .where(OutboxAction.status.not_in([status.value for status in TERMINAL]))
-            .order_by(OutboxAction.created_at, OutboxAction.id)
-        )
-        if _targets_component(action, component.sn)
-    ]
+    actions = _open_actions_for(session, component.sn)
 
     # Resolve the ingest through its server-maintained action link, never by
     # blindly trusting an arbitrary ``ingest_file_id`` in action JSON.
@@ -274,6 +488,7 @@ def build_component_preview(
     staged_actions: list[dict[str, Any]] = []
     projected_stage = component.stage
     pending_tests: set[str] = set()
+    staged_by_test: dict[str, list[dict[str, Any]]] = {}
     ghost_tests: list[dict[str, Any]] = []
 
     for action in actions:
@@ -285,6 +500,9 @@ def build_component_preview(
         if isinstance(test_type, str) and test_type:
             pending_tests.add(test_type)
             ghost_tests.append(_ghost_test(action, ingests_by_action.get(action.id)))
+            staged_by_test.setdefault(test_type, []).append(
+                {"outbox_action_id": action.id, "status": action.status}
+            )
         action_submittable, action_reason = _action_submittability(
             session,
             action,
@@ -307,30 +525,45 @@ def build_component_preview(
             }
         )
 
-    evidence = session.scalars(
-        select(TestRunEvidence)
-        .where(TestRunEvidence.component_sn == component.sn)
-        .order_by(
-            TestRunEvidence.measured_at,
-            TestRunEvidence.synced_at,
-            TestRunEvidence.id,
+    # One query for the whole worksheet grouping. Mirrored runs are summarised
+    # here and never leave in full: the raw values live behind
+    # ``GET /api/components/{sn}/tests``, which the module page requests only
+    # when the operator opens "All mirrored runs".
+    evidence_rows = list(
+        session.scalars(
+            select(TestRunEvidence)
+            .where(TestRunEvidence.component_sn == component.sn)
+            .order_by(
+                TestRunEvidence.measured_at,
+                TestRunEvidence.synced_at,
+                TestRunEvidence.id,
+            )
         )
     )
-    attachments_by_run: dict[str | None, list[dict[str, Any]]] = {}
+    # Only the per-run count is part of the worksheet contract, so count the
+    # rows instead of building a read model per attachment: that projection
+    # stats the attachment directory for its `stored` flag, which is pure waste
+    # here and belongs to the endpoints that actually render attachments.
+    attachment_counts: dict[str | None, int] = {}
     for attachment in known_attachments(session, component.sn):
-        attachments_by_run.setdefault(attachment.test_run_ref, []).append(
-            attachment_read_model(settings, attachment)
+        attachment_counts[attachment.test_run_ref] = (
+            attachment_counts.get(attachment.test_run_ref, 0) + 1
         )
-    tests = [
-        _evidence_test(row, attachments_by_run.get(row.external_ref, []))
-        for row in evidence
-    ]
-    tests.extend(ghost_tests)
+    pending = frozenset(pending_tests)
+    worksheet = _build_worksheet(
+        component,
+        model,
+        results,
+        pending=pending,
+        staged_by_test=staged_by_test,
+        evidence_rows=evidence_rows,
+        attachment_counts=attachment_counts,
+    )
 
     return {
         "current": {
             "stage": component.stage,
-            "checks": _checks(component.stage, results, profile_settings),
+            "checks": _checks(component.stage, results, model),
         },
         "staged_actions": staged_actions,
         "projected": {
@@ -338,9 +571,10 @@ def build_component_preview(
             "checks": _checks(
                 projected_stage,
                 results,
-                profile_settings,
-                pending=frozenset(pending_tests),
+                model,
+                pending=pending,
             ),
-            "tests": tests,
+            "ghost_tests": ghost_tests,
         },
+        "worksheet": worksheet,
     }

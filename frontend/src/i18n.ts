@@ -5,6 +5,32 @@ import type { OutboxStatus, Role, ToolStatus } from "./api";
  * string in this module means adding locales later only touches this file,
  * not the components.
  */
+
+/** Shared between `addTest.testForm` and `worksheet.testForm` (review finding
+ * M4): the two entry points generate the exact same TestForm, so their labels
+ * differ only in the submit button's wording. */
+const testFormLabels = {
+  runNumber: "Run number",
+  date: "Measurement date",
+  passed: "Passed",
+  problems: "Problems",
+  properties: "Conditions and properties",
+  results: "Measured results",
+  booleanUnset: "Not set",
+  booleanTrue: "Yes",
+  booleanFalse: "No",
+  arrayHint: "Enter one value per line.",
+  requiredField: (field: string) => `${field} is required.`,
+  invalidNumber: (field: string, line?: number) =>
+    `${field}${line === undefined ? "" : `, line ${line}`} must be a decimal number.`,
+  invalidInteger: (field: string, line?: number) =>
+    `${field}${line === undefined ? "" : `, line ${line}`} must be an integer.`,
+  invalidBoolean: (field: string, line?: number) =>
+    `${field}${line === undefined ? "" : `, line ${line}`} must be true or false.`,
+  unsupportedType: (field: string, dataType: string) =>
+    `${field} uses the unsupported PDB data type ${dataType || "unknown"} and is read-only.`,
+};
+
 const en = {
   nav: {
     board: "Assembly board",
@@ -49,6 +75,11 @@ const en = {
     demoBadge: "Demo data",
     demoNote: "Backend not reachable — showing a built-in demo dataset.",
     none: "—",
+    // Lowercase on purpose: this is the compact inline rendering of a boolean
+    // measured value (TestResults.formatScalar / the worksheet values cell),
+    // distinct from the capitalised Yes/No option labels used in forms.
+    yes: "yes",
+    no: "no",
   },
   syncJob: {
     title: "Component sync",
@@ -231,6 +262,7 @@ const en = {
     fieldLocation: "Location",
     fieldInstitute: "Institute",
     fieldSynced: "Last PDB sync",
+    mirroredRunsTitle: "All mirrored runs",
     stageTitle: "Required tests per stage",
     stageColTest: "Test",
     stageColStage: "Stage",
@@ -403,6 +435,20 @@ const en = {
     productionScopeHint:
       "Production writes are not enabled — this stays staged (DUMMY-only scope).",
     scopeUnavailable: "This action cannot be pushed under the configured write scope.",
+    readOnlyHint:
+      "You do not have write permission for this institute — this action can only be reviewed here.",
+    // A staged test upload shows the measurement it proposes, under the same
+    // compaction rules as the module worksheet (extent chips reuse
+    // `worksheet.arrayPoints` / `mapEntries` / `moreValues` so both surfaces
+    // read identically).
+    valuesLabel: "Staged values",
+    valuesRegionLabel: (testType: string) => `Staged values for ${testType}`,
+    valuesMeasured: (when: string) => `measured ${when}`,
+    conditionCount: (count: number) =>
+      `${count} ${count === 1 ? "condition" : "conditions"}`,
+    valuesEmpty: "This staged run carries no measured values.",
+    valuesUnavailable:
+      "The staged measurement could not be loaded — open the component to review it before pushing.",
     push: "Push to PDB",
     pushing: "Pushing…",
     discard: "Discard",
@@ -541,26 +587,8 @@ const en = {
     stageFailed: (error: string) => `Could not stage the upload: ${error}`,
     reset: "Start over",
     testForm: {
-      runNumber: "Run number",
-      date: "Measurement date",
-      passed: "Passed",
-      problems: "Problems",
-      properties: "Conditions and properties",
-      results: "Measured results",
+      ...testFormLabels,
       submit: "Inspect result",
-      booleanUnset: "Not set",
-      booleanTrue: "Yes",
-      booleanFalse: "No",
-      arrayHint: "Enter one value per line.",
-      requiredField: (field: string) => `${field} is required.`,
-      invalidNumber: (field: string, line?: number) =>
-        `${field}${line === undefined ? "" : `, line ${line}`} must be a decimal number.`,
-      invalidInteger: (field: string, line?: number) =>
-        `${field}${line === undefined ? "" : `, line ${line}`} must be an integer.`,
-      invalidBoolean: (field: string, line?: number) =>
-        `${field}${line === undefined ? "" : `, line ${line}`} must be true or false.`,
-      unsupportedType: (field: string, dataType: string) =>
-        `${field} uses the unsupported PDB data type ${dataType || "unknown"} and is read-only.`,
     },
   },
   images: {
@@ -590,6 +618,60 @@ const en = {
     curvePoints: (count: number) => `${count} points`,
     voltage: "Voltage [V]",
     current: "Current [nA]",
+  },
+  // Module worksheet (spec §H2): one compact table per stage group, values
+  // inline, rows expandable, in-row edit strip that stages a manual upload.
+  worksheet: {
+    title: "Test worksheet",
+    empty: "No worksheet data yet.",
+    additionalGroup: "Additional",
+    futureStage: "Not reached yet",
+    colTest: "Test",
+    colValues: "Values",
+    colStatus: "Status",
+    colDate: "Date",
+    colActions: "Actions",
+    statusPassed: "passed",
+    statusFailed: "failed",
+    statusMissing: "missing",
+    statusPending: "pending",
+    moreValues: (n: number) => `+${n}`,
+    arrayPoints: (points: number) => `⌁ ${points} pts`,
+    mapEntries: (entries: number) => `⌁ ${entries} entries`,
+    expandRow: (testType: string) => `Show ${testType} runs`,
+    collapseRow: (testType: string) => `Hide ${testType} runs`,
+    runsLoadError: "Could not load the mirrored test runs",
+    noMirroredRuns: "No mirrored runs for this test type yet.",
+    runNumber: (value: string) => `run ${value}`,
+    editFor: (testType: string) => `Record ${testType}`,
+    cancelEdit: "Cancel",
+    schemasLoading: "Loading test-type schemas…",
+    noSchema: (testType: string) =>
+      `No mirrored schema for ${testType}. Sync schemas from the Add-test-result card to continue.`,
+    loadingPreviousValues: "Loading previous values…",
+    previousValuesError: (error: string) => `Could not load the previous run's values: ${error}`,
+    issuesTitle: "Blocking issues",
+    warningsTitle: "Warnings",
+    manualFilename: (testType: string) => `${testType}-manual.json`,
+    ingestFailed: (error: string) => `Could not inspect the result: ${error}`,
+    previewFailed: (error: string) => `Could not build the dry-run preview: ${error}`,
+    previewBlocked: "The dry-run reports this run is not ready to stage yet.",
+    stageFailed: (error: string) => `Could not stage the upload: ${error}`,
+    stagedUpload: (actionId: number) => `Staged upload · action #${actionId}`,
+    viewInStaged: "View in Staged",
+    // Review finding C1: a previous run's field only prefills into the edit
+    // strip when its value provably round-trips through the generated form
+    // (see ModuleWorksheet's `valueRoundTrips`). These two labels are how the
+    // gap is surfaced instead of silently dropping the field.
+    prefillDropped: (fields: string) =>
+      `${fields} from the previous run could not be reproduced in this form and will not be part of this staged upload.`,
+    prefillBlockedRequired: (fields: string) =>
+      `${fields} cannot be reproduced in this form and are required by the schema, so recording here is disabled to avoid silently dropping them. Use the file-drop upload above instead.`,
+    editIntentMissing: (testType: string) => `No worksheet row for ${testType} yet.`,
+    testForm: {
+      ...testFormLabels,
+      submit: "Stage test result",
+    },
   },
   tools: {
     loadError: "Could not load the tool registry",
@@ -1052,6 +1134,34 @@ const en = {
     receptionComponentTypePlaceholder: "e.g. MODULE",
     receptionTestTypeLabel: "Required test type",
     receptionTestTypePlaceholder: "e.g. RECEPTION_IV",
+    stagesTitle: "Production stages",
+    stagesHint:
+      "The ordered stage flow and the test types each stage requires. Stages are evaluated in this order, and a stage move is only suggested once every required test up to the current stage has passed.",
+    stagesImpact:
+      "Saving changes what every module's requirement checks evaluate against, including stage-move gating. A misspelled test type stays 'missing' forever.",
+    stagesDirtyWarning:
+      "Unsaved stage-model change. Saving re-evaluates the required tests of every mirrored component.",
+    addStage: "Add stage",
+    stageRowLabel: (index: number) => `Production stage ${index}`,
+    stageNameLabel: "Stage code",
+    stageNamePlaceholder: "e.g. MODULE_RECEPTION",
+    stageOriginSeed: "Built-in stage",
+    stageOriginCustom: "Institute stage",
+    stageOriginAppended: "Appended by the engine",
+    stageSeedLockedHint:
+      "Built-in stages can be reordered but not renamed or removed: the engine always evaluates them and would append a removed one to the end of the flow. To make one a no-op, remove all of its required tests.",
+    stageMoveUp: "Move up",
+    stageMoveDown: "Move down",
+    stageRemove: "Remove stage",
+    stageTestsLabel: "Required test types",
+    stageTestsEmpty: "No test is required at this stage.",
+    addStageTest: "Add required test",
+    stageTestLabel: (index: number) => `Required test ${index}`,
+    stageTestPlaceholder: "e.g. MODULE_IV_AMAC",
+    stageRemoveTest: (index: number) => `Remove required test ${index}`,
+    stageTestUnknown: "Not mirrored",
+    stageTestUnknownHint:
+      "No mirrored schema or recorded run uses this test type. That is allowed, but check the spelling — an unknown requirement can never be satisfied.",
     glueTitle: "Glue pot life",
     glueHint: "Default working time per glue type, from 1 to 1,440 minutes.",
     glueEmpty: "No profile defaults; operators must enter a pot life when mixing.",

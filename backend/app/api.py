@@ -1987,7 +1987,13 @@ def component_preview(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ) -> ComponentPreviewOut:
-    """Project staged work over the local mirror without contacting the PDB."""
+    """Project staged work over the local mirror without contacting the PDB.
+
+    Intentionally light: `projected.ghost_tests` holds only staged, not-yet-
+    pushed uploads. Mirrored runs appear here as worksheet summaries; their raw
+    values are served by `GET /api/components/{sn}/tests`, which the module page
+    calls only when the operator opens the full run list.
+    """
     from app.preview import build_component_preview
 
     component = db.scalar(select(Component).where(Component.sn == sn))

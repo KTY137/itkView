@@ -20,6 +20,86 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 
 - Monorepo steht mit `backend/`, `frontend/`, `agent/`, `deploy/`, CI- und
   Docker-Grundstruktur.
+- **Modul-Worksheet: Payload-Diaet + Bearbeitungssicherheit (2026-08-26):**
+  Review-Nachzug zum Worksheet-Schnitt (Spec §H), vier Befunde behoben. (1)
+  Die Preview traegt keine gespiegelten Laeufe mehr: `projected.tests[]`
+  heisst jetzt `projected.ghost_tests[]` und enthaelt ausschliesslich noch
+  nicht gepushte Staged-Uploads; rohe Messwerte liefert ausschliesslich
+  `GET /api/components/{sn}/tests`, das die Detailseite erst beim ersten
+  Oeffnen von „All mirrored runs" laedt. Gemessen mit demselben Serializer
+  gegen den echten TUDO-Spiegel: 20USEM50000064 (29 Laeufe) 227 589 → 3 039
+  Byte (−98,7 %); 20USEM50000063 129 916 → 3 916 Byte; 20USE5L0000031
+  63 307 → 5 444 Byte. (2) Offene Outbox-Actions fuer eine Komponente werden
+  jetzt in SQL vorgefiltert (portables `CAST(payload AS VARCHAR) LIKE
+  '%sn%'`, auf SQLite und PostgreSQL geprueft) statt bei jedem
+  Modulseiten-Oeffnen alle nicht-terminalen Actions instituts-weit in Python
+  zu laden — das bestehende Python-Praedikat bleibt die einzige Autoritaet.
+  (3) Dict-wertige Messergebnisse (echte Metrologie-Maps) zaehlen jetzt wie
+  Arrays mit Diskriminator `kind: "array"|"map"` statt als Zeile zu landen;
+  befuellte Skalare sortieren stabil zuerst; steht eine Komponente auf einer
+  modellfremden Stage (reale TUDO-Module auf `FAILED`), gilt jede Gruppe als
+  erreicht statt das ganze Sheet abzudunkeln; die „Additional"-Gruppe listet
+  jetzt auch nur-staged und bestaetigt-aber-noch-nicht-gespiegelte Testtypen,
+  die vorher unsichtbar waren. (4) Der Edit-Strip prefillt nur noch Werte,
+  die nachweislich durchs Schema-Formular hin- und zurueckgehen: Maps, vom
+  Schema nicht als Array deklarierte Arrays und Arrays mit `null` werden nie
+  vorbelegt oder abgeflacht; ein nicht wegklickbarer Hinweis nennt die
+  betroffenen Felder. Ist ein solches Feld REQUIRED, blockt der Strip
+  komplett und verweist auf den Datei-Drop-Pfad — Datenverlust bleibt lieber
+  sichtbar blockiert als still. Zusaetzlich: ein blockierter Dry-Run ohne
+  Issues wird jetzt angezeigt statt stillschweigend zu verschwinden, ein
+  fehlgeschlagener Fetch des vorherigen Laufs blockt den Strip statt ein
+  leeres Formular zu zeigen, und der Zeilenzustand ist nach Stage+Testtyp
+  geschluesselt, damit ein an zwei Stages pflichtiger Testtyp sein
+  Auf-/Zuklapp- und Edit-Verhalten nicht mehr teilt. Nebenbefund: die
+  aufgeklappte Lauf-Ansicht rendierte Dict-Ergebnisse (Metrologie, fuenf
+  Map-Felder; Wire Bonding, acht) als woertlichen Text `[object Object]` —
+  Maps rendern jetzt als Position/Wert-Paare. Das Staged-Fenster zeigt pro
+  offenem Test-Upload jetzt Komponente, Testtyp und die vorgeschlagenen
+  Messwerte im selben kompakten Worksheet-Format (Arrays/Maps als
+  Umfangs-Chip); die Werte kommen aus den Preview-Ghost-Eintraegen, kein
+  neuer Endpunkt. Terminale (History-)Uploads haben keinen Ghost und damit
+  keine Werte — der Screen sagt das explizit, ebenso bei einer noch nicht
+  gespiegelten Komponente; ein Betrachter ohne Schreibrecht sieht jetzt den
+  Grund statt gar keiner Steuerung. Admin Settings hat einen neuen Abschnitt
+  „Production stages" (GUI-Editor fuer `stage_order`/`stage_requirements` je
+  Institut, tastaturbedienbar, Testtyp-Vorschlaege aus gespiegelten Schemata
+  plus in gespiegelter Evidence vorkommenden Testtypen, unbekannter Wert
+  markiert „Not mirrored"). Seed-Stages lassen sich umsortieren, aber nicht
+  entfernen (der Merge in `stage_model_from_settings` haengt sie immer
+  wieder an — neutralisieren geht nur ueber leere Pflicht-Tests); der Screen
+  dupliziert deshalb noch die Seed-Stage-Konstanten, weil kein Endpunkt das
+  effektive Stage-Modell liefert — ein Read-Endpunkt dafuer ist die
+  empfohlene naechste Ausbaustufe. Eine echte End-to-End-Integrationssuite
+  rendert jetzt den echten Komponentenbaum (Worksheet + Formular +
+  Run-Renderer + Staging) mit ausschliesslich gemocktem Netzwerk und fing
+  genau die Schema-Form-Kopplung und den `[object Object]`-Defekt.
+  Verifiziert: 813 Backend-Tests, ruff clean; Frontend-`tsc` sauber, 117
+  Vitest-Tests gruen (Timeout-Deckel auf 20 s statt 5 s angehoben, weil
+  jsdom/userEvent-Interaktionstests auf belasteten Maschinen ueber 5 s
+  brauchten und faelschlich rot wurden).
+- **Postgres-Sortierkorrektheit bei Testlauf-Auswahl (2026-08-26):**
+  `stage_service.satisfied_test_results` pinnt `measured_at NULLS FIRST`
+  jetzt explizit. SQLite sortiert NULLs von sich aus zuerst, PostgreSQL
+  zuletzt — im Deployment laeuft PostgreSQL, also konnten der SQL-„juengster
+  Lauf" und die Python-Auswahl in `preview.py` bislang auseinanderlaufen und
+  einen passed/failed-Status liefern, der dem angezeigten Lauf widersprach
+  und in die Stage-Move-Pruefung einfloss. Ein reiner Datenkorrektheits-Fix,
+  keine Kosmetik — die Testsuite laeuft auf SQLite und kann eine Regression
+  hier nicht auffangen; ein Postgres-Job in CI ist der offene Nachzug.
+- **Modul-Worksheet als Primaeransicht der Detailseite (2026-08-26):** Die
+  Detailansicht rendert nicht mehr jeden Lauf voll (Kurven + komplettes
+  Wertegitter) — bei >100 Laeufen eine unlesbare, ueberlappende Zahlenwand.
+  Neu ist das Spreadsheet-Modell aus Spec §H: pro Stage-Gruppe eine kompakte
+  Tabelle (Zeile = Testtyp), Werte inline (3 Skalare + `+n`, Arrays/Maps nur
+  als Umfangs-Chip — Rohdaten verlassen den Server nie), Zeilen aufklappbar
+  zum vollen Detail, Inline-Edit-Strip statt Sprung zur Formularkarte
+  (staged ueber den unveraenderten Ingest→Dry-Run→Propose-Outbox-Pfad), offene
+  Staged-Actions als Ghost-Zeilen. Die bisherige Vollansicht lebt eingeklappt
+  als `All mirrored runs` weiter. Backend liefert den `worksheet`-Block in
+  `build_component_preview`; dabei gefunden und gefixt: der Latest-Run-Vergleich
+  konnte bei gemischt naiven/tz-bewussten Timestamps die gesamte Preview mit
+  einem 500er abbrechen. Details docs/05.
 - **0.2.1-Reviews (2026-08-26, zwei Opus-Reviewer):** Beide Review-Blocker
   sind gefixt: (C1) die zwei synchronen Evidence-Endpunkte committen jetzt vor
   der Download-Phase (pro Komponente beim Institutssweep) statt die

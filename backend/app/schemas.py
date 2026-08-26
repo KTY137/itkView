@@ -186,6 +186,13 @@ class TestRunAttachmentOut(BaseModel):
 
 
 class ComponentPreviewTestOut(BaseModel):
+    """One staged, not-yet-pushed test upload ("ghost").
+
+    Same shape as a mirrored run so the frontend can render both through one
+    component; ``ghost`` is always ``True`` here and ``attachments`` is always
+    empty, because the run does not exist in the PDB yet.
+    """
+
     test_type: str
     passed: bool | None
     external_ref: str | None
@@ -202,13 +209,79 @@ class ComponentPreviewTestOut(BaseModel):
 
 
 class ComponentProjectedStateOut(ComponentPreviewStateOut):
-    tests: list[ComponentPreviewTestOut]
+    """Projected stage and checks, plus the staged uploads only.
+
+    ``ghost_tests`` deliberately does NOT contain mirrored runs: those carry raw
+    measured values (a single IV sweep dwarfs the rest of this response) and are
+    fetched on demand from ``GET /api/components/{sn}/tests`` when the operator
+    opens the collapsed run list. The field is named ``ghost_tests`` rather than
+    ``tests`` so nothing can mistake it for the component's full test history.
+    """
+
+    ghost_tests: list[ComponentPreviewTestOut]
+
+
+class WorksheetScalarOut(BaseModel):
+    code: str
+    name: str
+    value: Any
+
+
+class WorksheetArraySummaryOut(BaseModel):
+    """A list or dict result reduced to a count — never the raw values.
+
+    ``kind`` tells the frontend which affordance to render ("40 pts" for an
+    array vs "20 entries" for a map); a dict-valued result (e.g. per-position
+    metrology) is exactly as spammy inline as a raw array and must be summarised
+    the same way, not treated as a scalar.
+    """
+
+    code: str
+    name: str
+    points: int
+    kind: Literal["array", "map"]
+
+
+class WorksheetLatestRunOut(BaseModel):
+    external_ref: str | None
+    measured_at: datetime | None
+    run_number: str | int | None
+    passed: bool | None
+    scalars: list[WorksheetScalarOut]
+    arrays: list[WorksheetArraySummaryOut]
+    attachment_count: int
+
+
+class WorksheetStagedRefOut(BaseModel):
+    outbox_action_id: int
+    status: str
+
+
+class WorksheetRowOut(BaseModel):
+    test_type: str
+    status: Literal["passed", "failed", "missing", "pending"]
+    latest: WorksheetLatestRunOut | None
+    staged: list[WorksheetStagedRefOut]
+    run_count: int
+
+
+class WorksheetGroupOut(BaseModel):
+    """``stage=None`` marks the trailing "Additional" group (see preview.py)."""
+
+    stage: str | None
+    reached: bool
+    rows: list[WorksheetRowOut]
+
+
+class ComponentPreviewWorksheetOut(BaseModel):
+    groups: list[WorksheetGroupOut]
 
 
 class ComponentPreviewOut(BaseModel):
     current: ComponentPreviewStateOut
     staged_actions: list[ComponentPreviewActionOut]
     projected: ComponentProjectedStateOut
+    worksheet: ComponentPreviewWorksheetOut
 
 
 class CountBucket(BaseModel):

@@ -24,7 +24,7 @@ import {
 import { t } from "./i18n";
 import ImageLightbox from "./ImageLightbox";
 
-type DisplayTestRun = TestRunDetail | ComponentPreviewTest;
+export type DisplayTestRun = TestRunDetail | ComponentPreviewTest;
 
 function isGhostRun(run: DisplayTestRun): run is ComponentPreviewTest {
   return "ghost" in run && run.ghost;
@@ -37,15 +37,67 @@ function asNumericArray(value: unknown): number[] | null {
   return numbers.length === value.length ? numbers : null;
 }
 
-function formatScalar(value: unknown): string {
+/** Exported so the worksheet's compact values cell (ModuleWorksheet.tsx)
+ * formats a measured value identically instead of keeping a second, drifting
+ * copy of this logic (review finding M4). */
+export function formatScalar(value: unknown): string {
   if (value === null || value === undefined) return t.testResults.valueMissing;
   if (typeof value === "number") {
     // Instrument values are small decimals; trim the float noise without
     // rounding a genuine 0.1664 down to something that looks measured.
     return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(4)));
   }
-  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (typeof value === "boolean") return value ? t.common.yes : t.common.no;
   return String(value);
+}
+
+/**
+ * A dict-valued result: per-position measurements keyed by position name, e.g.
+ * MODULE_METROLOGY's `{"ABC_R5H1_0": 2.1064, …}` or MODULE_WIRE_BONDING's
+ * per-site counts. Not an array, not a scalar — `formatScalar` would stringify
+ * one to the literal "[object Object]" and lose every measured value.
+ */
+function asMap(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+/**
+ * A value nested inside a map cell. Scalars read exactly as they do anywhere
+ * else; a container gets its extent instead of `String(value)`, reusing the
+ * worksheet's chip wording so both surfaces describe extent identically.
+ */
+function formatNestedValue(value: unknown): string {
+  if (Array.isArray(value)) return t.worksheet.arrayPoints(value.length);
+  const nested = asMap(value);
+  if (nested !== null) return t.worksheet.mapEntries(Object.keys(nested).length);
+  return formatScalar(value);
+}
+
+/** The measured per-position values of a dict result, spelled out.
+ *
+ * The compact worksheet row shows only "⌁ 3 entries"; the expanded detail is
+ * where the operator comes for the values themselves, so they are rendered in
+ * full here rather than summarised a second time. An empty map says "⌁ 0
+ * entries" — honestly empty, never "[object Object]".
+ */
+function MapValue({ entries }: { entries: Record<string, unknown> }) {
+  const pairs = Object.entries(entries);
+  if (pairs.length === 0) {
+    return <span className="muted">{t.worksheet.mapEntries(0)}</span>;
+  }
+  return (
+    <dl className="measure-grid">
+      {pairs.map(([position, value]) => (
+        <div className="measure" key={position}>
+          <dt title={position}>{position}</dt>
+          <dd className={value === null || value === undefined ? "muted" : "mono"}>
+            {formatNestedValue(value)}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
 }
 
 function formatTimestamp(value: string | null): string {
@@ -124,7 +176,7 @@ function label(run: DisplayTestRun, code: string): string {
 }
 
 /** Curves first: an IV sweep is the point of the run, the scalars are context. */
-function RunCurves({ run }: { run: DisplayTestRun }) {
+export function RunCurves({ run }: { run: DisplayTestRun }) {
   const arrays = Object.entries(run.results)
     .map(([code, value]) => [code, asNumericArray(value)] as const)
     .filter((entry): entry is readonly [string, number[]] => entry[1] !== null);
@@ -163,25 +215,36 @@ function RunCurves({ run }: { run: DisplayTestRun }) {
   );
 }
 
-function RunScalars({ run }: { run: DisplayTestRun }) {
+/** Every measured value except the curves: scalars, and dict-valued results
+ * expanded to their per-position pairs. */
+export function RunScalars({ run }: { run: DisplayTestRun }) {
   const scalars = Object.entries(run.results).filter(([, value]) => asNumericArray(value) === null);
   if (scalars.length === 0) return null;
 
   return (
     <dl className="measure-grid">
-      {scalars.map(([code, value]) => (
-        <div className="measure" key={code}>
-          <dt title={code}>{label(run, code)}</dt>
-          <dd className={value === null || value === undefined ? "muted" : "mono"}>
-            {formatScalar(value)}
-          </dd>
-        </div>
-      ))}
+      {scalars.map(([code, value]) => {
+        const entries = asMap(value);
+        return (
+          <div className="measure" key={code}>
+            <dt title={code}>{label(run, code)}</dt>
+            {entries === null ? (
+              <dd className={value === null || value === undefined ? "muted" : "mono"}>
+                {formatScalar(value)}
+              </dd>
+            ) : (
+              <dd>
+                <MapValue entries={entries} />
+              </dd>
+            )}
+          </div>
+        );
+      })}
     </dl>
   );
 }
 
-function RunConditions({ run }: { run: DisplayTestRun }) {
+export function RunConditions({ run }: { run: DisplayTestRun }) {
   const entries = Object.entries(run.properties).filter(
     ([, value]) => value !== null && value !== undefined && value !== "",
   );
@@ -202,7 +265,7 @@ function RunConditions({ run }: { run: DisplayTestRun }) {
   );
 }
 
-function RunAttachments({ sn, attachments, onOpen }: {
+export function RunAttachments({ sn, attachments, onOpen }: {
   sn: string;
   attachments: TestRunAttachment[];
   onOpen: (attachment: TestRunAttachment) => void;
@@ -238,28 +301,40 @@ function RunAttachments({ sn, attachments, onOpen }: {
   );
 }
 
+/**
+ * The mirrored runs of one component, with staged uploads shown on top.
+ *
+ * The mirrored runs are always fetched here (`getComponentTests`) rather than
+ * handed down from the component preview: they carry the raw measured values —
+ * an IV sweep is tens of kilobytes — and this section is mounted lazily, so
+ * loading them with the module page would be exactly the traffic the preview
+ * payload was slimmed to avoid.
+ */
 export function TestResultsSection({
   sn,
   refreshKey = 0,
-  projectedRuns,
+  ghostRuns,
 }: {
   sn: string;
   refreshKey?: number;
-  projectedRuns?: ComponentPreviewTest[];
+  /** Staged, not-yet-pushed uploads (`preview.projected.ghost_tests`). They
+   * exist nowhere else, so they are merged in rather than fetched. */
+  ghostRuns?: ComponentPreviewTest[];
 }) {
-  const [runs, setRuns] = useState<DisplayTestRun[] | null>(null);
+  const ghosts = ghostRuns;
+  const [mirrored, setMirrored] = useState<DisplayTestRun[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<TestRunAttachment | null>(null);
 
   function load(signal?: AbortSignal) {
     return getComponentTests(sn, signal)
       .then((data) => {
-        setRuns(data);
+        setMirrored(data);
         setError(null);
       })
       .catch((err: unknown) => {
         if (signal?.aborted) return;
-        setRuns([]);
+        setMirrored([]);
         setError(err instanceof ApiError ? err.message : t.testResults.loadError);
       });
   }
@@ -267,16 +342,16 @@ export function TestResultsSection({
   useEffect(() => {
     const ctrl = new AbortController();
     setLightbox(null);
-    if (projectedRuns !== undefined) {
-      setRuns(projectedRuns);
-      setError(null);
-      return () => ctrl.abort();
-    }
-    setRuns(null);
+    setMirrored(null);
     void load(ctrl.signal);
     return () => ctrl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectedRuns, refreshKey, sn]);
+  }, [refreshKey, sn]);
+
+  // Ghosts first: the mirrored list arrives newest-first and a staged upload is
+  // newer than anything the PDB has mirrored back yet.
+  const runs =
+    mirrored === null ? null : ghosts && ghosts.length > 0 ? [...ghosts, ...mirrored] : mirrored;
 
   return (
     <>
@@ -284,7 +359,7 @@ export function TestResultsSection({
       <div className="panel">
         {runs === null ? (
           <p className="state-note">{t.common.loading}</p>
-        ) : error !== null ? (
+        ) : error !== null && runs.length === 0 ? (
           <p className="state-note">{error}</p>
         ) : runs.length === 0 ? (
           <p className="state-note">
@@ -292,6 +367,9 @@ export function TestResultsSection({
           </p>
         ) : (
           <>
+            {/* A failed mirror fetch must not swallow the staged work, which
+                lives only in the preview payload. */}
+            {error !== null && <p className="state-note">{error}</p>}
             <ul className="run-list">
               {runs.map((run, index) => {
                 const ghost = isGhostRun(run);

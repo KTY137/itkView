@@ -39,6 +39,9 @@ _COMPONENT_TYPE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,31}\Z")
 _CHAT_ID_RE = re.compile(r"-?[0-9]{1,32}\Z|@[A-Za-z0-9_]{1,64}\Z")
 _EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+\Z")
 _TEST_TYPE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
+# Production stage codes, e.g. HV_TAB_ATTACHED. Which stages exist is profile
+# data (hard rule #4); only their *shape* is validated here.
+_STAGE_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
 # Slot keys are the dict keys an assembly payload's ``tools`` map and the
 # per-slot PDB property mapping key off — "snake/kebab tolerant" so either
 # house style works, but not free text (they double as JSON object keys).
@@ -419,6 +422,102 @@ def _shipment_reception_tests(value: Any) -> dict[str, list[str]]:
     return normalised
 
 
+def _stage_name(value: Any) -> str:
+    stage = _clean_string(value, label="Stage name", max_length=64).upper()
+    if _STAGE_NAME_RE.fullmatch(stage) is None:
+        raise InstituteSettingsValidationError(
+            "Stage names may contain uppercase letters, digits, and underscores."
+        )
+    return stage
+
+
+def _stage_order(value: Any) -> list[str] | None:
+    """Normalize the institute's ordered production stages.
+
+    ``None`` clears the override, which is the only way to fall back to the
+    seed default order in ``app.domain.stages.stage_model_from_settings``: it
+    keeps the default whenever the value is not a list of stage names. An
+    empty list is therefore rejected — it *is* a valid list and would leave
+    the model with no stages at all, so every stage move would silently stop
+    being suggested.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise InstituteSettingsValidationError("stage_order must be a list.")
+    normalised: list[str] = []
+    for item in value:
+        stage = _stage_name(item)
+        if stage in normalised:
+            raise InstituteSettingsValidationError("Stage names must be unique.")
+        normalised.append(stage)
+    if not normalised:
+        raise InstituteSettingsValidationError(
+            "stage_order must contain at least one stage; use null to restore the default."
+        )
+    return normalised
+
+
+def _stage_requirements(value: Any) -> dict[str, list[str]] | None:
+    """Normalize the required test types per production stage.
+
+    ``None`` clears the override. An empty list for one stage is meaningful
+    and preserved: it replaces that stage's default requirements with "none".
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise InstituteSettingsValidationError("stage_requirements must be an object.")
+    normalised: dict[str, list[str]] = {}
+    for raw_stage, raw_tests in value.items():
+        stage = _stage_name(raw_stage)
+        if stage in normalised:
+            raise InstituteSettingsValidationError("Stage names must be unique.")
+        if not isinstance(raw_tests, list):
+            raise InstituteSettingsValidationError(
+                "Every stage must map to a list of required test types."
+            )
+        tests: list[str] = []
+        for raw_test_type in raw_tests:
+            test_type = _clean_string(
+                raw_test_type, label="Required test type", max_length=64
+            ).upper()
+            if _TEST_TYPE_RE.fullmatch(test_type) is None:
+                raise InstituteSettingsValidationError(
+                    "Required test types may contain uppercase letters, digits, "
+                    "and underscores."
+                )
+            if test_type in tests:
+                raise InstituteSettingsValidationError(
+                    "Required test types must be unique per stage."
+                )
+            tests.append(test_type)
+        normalised[stage] = tests
+    return normalised
+
+
+def _reconcile_stage_model(normalised: dict[str, Any]) -> None:
+    """Keep a stage that only exists in ``stage_requirements`` visible.
+
+    ``stage_model_from_settings`` appends every requirement stage that is
+    missing from the order, so such an entry is still evaluated — it just
+    happens at the end of the flow. Mirroring that here means the stored
+    profile states what the engine does instead of hiding it in the merge.
+    Only a patch that carries both keys can be reconciled; otherwise the
+    engine's own append remains the single source of truth.
+    """
+
+    order = normalised.get("stage_order")
+    requirements = normalised.get("stage_requirements")
+    if not isinstance(order, list) or not isinstance(requirements, dict):
+        return
+    for stage in requirements:
+        if stage not in order:
+            order.append(stage)
+
+
 def _assembly_tool_slots(value: Any) -> list[dict[str, Any]]:
     """Normalize the combined-tool assembly slots an institute exposes.
 
@@ -541,4 +640,11 @@ def normalize_institute_settings_update(
         normalised["assembly_tool_slots"] = _assembly_tool_slots(
             settings_patch["assembly_tool_slots"]
         )
+    if "stage_order" in settings_patch:
+        normalised["stage_order"] = _stage_order(settings_patch["stage_order"])
+    if "stage_requirements" in settings_patch:
+        normalised["stage_requirements"] = _stage_requirements(
+            settings_patch["stage_requirements"]
+        )
+    _reconcile_stage_model(normalised)
     return normalised

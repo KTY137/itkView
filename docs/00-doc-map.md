@@ -61,6 +61,7 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 | `backend/app/reminders.py`, `notifications.py`, `models.Reminder`, `/api/reminders`, `/api/notifications` | `11`, `adr/002` |
 | `backend/app/institute_settings.py`, Admin-Settings-UI und operative Institutsprofilwerte | `11`, `05`, `04` |
 | `frontend/src/stagedPreview.ts`, `stagedActions.ts`, Detail-/Staged-/Ingest-UI | `05`, `adr/006` |
+| `frontend/src/ModuleWorksheet.tsx`, `testStaging.ts`, Worksheet-Payload in `preview.py` | `05`, `spec H`, `adr/006` |
 | `frontend/src/**` (UI) | `05` |
 | `deploy/`, Docker, CI | `02` (Deployment), README |
 

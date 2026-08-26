@@ -6,9 +6,15 @@ requirements) configurable in-app instead of only at institute creation.
 
 import json
 
+import pytest
 from authutil import authenticate
 from sqlalchemy import select
 
+from app.domain.stages import DEFAULT_STAGE_ORDER, stage_model_from_settings
+from app.institute_settings import (
+    InstituteSettingsValidationError,
+    normalize_institute_settings_update,
+)
 from app.models import AuditEvent, InstituteProfile
 
 
@@ -380,6 +386,130 @@ def test_noop_profile_and_masked_channel_patch_emits_no_update_audit(
         institute = session.get(InstituteProfile, tudo["id"])
     assert events == []
     assert institute.settings["notification_channels"]["lab"]["url"].endswith("/secret")
+
+
+def test_stage_model_normalizer_cleans_names_and_keeps_order(as_admin, session_factory, tudo):
+    response = as_admin.patch(
+        "/api/institutes/TUDO",
+        json={
+            "settings": {
+                "stage_order": [" hv_tab_attached ", "GLUED", "tested"],
+                "stage_requirements": {
+                    " glued ": [" glue_weight ", "MODULE_BOW"],
+                    "TESTED": ["module_iv_amac"],
+                    "HV_TAB_ATTACHED": [],
+                },
+            }
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    settings = response.json()["settings"]
+    assert settings["stage_order"] == ["HV_TAB_ATTACHED", "GLUED", "TESTED"]
+    assert settings["stage_requirements"] == {
+        "GLUED": ["GLUE_WEIGHT", "MODULE_BOW"],
+        "TESTED": ["MODULE_IV_AMAC"],
+        # An explicit empty list is a real override: this stage requires nothing.
+        "HV_TAB_ATTACHED": [],
+    }
+    with session_factory() as session:
+        institute = session.get(InstituteProfile, tudo["id"])
+        model = stage_model_from_settings(institute.settings)
+    assert model.order[:3] == ("HV_TAB_ATTACHED", "GLUED", "TESTED")
+    assert model.required_tests["TESTED"] == ("MODULE_IV_AMAC",)
+    assert model.required_tests["HV_TAB_ATTACHED"] == ()
+
+
+def test_stray_requirement_stage_is_appended_to_the_stored_order(as_admin, session_factory, tudo):
+    """`stage_model_from_settings` appends it anyway — say so in the profile."""
+
+    response = as_admin.patch(
+        "/api/institutes/TUDO",
+        json={
+            "settings": {
+                "stage_order": ["ALPHA", "BETA"],
+                "stage_requirements": {"GAMMA": ["SOME_TEST"]},
+            }
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["settings"]["stage_order"] == ["ALPHA", "BETA", "GAMMA"]
+    with session_factory() as session:
+        institute = session.get(InstituteProfile, tudo["id"])
+    model = stage_model_from_settings(institute.settings)
+    assert model.requirements_through("GAMMA")[-1] == ("GAMMA", "SOME_TEST")
+
+
+def test_null_stage_model_restores_the_seed_default(as_admin, session_factory, tudo):
+    with session_factory() as session:
+        institute = session.get(InstituteProfile, tudo["id"])
+        institute.settings = {"stage_order": ["ONLY_STAGE"], "stage_requirements": {}}
+        session.commit()
+
+    response = as_admin.patch(
+        "/api/institutes/TUDO",
+        json={"settings": {"stage_order": None, "stage_requirements": None}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["settings"]["stage_order"] is None
+    with session_factory() as session:
+        institute = session.get(InstituteProfile, tudo["id"])
+    assert stage_model_from_settings(institute.settings).order == DEFAULT_STAGE_ORDER
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        pytest.param({"stage_order": []}, id="empty-order"),
+        pytest.param({"stage_order": "GLUED"}, id="order-not-a-list"),
+        pytest.param({"stage_order": ["GLUED", 7]}, id="order-item-not-a-string"),
+        pytest.param({"stage_order": ["GLUED", "  "]}, id="blank-stage"),
+        pytest.param({"stage_order": ["GLUED", "glued"]}, id="duplicate-stage"),
+        pytest.param({"stage_order": ["1_GLUED"]}, id="stage-name-shape"),
+        pytest.param({"stage_order": ["G" * 65]}, id="stage-name-too-long"),
+        pytest.param({"stage_requirements": ["GLUED"]}, id="requirements-not-an-object"),
+        pytest.param({"stage_requirements": {"GLUED": "GLUE_WEIGHT"}}, id="tests-not-a-list"),
+        pytest.param({"stage_requirements": {"GLUED": [3]}}, id="test-not-a-string"),
+        pytest.param({"stage_requirements": {"GLUED": ["glue weight"]}}, id="test-shape"),
+        pytest.param(
+            {"stage_requirements": {"GLUED": ["GLUE_WEIGHT", "glue_weight"]}},
+            id="duplicate-test",
+        ),
+        pytest.param(
+            {"stage_requirements": {"GLUED": ["X"], " glued ": ["Y"]}},
+            id="duplicate-requirement-stage",
+        ),
+    ],
+)
+def test_invalid_stage_model_is_rejected(patch):
+    with pytest.raises(InstituteSettingsValidationError):
+        normalize_institute_settings_update({}, patch)
+
+
+def test_empty_requirements_object_is_a_valid_no_override():
+    assert normalize_institute_settings_update({}, {"stage_requirements": {}}) == {
+        "stage_requirements": {}
+    }
+
+
+def test_invalid_stage_model_leaves_the_profile_untouched(as_admin, session_factory, tudo):
+    with session_factory() as session:
+        institute = session.get(InstituteProfile, tudo["id"])
+        institute.settings = {"stage_order": ["KEEP_ME"]}
+        session.commit()
+
+    response = as_admin.patch(
+        "/api/institutes/TUDO",
+        json={"name": "Must roll back", "settings": {"stage_order": ["A", "A"]}},
+    )
+
+    assert response.status_code == 422, response.text
+    with session_factory() as session:
+        institute = session.get(InstituteProfile, tudo["id"])
+        assert institute.settings["stage_order"] == ["KEEP_ME"]
+        assert institute.name == tudo["name"]
 
 
 def test_telegram_and_email_secrets_survive_an_unrelated_structured_save(
