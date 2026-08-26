@@ -18,9 +18,14 @@ fetched again.
 from __future__ import annotations
 
 import re
+from contextlib import closing
 from dataclasses import dataclass
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -28,6 +33,9 @@ from sqlalchemy.orm import Session
 from app.models import TestRunAttachment, TestRunEvidence, utcnow
 
 DEFAULT_ATTACHMENT_DIRNAME = "attachments"
+DEFAULT_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024
+DEFAULT_ATTACHMENT_DOWNLOAD_TIMEOUT_SECONDS = 60
+EOS_DOWNLOAD_HOST = "eosatlas.cern.ch"
 
 # Extensions itkFlow is willing to write. Anything else is stored without one:
 # the content type in the database still drives how it is served, and an
@@ -91,8 +99,9 @@ def _extension_for(content_type: str | None, filename: str | None) -> str:
     return ""
 
 
-def storage_path(component_sn: str, pdb_code: str, content_type: str | None,
-                 filename: str | None) -> str:
+def storage_path(
+    component_sn: str, pdb_code: str, content_type: str | None, filename: str | None
+) -> str:
     """Relative storage path for one attachment. Never derived from a PDB name."""
     safe_sn = _SAFE_SN.sub("_", component_sn or "unknown")
     safe_code = _SAFE_CODE.sub("_", pdb_code)
@@ -122,6 +131,27 @@ def known_attachments(session: Session, component_sn: str) -> list[TestRunAttach
             .order_by(TestRunAttachment.test_type, TestRunAttachment.id)
         )
     )
+
+
+def attachment_read_model(settings: Any, attachment: TestRunAttachment) -> dict[str, Any]:
+    """Return the public, local-only representation of a mirrored attachment.
+
+    Deliberately omit the storage path and any remote source URL.  Both the
+    regular test-run endpoint and the staged preview use this projection, so a
+    raw share link (or a future signed URL) can never leak through one of the
+    read models by accident.
+    """
+    return {
+        "code": attachment.pdb_code,
+        "test_type": attachment.test_type,
+        "test_run_ref": attachment.test_run_ref,
+        "filename": attachment.filename,
+        "content_type": attachment.content_type,
+        "title": attachment.title,
+        "size_bytes": attachment.size_bytes,
+        "stored": resolve_path(settings, attachment) is not None,
+        "is_image": attachment.is_image,
+    }
 
 
 def _upsert_row(
@@ -174,6 +204,7 @@ def pending_attachments(session: Session, component_sn: str) -> list[dict[str, A
         for summary in (evidence.payload or {}).get("attachments") or []:
             if not isinstance(summary, dict) or not summary.get("code"):
                 continue
+            source = "share_link" if summary.get("source") == "share_link" else "pdb"
             descriptors.append(
                 {
                     "component_sn": component_sn,
@@ -183,6 +214,9 @@ def pending_attachments(session: Session, component_sn: str) -> list[dict[str, A
                     "filename": summary.get("filename"),
                     "content_type": summary.get("content_type"),
                     "title": summary.get("title"),
+                    "type": summary.get("type"),
+                    "url": summary.get("url"),
+                    "source": source,
                 }
             )
     return descriptors
@@ -219,11 +253,12 @@ def _as_bytes(result: Any) -> bytes | None:
 # error or sign-in page. Storing it produces a file that is the right size, has
 # the right name, and renders as a broken image — a failure that looks like a
 # success everywhere except the screen.
-_HTML_PREFIXES = (b"<!DOC", b"<!doc", b"<html", b"<HTML", b"<?xml")
+_HTML_PREFIXES = (b"<!doctype", b"<html", b"<?xml")
 
 
 def looks_like_html(data: bytes) -> bool:
-    return data[:5] in _HTML_PREFIXES
+    sample = data[:512].lstrip().lower()
+    return any(sample.startswith(prefix) for prefix in _HTML_PREFIXES)
 
 
 def _reported_content_type(result: Any) -> str | None:
@@ -235,7 +270,133 @@ def _reported_content_type(result: Any) -> str | None:
     return None
 
 
-def _fetch_bytes(client: Any, descriptor: dict[str, Any]) -> tuple[bytes, str | None] | None:
+def _valid_payload(data: bytes | None, max_bytes: int) -> bool:
+    return bool(data) and len(data) <= max_bytes and not looks_like_html(data)
+
+
+def _safe_http_url(url: str, *, eos: bool = False) -> bool:
+    """Reject credential-bearing and obviously local URLs before any request."""
+
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    host = parsed.hostname.rstrip(".").lower()
+    if eos:
+        return parsed.scheme.lower() == "https" and host == EOS_DOWNLOAD_HOST
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return True
+    return address.is_global
+
+
+class _SafeShareRedirects(HTTPRedirectHandler):
+    """Re-check every redirect before urllib follows it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _safe_http_url(newurl):
+            raise HTTPError(newurl, code, "Unsafe attachment redirect refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_public_url(url: str, timeout: int):
+    opener = build_opener(_SafeShareRedirects())
+    request = Request(url, headers={"User-Agent": "itkFlow attachment mirror"})
+    return opener.open(request, timeout=timeout)
+
+
+def _response_content_type(response: Any) -> str | None:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    get_content_type = getattr(headers, "get_content_type", None)
+    if callable(get_content_type):
+        value = get_content_type()
+        return value if isinstance(value, str) and value else None
+    value = headers.get("Content-Type") if hasattr(headers, "get") else None
+    return value.split(";", 1)[0].strip() if isinstance(value, str) and value else None
+
+
+def _fetch_share_link(
+    descriptor: dict[str, Any], *, timeout: int, max_bytes: int
+) -> tuple[bytes, str | None] | None:
+    url = descriptor.get("url")
+    if not isinstance(url, str) or not _safe_http_url(url):
+        return None
+    try:
+        with closing(_open_public_url(url, timeout)) as response:
+            final_url = getattr(response, "geturl", lambda: url)()
+            if not isinstance(final_url, str) or not _safe_http_url(final_url):
+                return None
+            data = response.read(max_bytes + 1)
+            content_type = _response_content_type(response)
+    except Exception:
+        # Every descriptor is best effort. Do not stringify network failures:
+        # redirect/error objects can contain the complete share URL.
+        return None
+    if not isinstance(data, (bytes, bytearray)):
+        return None
+    payload = bytes(data)
+    if content_type and content_type.lower() in {"text/html", "application/xhtml+xml"}:
+        return None
+    return (payload, content_type) if _valid_payload(payload, max_bytes) else None
+
+
+def _fresh_eos_url(client: Any, descriptor: dict[str, Any]) -> str | None:
+    run_ref = descriptor.get("test_run_ref")
+    if not run_ref:
+        return None
+    try:
+        detail = client.get(
+            "getTestRun",
+            json={"testRun": run_ref, "noEosToken": False},
+        )
+    except Exception:
+        return None
+    if not isinstance(detail, dict):
+        return None
+    for entry in detail.get("attachments") or []:
+        if not isinstance(entry, dict):
+            continue
+        code = entry.get("code")
+        if isinstance(code, dict):
+            code = code.get("code")
+        if str(code) != descriptor["code"]:
+            continue
+        url = entry.get("url")
+        if isinstance(url, str) and _safe_http_url(url, eos=True):
+            return url
+    return None
+
+
+def _fetch_eos_bytes(
+    client: Any, descriptor: dict[str, Any], max_bytes: int
+) -> tuple[bytes, str | None] | None:
+    # Signed URLs are deliberately requested anew for every attempted
+    # download, used immediately, and never written to the database.
+    url = _fresh_eos_url(client, descriptor)
+    if url is None:
+        return None
+    try:
+        result = client.get(url)
+    except Exception:
+        return None
+    data = _as_bytes(result)
+    if not _valid_payload(data, max_bytes):
+        return None
+    return data, _reported_content_type(result)
+
+
+def _fetch_pdb_bytes(
+    client: Any, descriptor: dict[str, Any], max_bytes: int
+) -> tuple[bytes, str | None] | None:
     """Pull one attachment's bytes and its real type. None when unavailable.
 
     `getTestRunAttachment` is the route that actually returns the file; it needs
@@ -259,10 +420,26 @@ def _fetch_bytes(client: Any, descriptor: dict[str, Any]) -> tuple[bytes, str | 
         except Exception:
             continue
         data = _as_bytes(result)
-        if not data or looks_like_html(data):
+        if not _valid_payload(data, max_bytes):
             continue
         return data, _reported_content_type(result)
     return None
+
+
+def _fetch_bytes(
+    client: Any | None,
+    descriptor: dict[str, Any],
+    *,
+    timeout: int,
+    max_bytes: int,
+) -> tuple[bytes, str | None] | None:
+    if descriptor.get("source") == "share_link":
+        return _fetch_share_link(descriptor, timeout=timeout, max_bytes=max_bytes)
+    if client is None:
+        return None
+    if descriptor.get("type") == "eos":
+        return _fetch_eos_bytes(client, descriptor, max_bytes)
+    return _fetch_pdb_bytes(client, descriptor, max_bytes)
 
 
 def download_attachments(
@@ -283,6 +460,20 @@ def download_attachments(
         return AttachmentSyncStats()
 
     root = attachment_root(settings)
+    max_bytes = max(
+        1,
+        int(getattr(settings, "attachment_max_bytes", DEFAULT_ATTACHMENT_MAX_BYTES)),
+    )
+    timeout = max(
+        1,
+        int(
+            getattr(
+                settings,
+                "attachment_download_timeout_seconds",
+                DEFAULT_ATTACHMENT_DOWNLOAD_TIMEOUT_SECONDS,
+            )
+        ),
+    )
     downloaded = reused = failed = 0
     client = None
 
@@ -296,6 +487,7 @@ def download_attachments(
             filename=descriptor["filename"],
             content_type=descriptor["content_type"],
             title=descriptor["title"],
+            source=descriptor["source"],
         )
         session.flush()
 
@@ -303,7 +495,8 @@ def download_attachments(
             reused += 1
             continue
 
-        if client is None:
+        needs_pdb_client = descriptor["source"] != "share_link"
+        if needs_pdb_client and client is None:
             if not getattr(gateway, "is_configured", False):
                 failed += 1
                 continue
@@ -313,7 +506,12 @@ def download_attachments(
                 failed += 1
                 continue
 
-        fetched = _fetch_bytes(client, descriptor)
+        fetched = _fetch_bytes(
+            client,
+            descriptor,
+            timeout=timeout,
+            max_bytes=max_bytes,
+        )
         if fetched is None:
             failed += 1
             continue

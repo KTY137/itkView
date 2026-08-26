@@ -207,7 +207,7 @@ def test_component_endpoints_are_in_openapi(client: TestClient):
 def test_component_sync_endpoint_uses_configured_fetcher(
     client: TestClient, tudo: dict, as_operator
 ):
-    def fake_fetcher(settings, institute):
+    def fake_fetcher(settings, institute, access_codes, progress):
         assert settings.pdb_instance == "test"
         assert institute.code == "TUDO"
         return FetchResult(
@@ -253,7 +253,7 @@ def test_component_sync_endpoint_uses_configured_fetcher(
 def test_component_sync_requires_known_institute(client: TestClient, as_operator):
     called = False
 
-    def fake_fetcher(settings, institute):
+    def fake_fetcher(settings, institute, access_codes, progress):
         nonlocal called
         called = True
         return FetchResult(records=[], skipped=0)
@@ -266,7 +266,7 @@ def test_component_sync_requires_known_institute(client: TestClient, as_operator
 
 
 def test_component_sync_reports_pdb_unavailable(client: TestClient, tudo: dict, as_operator):
-    def fake_fetcher(settings, institute):
+    def fake_fetcher(settings, institute, access_codes, progress):
         raise PdbSyncUnavailable("No sandbox token configured.")
 
     client.app.state.component_fetcher = fake_fetcher
@@ -279,7 +279,7 @@ def test_component_sync_reports_pdb_unavailable(client: TestClient, tudo: dict, 
 def test_component_sync_rolls_back_unknown_parent(
     client: TestClient, tudo: dict, as_operator
 ):
-    def fake_fetcher(settings, institute):
+    def fake_fetcher(settings, institute, access_codes, progress):
         return FetchResult(
             records=[record("20USE5S0000801", parent_sn="20USE5M0009999")],
             skipped=0,
@@ -551,12 +551,12 @@ def test_sync_without_prune_scope_never_marks_stale(session_factory):
 
 
 def test_stale_filter_on_component_list(client: TestClient, tudo: dict, as_operator):
-    def fetch_two(settings, institute):
+    def fetch_two(settings, institute, access_codes, progress):
         return FetchResult(
             records=[record("20USE5M0000801"), record("20USE5M0000802")], skipped=0
         )
 
-    def fetch_one(settings, institute):
+    def fetch_one(settings, institute, access_codes, progress):
         return FetchResult(records=[record("20USE5M0000801")], skipped=0)
 
     client.app.state.component_fetcher = fetch_two

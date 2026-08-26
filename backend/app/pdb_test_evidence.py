@@ -17,8 +17,11 @@ Two depths, because they cost very differently:
   belongs on a single opened component, not on a whole-institute sweep.
 """
 
+import hashlib
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from app.test_run_evidence import TestRunEvidenceRecord
 
@@ -100,6 +103,16 @@ def _attachment_summaries(entries: Any) -> list[dict[str, Any]]:
         code = _code(entry.get("code"))
         if not code:
             continue
+        raw_type = entry.get("type")
+        attachment_type = raw_type.lower() if isinstance(raw_type, str) else raw_type
+        raw_url = entry.get("url")
+        url = raw_url if isinstance(raw_url, str) and raw_url else None
+        # EOS download URLs can contain short-lived signatures. Detailed
+        # mirroring explicitly asks the PDB not to mint one, but strip a query
+        # defensively so a changed upstream default can never persist a token.
+        if url and attachment_type == "eos":
+            parsed = urlsplit(url)
+            url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
         summaries.append(
             {
                 "code": code,
@@ -107,15 +120,69 @@ def _attachment_summaries(entries: Any) -> list[dict[str, Any]]:
                 "content_type": entry.get("contentType"),
                 "title": entry.get("title"),
                 "description": entry.get("description"),
+                "type": attachment_type,
+                "url": url,
+                "source": "pdb",
             }
         )
+    return summaries
+
+
+def _http_urls(value: Any):
+    """Yield public-link-shaped strings from one result value.
+
+    zFlow-era visual-inspection fields can be either a single URL or an array
+    of URLs. Nested containers are walked defensively; the historic sentinel
+    value ``"failed"`` naturally falls out because it is not an HTTP URL.
+    """
+
+    if isinstance(value, str):
+        candidate = value.strip()
+        parsed = urlsplit(candidate)
+        if parsed.scheme.lower() in {"http", "https"} and parsed.hostname:
+            yield candidate
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _http_urls(item)
+
+
+def _share_link_summaries(entries: Any) -> list[dict[str, Any]]:
+    """Turn URL-valued PDB results into deterministic attachment descriptors."""
+
+    summaries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        result_code = _code(entry.get("code"))
+        for url in _http_urls(entry.get("value")):
+            digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+            if digest in seen:
+                continue
+            seen.add(digest)
+            path_name = PurePosixPath(unquote(urlsplit(url).path)).name
+            summaries.append(
+                {
+                    "code": digest,
+                    "filename": path_name[:255] or None,
+                    "content_type": None,
+                    "title": entry.get("name") or result_code or "Shared attachment",
+                    "description": f"Mirrored from result {result_code}" if result_code else None,
+                    "type": "share_link",
+                    "url": url,
+                    "source": "share_link",
+                }
+            )
     return summaries
 
 
 def _run_detail_payload(client: Any, run_id: str) -> dict[str, Any]:
     """Measured values, properties and attachments for one run. Best effort."""
     try:
-        detail = client.get("getTestRun", json={"testRun": run_id})
+        # Never persist a short-lived EOS signature. The downloader asks for a
+        # fresh URL only at the instant it needs the bytes.
+        detail = client.get("getTestRun", json={"testRun": run_id, "noEosToken": True})
     except Exception:
         # A detail miss must degrade to pass/fail, never lose the whole run.
         return {}
@@ -131,6 +198,7 @@ def _run_detail_payload(client: Any, run_id: str) -> dict[str, Any]:
     if properties:
         payload["properties"] = properties
     attachments = _attachment_summaries(detail.get("attachments"))
+    attachments.extend(_share_link_summaries(detail.get("results")))
     if attachments:
         payload["attachments"] = attachments
     if detail.get("runNumber") is not None:

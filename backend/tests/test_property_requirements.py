@@ -31,9 +31,15 @@ def test_missing_required_properties_ok_when_present():
 def test_missing_required_properties_no_config_is_noop():
     assert missing_required_properties({}, {}, TEST_TYPE) == []
     assert missing_required_properties({}, {"required_properties": {}}, TEST_TYPE) == []
-    assert missing_required_properties({}, {"required_properties": {"OTHER": ["X"]}}, TEST_TYPE) == []
+    assert (
+        missing_required_properties({}, {"required_properties": {"OTHER": ["X"]}}, TEST_TYPE)
+        == []
+    )
     assert missing_required_properties({}, "not-a-dict", TEST_TYPE) == []
-    assert missing_required_properties({}, {"required_properties": {TEST_TYPE: ["JIG"]}}, None) == []
+    assert (
+        missing_required_properties({}, {"required_properties": {TEST_TYPE: ["JIG"]}}, None)
+        == []
+    )
 
 
 # --- endpoint integration --------------------------------------------------

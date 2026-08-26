@@ -53,6 +53,10 @@ keine reduzierte Zweitfassung, die auseinanderdriftet.
 - Der Sidecar ist ein Windowed-Build ohne nutzbares stdout. Ein frozener Lauf
   schreibt deshalb immer in `<datadir>/logs/server.log`; ohne das wäre ein
   Absturz spurlos.
+- Onefile heißt zwei Prozesse: der gestartete Bootstrap re-exekutiert sich als
+  eigentlicher Server. Beim Beenden killt die Shell deshalb den ganzen
+  Prozessbaum (`taskkill /T` unter Windows) — nur den Bootstrap zu killen ließ
+  den Server nachweislich headless weiterlaufen (Port + DB blieben belegt).
 - Startzeit: Onefile entpackt bei jedem Start (~20 MB). Der Splash überbrückt
   das; wird es störend, ist Onedir plus Tauri-Resources der nächste Schritt.
 - Signierung ist offen. Ohne Zertifikat zeigt Windows SmartScreen eine Warnung.
@@ -62,8 +66,10 @@ keine reduzierte Zweitfassung, die auseinanderdriftet.
   einer Linker-Warnung (`.rsrc merge failure: multiple non-default manifests`),
   und der Notwendigkeit, `--target x86_64-pc-windows-gnu` explizit zu setzen.
   Ohne das sucht der Bundler den Sidecar unter dem MSVC-Triple, waehrend
-  `build-sidecar.py` ihn nach dem Host-Triple benennt. Fuer Releases bleibt
-  MSVC die getretene Pfadstrecke.
+  `build-sidecar.py` ihn nach dem Host-Triple benennt. Seit dem
+  `--bundle`-Schritt (`npm run build` in `desktop/` ruft
+  `build-sidecar.py --bundle`) setzt der Build das Host-Triple selbst — der
+  Handgriff entfaellt. Fuer Releases bleibt MSVC die getretene Pfadstrecke.
 
 ## Alternativen
 

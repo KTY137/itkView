@@ -223,6 +223,31 @@ class TestRunAttachment(Base):
         return bool(self.content_type and self.content_type.startswith("image/"))
 
 
+class TestTypeSchema(Base):
+    """Read-only local mirror of one PDB test-type definition.
+
+    The database column is named ``schema`` to match the public contract;
+    ``schema_data`` avoids colliding with framework helpers in Python code.
+    """
+
+    __tablename__ = "test_type_schema"
+    __test__ = False
+    __table_args__ = (
+        UniqueConstraint(
+            "component_type",
+            "test_code",
+            name="uq_test_type_schema_component_code",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    component_type: Mapped[str] = mapped_column(String(32), index=True)
+    test_code: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    schema_data: Mapped[dict] = mapped_column("schema", JSON, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class AuditEvent(Base):
     """Append-only trail: who did what, when, to which subject."""
 
@@ -352,6 +377,185 @@ class Tool(Base):
     institute: Mapped[InstituteProfile | None] = relationship()
 
 
+class GlueBatch(Base):
+    """A glue/adhesive batch in the local registry (Phase 4, replaces the glue
+    sheet). Lifecycle: new → in_use → expired/empty. `pdb_sn` is an optional,
+    scannable reference to the GLUE component in the PDB — itkFlow never
+    registers GLUE components itself (write scope is dummy modules/hybrids
+    only), it only links to them. Pot life starts ticking at `mixed_at`; the
+    per-type default minutes come from the institute profile
+    (`settings['glue_pot_life_minutes']`), never from code.
+    """
+
+    __tablename__ = "glue_batch"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    glue_type: Mapped[str] = mapped_column(String(48), index=True)  # e.g. POLARIS_EPOXY
+    batch_no: Mapped[str] = mapped_column(String(64), index=True)
+    pdb_sn: Mapped[str | None] = mapped_column(String(20), default=None, index=True)
+    status: Mapped[str] = mapped_column(
+        String(16), default="new", index=True
+    )  # new|in_use|expired|empty
+    manufacturing_date: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    expiry_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    opening_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    bipack_count: Mapped[int | None] = mapped_column(Integer, default=None)
+    note: Mapped[str | None] = mapped_column(Text, default=None)
+    mixed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    pot_life_minutes: Mapped[int | None] = mapped_column(Integer, default=None)
+    institute_id: Mapped[int | None] = mapped_column(
+        ForeignKey("institute_profile.id"), default=None, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    institute: Mapped[InstituteProfile | None] = relationship()
+    usages: Mapped[list["GlueUsage"]] = relationship(
+        back_populates="glue_batch", cascade="all, delete-orphan"
+    )
+
+
+class GlueUsage(Base):
+    """One recorded consumption of a glue batch for a component.
+
+    Links consumables to production (roadmap Phase 4 done criterion: glue data
+    joinable with components). `component_sn` is a plain string, not an FK —
+    the component may not be mirrored yet when glue is logged at the bench.
+    """
+
+    __tablename__ = "glue_usage"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    glue_batch_id: Mapped[int] = mapped_column(ForeignKey("glue_batch.id"), index=True)
+    component_sn: Mapped[str] = mapped_column(String(64), index=True)
+    amount_mg: Mapped[float | None] = mapped_column(Float, default=None)
+    note: Mapped[str | None] = mapped_column(String(240), default=None)
+    used_by: Mapped[str] = mapped_column(String(120))
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("app_user.id"), default=None, index=True
+    )
+    used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    glue_batch: Mapped[GlueBatch] = relationship(back_populates="usages")
+
+
+class Shipment(Base):
+    """Mirror of a PDB shipment plus the local receiving check.
+
+    The PDB fields (`pdb_id` … `items`) are read-mostly and owned by
+    `app.shipment_sync`; the `reception_*` fields are locally leading and never
+    overwritten by a sync (same contract as Tool RFID/blacklist data). The
+    receiving checklist template comes from the institute profile
+    (`settings['shipment_reception_checklist']`).
+    """
+
+    __tablename__ = "shipment"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    pdb_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    name: Mapped[str | None] = mapped_column(String(120), default=None)
+    sender_code: Mapped[str] = mapped_column(String(32), index=True)
+    recipient_code: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)  # PDB status verbatim
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    # [{"sn": …, "component_type": …}] — small lists; a join table would buy
+    # nothing while the PDB owns the truth.
+    items: Mapped[list] = mapped_column(JSON, default=list)
+    institute_id: Mapped[int | None] = mapped_column(
+        ForeignKey("institute_profile.id"), default=None, index=True
+    )
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    # Local receiving check (pending|in_progress|done).
+    reception_status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    reception_checklist: Mapped[list] = mapped_column(JSON, default=list)  # [{label, done}]
+    reception_items: Mapped[list] = mapped_column(JSON, default=list)  # [{sn, received, note?}]
+    reception_note: Mapped[str | None] = mapped_column(Text, default=None)
+    reception_by: Mapped[str | None] = mapped_column(String(120), default=None)
+    reception_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("app_user.id"), default=None
+    )
+    reception_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
+    institute: Mapped[InstituteProfile | None] = relationship()
+
+
+class Reminder(Base):
+    """A recurring or one-off operational task that fires a notification.
+
+    The worker process (`run_worker`) polls `next_due_at` and sends the message
+    through the notification channel named here — channel definitions live in
+    the institute profile (`settings['notification_channels']`), never in code
+    (hard rule #4). A reminder without a channel still fires into the audit
+    trail, so the module is useful before any webhook is configured.
+    """
+
+    __tablename__ = "reminder"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(160))
+    note: Mapped[str | None] = mapped_column(Text, default=None)
+    channel: Mapped[str | None] = mapped_column(String(64), default=None)
+    schedule_kind: Mapped[str] = mapped_column(
+        String(16), default="once"
+    )  # once|daily|weekly|monthly
+    next_due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    last_error: Mapped[str | None] = mapped_column(Text, default=None)
+    created_by: Mapped[str] = mapped_column(String(120))
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("app_user.id"), default=None, index=True
+    )
+    institute_id: Mapped[int | None] = mapped_column(
+        ForeignKey("institute_profile.id"), default=None, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    institute: Mapped[InstituteProfile | None] = relationship()
+    occurrences: Mapped[list["ReminderOccurrence"]] = relationship(
+        back_populates="reminder",
+        cascade="all, delete-orphan",
+    )
+
+
+class ReminderOccurrence(Base):
+    """One durable reminder task, optionally acknowledged and escalated."""
+
+    __tablename__ = "reminder_occurrence"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    reminder_id: Mapped[int] = mapped_column(ForeignKey("reminder.id"), index=True)
+    institute_id: Mapped[int | None] = mapped_column(
+        ForeignKey("institute_profile.id"), default=None, index=True
+    )
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    fired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    delivery_status: Mapped[str] = mapped_column(String(16), default="audit_only")
+    delivery_error: Mapped[str | None] = mapped_column(Text, default=None)
+    escalation_due_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None, index=True
+    )
+    escalation_channel: Mapped[str | None] = mapped_column(String(64), default=None)
+    escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    escalation_error: Mapped[str | None] = mapped_column(Text, default=None)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None, index=True
+    )
+    acknowledged_by: Mapped[str | None] = mapped_column(String(120), default=None)
+    acknowledged_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("app_user.id"), default=None, index=True
+    )
+
+    reminder: Mapped[Reminder] = relationship(back_populates="occurrences")
+
+
 class UserSession(Base):
     """Server-side session: an opaque cookie token bound to a user."""
 
@@ -402,7 +606,8 @@ class SyncJob(Base):
     ``active_key`` is populated only while a job is queued/running. Its unique
     constraint is the cross-request, cross-thread single-flight guard: component
     sync scopes can overlap, so only one component sync may mutate the mirror at
-    a time. Terminal jobs clear the key and remain available as history.
+    a time; evidence syncs use one key per institute. Terminal jobs clear the
+    key and remain available as history.
     """
 
     __tablename__ = "sync_job"
@@ -423,7 +628,7 @@ class SyncJob(Base):
         ForeignKey("app_user.id"), default=None, index=True
     )
     # NULL for terminal rows. SQLite and PostgreSQL both allow multiple NULLs
-    # in a UNIQUE column, while rejecting a second live ``components`` lease.
+    # in a UNIQUE column, while rejecting a second live lease for one scope.
     active_key: Mapped[str | None] = mapped_column(String(32), unique=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
@@ -431,3 +636,21 @@ class SyncJob(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+
+class ServiceHeartbeat(Base):
+    """Latest durable heartbeat for one local background service.
+
+    Heartbeats deliberately describe only itkFlow's own worker processes.  The
+    operations view never probes the PDB (or any other remote dependency) as a
+    side effect of being opened.
+    """
+
+    __tablename__ = "service_heartbeat"
+
+    service: Mapped[str] = mapped_column(String(48), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), default="ok")
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, index=True
+    )

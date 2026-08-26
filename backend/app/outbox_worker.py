@@ -12,9 +12,9 @@ Safety properties:
 - An action that already carries an `external_ref` is treated as *already
   written* and confirmed without a second submit (idempotency guard, covers
   crash-after-write).
-- For `upload_test_run`, the dry-run validation is re-run against the *current*
-  mirror immediately before submitting; stale/invalid actions fail instead of
-  being written.
+- For `upload_test_run` and `assemble_component`, the dry-run validation is
+  re-run against the *current* mirror immediately before submitting;
+  stale/invalid actions fail instead of being written.
 - A `PdbSubmitUnavailable` (could not even attempt the write) is recorded as a
   transient failure — distinct from a PDB *rejection* of the data.
 """
@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.assembly import ASSEMBLY_ACTION_KIND, revalidate_assembly_action
 from app.ingestion import parse_payload
 from app.models import AuditEvent, Component, IngestFile, OutboxAction
 from app.outbox import OutboxStatus, assert_transition
@@ -140,6 +141,8 @@ def revalidate(session: Session, action: OutboxAction) -> list[str]:
         return revalidate_stage_move(session, action)
     if action.kind == "register_component":
         return revalidate_register(session, action)
+    if action.kind == ASSEMBLY_ACTION_KIND:
+        return revalidate_assembly_action(session, action.payload or {})
     return []
 
 

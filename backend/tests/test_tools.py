@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth import hash_password
 from app.db import make_engine, make_session_factory
-from app.models import InstituteProfile, Tool, User
+from app.models import AuditEvent, InstituteProfile, Tool, User
 from app.pdb_sync import FetchResult
 from app.sync import SyncRecord, sync_components
 from app.tool_sync import sync_tools_from_components
@@ -135,6 +135,173 @@ def test_update_tool_can_blacklist(client: TestClient, session_factory, tudo):
     assert resp.json()["status"] == "blacklisted"
 
 
+def test_tool_create_normalizes_identifiers_and_writes_secret_free_audit(
+    client: TestClient, session_factory, tudo
+):
+    email, password = add_operator(session_factory, tudo["id"])
+    login_as(client, email, password)
+    created = client.post(
+        "/api/tools",
+        json={
+            "kind": "  Pickup_Tool ",
+            "code": "  PICKUP-07 ",
+            "label": "  Bench pickup 07 ",
+            "rfid": "  RFID-07 ",
+            "compatible_types": [" r5m0 ", "R5M0", "r5m1"],
+            "status": "active",
+        },
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["kind"] == "pickup_tool"
+    assert body["code"] == "PICKUP-07"
+    assert body["label"] == "Bench pickup 07"
+    assert body["rfid"] == "RFID-07"
+    assert body["compatible_types"] == ["R5M0", "R5M1"]
+
+    with session_factory() as session:
+        event = session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "tool.created",
+                AuditEvent.subject == f"tool:{body['id']}",
+            )
+        )
+        assert event.actor == email
+        assert event.detail == {
+            "institute": "TUDO",
+            "kind": "pickup_tool",
+            "code": "PICKUP-07",
+            "status": "active",
+            "compatible_types": ["R5M0", "R5M1"],
+        }
+
+
+def test_tool_patch_edits_every_structured_field_can_clear_optional_values_and_audits_names(
+    client: TestClient, session_factory, tudo
+):
+    tool_id = add_tool(
+        session_factory,
+        kind="jig",
+        code="JIG-OLD",
+        label="Old label",
+        rfid="OLD-RFID",
+        compatible_types=["R2"],
+        institute_id=tudo["id"],
+        status="active",
+    )
+    email, password = add_operator(session_factory, tudo["id"])
+    login_as(client, email, password)
+    response = client.patch(
+        f"/api/tools/{tool_id}",
+        json={
+            "kind": "panel",
+            "code": "PANEL-NEW",
+            "label": None,
+            "rfid": None,
+            "compatible_types": ["r5m1"],
+            "status": "blacklisted",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        **response.json(),
+        "kind": "panel",
+        "code": "PANEL-NEW",
+        "label": None,
+        "rfid": None,
+        "compatible_types": ["R5M1"],
+        "status": "blacklisted",
+    }
+    with session_factory() as session:
+        event = session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "tool.updated",
+                AuditEvent.subject == f"tool:{tool_id}",
+            )
+        )
+        assert event.detail == {
+            "changed_fields": [
+                "code",
+                "compatible_types",
+                "kind",
+                "label",
+                "rfid",
+                "status",
+            ],
+            "status": "blacklisted",
+        }
+
+    # A no-op save is intentionally not another audit event.
+    assert client.patch(f"/api/tools/{tool_id}", json={"status": "blacklisted"}).status_code == 200
+    with session_factory() as session:
+        events = list(
+            session.scalars(
+                select(AuditEvent).where(
+                    AuditEvent.action == "tool.updated",
+                    AuditEvent.subject == f"tool:{tool_id}",
+                )
+            )
+        )
+        assert len(events) == 1
+
+
+def test_tool_patch_rejects_null_compatible_types_instead_of_crashing(
+    client: TestClient, session_factory, tudo
+):
+    tool_id = add_tool(
+        session_factory,
+        kind="jig",
+        code="JIG-LIST",
+        compatible_types=["R5M0"],
+        institute_id=tudo["id"],
+    )
+    email, password = add_operator(session_factory, tudo["id"])
+    login_as(client, email, password)
+    response = client.patch(f"/api/tools/{tool_id}", json={"compatible_types": None})
+    assert response.status_code == 422
+    assert "must be a list" in response.json()["detail"]
+
+
+def test_tool_identifiers_are_unique_within_institute(client, session_factory, tudo):
+    email, password = add_operator(session_factory, tudo["id"])
+    login_as(client, email, password)
+    first = client.post(
+        "/api/tools",
+        json={"kind": "jig", "code": "JIG-UNIQUE", "rfid": "RFID-UNIQUE"},
+    )
+    assert first.status_code == 201
+    assert client.post(
+        "/api/tools", json={"kind": "jig", "code": "jig-unique"}
+    ).status_code == 409
+    assert client.post(
+        "/api/tools",
+        json={"kind": "jig", "code": "OTHER", "rfid": "rfid-unique"},
+    ).status_code == 409
+
+
+def test_admin_can_delete_tool_and_deletion_is_audited(
+    client: TestClient, session_factory, tudo, as_admin
+):
+    tool_id = add_tool(
+        session_factory,
+        kind="jig",
+        code="REMOVE-ME",
+        compatible_types=[],
+        institute_id=tudo["id"],
+    )
+    response = client.delete(f"/api/tools/{tool_id}")
+    assert response.status_code == 204
+    with session_factory() as session:
+        assert session.get(Tool, tool_id) is None
+        event = session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "tool.deleted",
+                AuditEvent.subject == f"tool:{tool_id}",
+            )
+        )
+        assert event.detail["code"] == "REMOVE-ME"
+
+
 def test_tool_sync_imports_pdb_tools_from_component_mirror(client, session_factory, tudo):
     with session_factory() as session:
         sync_components(session, [tool_component()])
@@ -201,7 +368,7 @@ def test_tool_sync_extracts_side_suffixed_r_types(client: TestClient, session_fa
 
 
 def test_component_sync_auto_refreshes_tool_registry(client: TestClient, tudo, as_operator):
-    client.app.state.component_fetcher = lambda settings, institute: FetchResult(
+    client.app.state.component_fetcher = lambda settings, institute, codes, progress: FetchResult(
         records=[tool_component("20USERT0606117", local_name="Bond_Jig_Large_6117")],
         skipped=0,
     )

@@ -42,3 +42,4 @@ desktop/src-tauri/gen/
 # Locally mirrored PDB attachments — real production images, never commit
 attachments/
 backend/attachments/
+.serena/

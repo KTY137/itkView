@@ -2,10 +2,10 @@
 
 > Legt fest, wie itkFlow echte Nutzerkonten, Rollen und eine faelschungssichere
 > „wer hat was gemacht"-Spur bekommt. **Umgesetzt und End-to-End verdrahtet
-> (2026-07-10): Attribution, Rollen-Enforcement, CSRF und das Frontend-Login
-> stehen und sind getestet** — siehe Umsetzungsstand.
+> (Stand 2026-08-24): Attribution, Rollen-Enforcement, CSRF, Frontend-Login und
+> persoenliche PDB-Verbindungen stehen und sind getestet** — siehe Umsetzungsstand.
 
-## Umsetzungsstand (2026-07-10)
+## Umsetzungsstand (2026-08-24)
 
 **End-to-End umgesetzt und getestet (211 Backend-Tests gruen, Frontend `tsc`
 gruen).** Was steht:
@@ -40,16 +40,43 @@ gruen).** Was steht:
   bleibt erhalten. **Admin-`Users`-Screen** (`frontend/src/screens/UsersScreen.tsx`):
   Personen anlegen, Rolle wechseln, aktivieren/deaktivieren, Passwort
   zuruecksetzen — admin-gated (Nav-Eintrag nur fuer Admins).
+- **Persoenliche PDB-Verbindung (2026-08-24):** Der User-Block in der Rail
+  oeffnet den Account-Screen. Jeder angemeldete User verbindet/testet/ersetzt
+  oder entfernt dort sein eigenes Plus4U/PDB-Access-Code-Paar. Das Backend
+  prueft es vor dem Speichern, verlangt bei institutsgebundenen Konten dieselbe
+  PDB-Institutsmitgliedschaft und speichert nur AES-256-GCM-Ciphertext plus
+  nicht geheime Statusmetadaten. Eine PDB-Identity kann nur einem lokalen Konto
+  gehoeren. API-Antworten, Audit und Browser-Speicher enthalten keine Codes.
+- **Identitaet auf PDB-Operationen:** Component-/Evidence-/Attachment-Reads
+  verwenden ausschliesslich die Verbindung des Request-Users. Background-Syncs
+  verwenden `SyncJob.user_id`; beim Approve bindet `OutboxPdbPrincipal` den
+  Worker und alle Retries an User+PDB-Identity des Freigebenden. Es gibt keinen
+  globalen Credential-Fallback. Details: ADR 004.
 - Tests: `backend/tests/test_auth.py` + `test_auth_enforcement.py` (401/403 je
   Write, Attribution, CSRF, Migration); Erst-Admin per CLI
-  `python -m app.create_admin`.
+  `python -m app.create_admin` **oder per First-Run-Setup in der UI**.
+- **First-Run-Setup (2026-08-25):** `GET /api/setup` meldet `needs_admin=true`,
+  solange die User-Tabelle leer ist; `POST /api/setup/admin` legt genau dann den
+  ersten Admin an (Rolle fest `admin`, kein Institut), loggt ihn direkt ein
+  (Session + CSRF wie beim Login) und schreibt das AuditEvent
+  `setup.admin_created`. Sobald irgendein User existiert, antwortet der Endpoint
+  dauerhaft 409 — danach laeuft Kontenpflege nur noch admin-gated ueber
+  `/api/users`. Das Frontend zeigt bei `needs_admin` statt des Logins den
+  `SetupScreen` (Auth-Status `setup`). Ein frisches Deployment (Desktop wie
+  Server) braucht damit keinen Shell-Zugriff mehr.
+  Nebenlaeufigkeit: auf PostgreSQL serialisiert ein transaktionsgebundener
+  Advisory-Lock (`pg_advisory_xact_lock`) konkurrierende Bootstrap-Calls,
+  damit unter READ COMMITTED nicht zwei „erste Admins" entstehen; SQLite
+  (Desktop) ist single-writer und braucht das nicht. Bis zum Setup kann
+  jeder, der den Port erreicht, die Instanz beanspruchen — deploy/README
+  weist an, das Setup sofort nach dem ersten Start abzuschliessen und den
+  Dienst vorher nicht ueber das vertrauenswuerdige Netz hinaus zu exponieren.
+  Tests: `backend/tests/test_setup_bootstrap.py`.
 
 **Offen:**
 
-- Kein Demo-User im Seed: echtes Login ist erst nach `create_admin` nutzbar
-  (offline greift der Demo-Modus, kein Login-Zwang).
-- Die zwei Evidence-Sync-POSTs sind CSRF-geschuetzt, aber (bewusst) noch nicht
-  rollen-gegated.
+- Kein Demo-User im Seed: echtes Login ist erst nach dem First-Run-Setup (oder
+  `create_admin`) nutzbar (offline greift der Demo-Modus, kein Login-Zwang).
 - 4-Augen-Prinzip fuer Outbox-Approve und OIDC/CERN-SSO bleiben spaeter (siehe
   Offene Fragen).
 
@@ -107,7 +134,8 @@ serverseitig aus der Session** — der Request-Body liefert keinen Actor mehr.
 
 | Aktion | viewer | operator | admin |
 |---|---|---|---|
-| Komponenten/Board/Dashboard lesen | ✓ | ✓ | ✓ |
+| Lokalen Mirror/Board/Dashboard lesen | ✓ | ✓ | ✓ |
+| Eigene PDB-Verbindung verwalten / direkte PDB-Reads | ✓ | ✓ | ✓ |
 | Sync starten | – | ✓ | ✓ |
 | Ingestion-Upload, Outbox anlegen | – | ✓ | ✓ |
 | Outbox freigeben (approve) | – | ✓ (oder 4-Augen, s. u.) | ✓ |
@@ -131,7 +159,7 @@ Institut-Scoping: ein Nutzer agiert in seinem Institut; Reads/Writes werden auf
 
 - **Login-Screen** (unauth -> Login).
 - **Operator-Feld unten links in der Rail** wird der eingeloggte User: Name,
-  Rolle, Institut, Logout. (Genau die Stelle, die heute Platzhalter ist.)
+  Rolle, Institut; Klick oeffnet Account/PDB-Verbindung, Logout bleibt separat.
 - **Rollen-Gating:** Viewer sieht keine Schreib-Buttons (Approve, Propose,
   Sync); Institut-/Nutzerverwaltung nur fuer Admin sichtbar.
 

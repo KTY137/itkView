@@ -25,6 +25,11 @@ niemals (keine Dummy-SN-Vergabe).
    eine spätere, eigene Freigabestufe.
 4. Verifikation dreistufig: Offline-Suite (Fakes), `pdb_sandbox` (read-only
    Smoke), `pdb_write` (DUMMY-E2E, nur mit `ITKFLOW_ALLOW_PDB_WRITES=true`).
+5. Eine Assembly veraendert die Beziehung von **zwei** Komponenten. Deshalb
+   pruefen Worker und realer Submitter Parent und Child samt Typ. Der harte
+   Submitter-Guard laeuft vor dem Aufbau eines authentifizierten PDB-Clients
+   und akzeptiert ausschliesslich itkFlow-registrierte DUMMY-Module/-Hybride;
+   Sensoren und ASICs bleiben auch bei manipuliertem Payload/Flag gesperrt.
 
 ## Konsequenzen
 
@@ -35,3 +40,6 @@ niemals (keine Dummy-SN-Vergabe).
   `docs/09-pdb-production-strategy.md`.
 - Der Sync darf produktive Daten lesen; damit läuft das komplette lokale
   Cockpit (Board/Detail/Stage-Engine) erstmals mit echten Instituts-Daten.
+- `assemble_component` wird zuerst lokal als servervalidierter Outbox-Draft
+  erzeugt. Der Worker wiederholt Dry-run und Snapshot-Pruefung; es gibt keinen
+  direkten PDB-Aufruf aus Wizard oder Request-Handler.

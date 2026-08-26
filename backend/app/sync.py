@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, insert, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import Component, StageEvent, utcnow
@@ -100,11 +100,24 @@ def sync_components(
     created: set[str] = set()
     updated: set[str] = set()
 
+    # Load the whole working set in bounded IN queries. The previous per-record
+    # SELECT made a production-sized refresh issue thousands of local queries,
+    # even when every component was unchanged. Parent SNs are included so pass
+    # 2 never falls back to another N+1 lookup.
+    record_sns = {record.sn for record in records}
+    lookup_sns = record_sns | {
+        record.parent_sn for record in records if record.parent_sn is not None
+    }
+    existing_by_sn: dict[str, Component] = {}
+    for sn_chunk in _chunks(sorted(lookup_sns), 500):
+        for component in session.scalars(
+            select(Component).where(Component.sn.in_(sn_chunk))
+        ):
+            existing_by_sn[component.sn] = component
+
     # Pass 1: upsert mirror fields by serial number.
     for record in records:
-        component = by_sn.get(record.sn) or session.scalar(
-            select(Component).where(Component.sn == record.sn)
-        )
+        component = by_sn.get(record.sn) or existing_by_sn.get(record.sn)
         if component is None:
             component = Component(
                 synced_at=now, **record.model_dump(exclude={"parent_sn", "stage_events"})
@@ -131,9 +144,7 @@ def sync_components(
         component = by_sn[record.sn]
         parent: Component | None = None
         if record.parent_sn is not None:
-            parent = by_sn.get(record.parent_sn) or session.scalar(
-                select(Component).where(Component.sn == record.parent_sn)
-            )
+            parent = by_sn.get(record.parent_sn) or existing_by_sn.get(record.parent_sn)
             if parent is None:
                 raise UnknownParentError(record.sn, record.parent_sn)
         parent_id = parent.id if parent is not None else None
@@ -173,6 +184,12 @@ def sync_components(
     )
 
 
+def _chunks(values: list[str], size: int) -> list[list[str]]:
+    """Split values below SQLite's conservative bind-parameter ceiling."""
+
+    return [values[offset : offset + size] for offset in range(0, len(values), size)]
+
+
 def _sync_stage_events(
     session: Session,
     records: Sequence[SyncRecord],
@@ -187,27 +204,32 @@ def _sync_stage_events(
     events_by_sn = {r.sn: r.stage_events for r in records if r.stage_events}
     if not events_by_sn:
         return
-    session.execute(
-        delete(StageEvent).where(StageEvent.component_sn.in_(list(events_by_sn)))
-    )
+    for sn_chunk in _chunks(sorted(events_by_sn), 500):
+        session.execute(delete(StageEvent).where(StageEvent.component_sn.in_(sn_chunk)))
     session.flush()
+    rows: list[dict] = []
     for sn, events in events_by_sn.items():
         component = by_sn[sn]
         deduped: dict[tuple[str, datetime], StageEventRecord] = {}
         for ev in events:
             deduped[(ev.stage, ev.entered_at)] = ev  # collapse identical entries
         for ev in deduped.values():
-            session.add(
-                StageEvent(
-                    component_sn=sn,
-                    component_type=component.component_type,
-                    type_code=component.type_code,
-                    institute_code=component.institute_code,
-                    stage=ev.stage,
-                    entered_at=ev.entered_at,
-                    rework=ev.rework,
-                )
+            rows.append(
+                {
+                    "component_sn": sn,
+                    "component_type": component.component_type,
+                    "type_code": component.type_code,
+                    "institute_code": component.institute_code,
+                    "stage": ev.stage,
+                    "entered_at": ev.entered_at,
+                    "rework": ev.rework,
+                }
             )
+    if rows:
+        # No StageEvent ORM instances are consumed later, so SQLAlchemy's bulk
+        # path is equivalent here and turns thousands of individual INSERTs
+        # into one executemany operation.
+        session.execute(insert(StageEvent), rows)
     session.flush()
 
 

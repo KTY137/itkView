@@ -62,8 +62,10 @@ nötig; läuft auf einem Lab-PC oder Instituts-VM. Updates via Container-Tag.
 
 **Auth:** Lokale Accounts + optional OIDC (CERN SSO / Instituts-IdP). Rollen: `viewer`, `operator`
 (erfassen), `coordinator` (PDB-Writes freigeben, Stage-Moves), `admin` (Instituts-Profil).
-PDB-Tokens: pro Nutzer hinterlegbar ODER Instituts-Service-Account — konfigurierbar, da Institute
-das unterschiedlich handhaben; jede PDB-Aktion loggt, unter wem sie lief.
+PDB-Zugang: pro Nutzer hinterlegte, serverseitig verschluesselte
+Plus4U/PDB-Access-Codes (ADR 004). Web- und Worker-Aktionen haben keinen
+Instituts-/Server-Credential-Fallback; jede PDB-Aktion loggt und bindet, unter
+welcher lokalen und PDB-Identitaet sie lief.
 
 ## 2. Datenmodell (lokal, vereinfacht)
 
@@ -74,6 +76,9 @@ das unterschiedlich handhaben; jede PDB-Aktion loggt, unter wem sie lief.
   (+ Status: draft → validated → approved → submitted → confirmed/failed), `ingest_file`,
   `glue_batch`, `tool` (Jigs/Pickup-Tools, RFID↔SN — ersetzt ToolConverter-Sheet),
   `reminder`, `audit_event`, `share_link` (read-only Tokens für Kollaborations-Ansichten).
+- **Credential-/Submit-Identitaet:** `pdb_credential` haelt pro User nur
+  AES-GCM-Ciphertext und Statusmetadaten; `outbox_pdb_principal` bindet eine
+  freigegebene Aktion an Approver + PDB-Identity-Snapshot (ADR 004).
 - **Blacklists/Sonderfälle** (heute Config/Apps-Script): `component_flag`
   (z.B. `terminally_dead`, `rfid_blacklisted`, `do_not_process`) — im UI pflegbar, mit Begründung.
 
@@ -100,12 +105,28 @@ Touch-Targets fürs Labor, Tastatur-Navigation, Offline-Puffer der Formulare (PW
 
 **Phase 0 — Fundament (1–2 Wochen Aufwand):** Monorepo-Scaffold (`backend/`, `frontend/`,
 `agent/`, `deploy/`), CI (lint, typecheck, tests), Docker Compose, Auth-Grundgerüst,
-Instituts-Profil-Modell, PDB-Gateway mit Token-Handling gegen die **PDB-Sandbox** (nie Produktion
-in Dev — Lehre aus zFlow!).
+Instituts-Profil-Modell, PDB-Gateway mit fail-closed Produktions-Opt-in und
+persoenlichem Credential-Handling. Es gibt keine PDB-Testinstanz mehr; Dev/CI
+bleiben offline, markierte Integrationslaeufe nutzen Produktion read-only oder
+DUMMY-gescoped (docs/09, ADR 003/004).
 
 **Phase 1 — Read-Only-Cockpit:** Sync-Service (Komponenten/Tests/Shipments des Instituts),
 Komponenten-Browser + Detailseite + Familienbaum, Dashboards. *Ersetzt: OverviewMaker,
 Overview-Tabs, macros.gs-Spaltenverstecken.* → Ab hier täglicher Nutzen, null Schreibrisiko.
+
+Der Komponenten-Sync laeuft als persistenter, globaler Single-Flight-Job statt
+in der Lebensdauer eines HTTP-Requests oder React-Screens. Das Frontend startet
+den Job per REST, findet ihn nach Navigation/Reload wieder und pollt nur dessen
+kleinen Statusdatensatz. Der vollstaendige PDB-Snapshot, Parent-Aufloesung,
+Prune, Stage-Historie und Tool-Ableitung bleiben eine atomare lokale
+Transaktion; ein Fehler oder Server-Neustart exponiert keinen Teilstand.
+Produktive `full`-Payloads werden seriell, mit expliziter Seitengroesse,
+Timeout/Retry und Vollstaendigkeitspruefung gelesen. WebSocket-Push bleibt eine
+spaetere Transportoptimierung, kein Bestandteil der Korrektheitslogik.
+Der aktuelle In-Process-Executor ist bewusst ein **Single-App-Worker-Vertrag**;
+Launcher und Docker-CMD starten genau einen Uvicorn-Worker. Vor horizontaler
+API-Skalierung braucht der Lease zusaetzlich Owner/Heartbeat/Expiry, damit ein
+zweiter Prozess keinen fremden Live-Job als Neustart-Rest klassifiziert.
 
 **Phase 2 — Test-Ingestion & Upload-Queue:** Ingestion-Parser (Metrologie, Bow, Pulltest,
 Wirebonding, Glue-Weight, IV, TC/ColdJig, Strobe Delay, Response Curve — Fixtures aus den

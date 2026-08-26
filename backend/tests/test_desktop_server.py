@@ -1,7 +1,6 @@
 """Desktop packaging entry point: state locations, key stability, ports."""
 
 import json
-import socket
 
 import pytest
 
@@ -59,6 +58,20 @@ def test_settings_keep_the_safe_pdb_default(data_dir, monkeypatch):
     assert settings.pdb_instance == "test"
     assert settings.allow_production is False
     assert settings.pdb_write_scope == "dummy_only"
+
+
+def test_settings_let_the_bundle_fire_its_own_reminders(data_dir, monkeypatch):
+    """The bundle ships one process, so the API must be the reminder scheduler.
+
+    With the `worker` default a packaged install has no ticker at all and every
+    scheduled reminder silently never fires (docs/11).
+    """
+    monkeypatch.delenv("ITKFLOW_REMINDER_SCHEDULER", raising=False)
+    settings = desktop_server.build_settings(data_dir, None)
+    assert settings.reminder_scheduler == "app"
+
+    monkeypatch.setenv("ITKFLOW_REMINDER_SCHEDULER", "off")
+    assert desktop_server.build_settings(data_dir, None).reminder_scheduler == "off"
 
 
 def test_reserve_port_zero_picks_a_free_port():

@@ -17,10 +17,10 @@ keine externen Assets, rendert offline identisch.
 
 ## Sprach-Hinweis (wichtig)
 
-Das Mockup ist **Deutsch beschriftet** — es ist eine Design-Skizze, kein
-Text-Kanon. Das ausgelieferte Produkt-UI ist **Englisch** und i18n-faehig
-(CLAUDE.md Regel #5). Uebernimm aus dem Mockup **Layout, Hierarchie, Interaktion
-und Design-Sprache**, nicht die deutschen Labels.
+Mockup und ausgeliefertes Produkt-UI sind **Englisch** und i18n-faehig
+(CLAUDE.md Regel #5). Das Mockup bleibt eine Design-Skizze: Seine Labels zeigen
+die beabsichtigte Informationshierarchie, waehrend der eigentliche Text-Kanon
+im Frontend-i18n-Modul liegt.
 
 ## Design-Sprache
 
@@ -47,30 +47,175 @@ und Design-Sprache**, nicht die deutschen Labels.
    Karten = Module mit lokalem Namen, Typ-Badge, SN und Status-Chips. Karte →
    Detailseite. „Geist"-Karte zum Anlegen (Sensor scannen).
 2. **Komponenten-Detail:** Stammdaten (Key/Value, Mono), Familienbaum
-   (Modul → Sensor/Hybrid/Powerboard), Outbox-Timeline der letzten Aktionen,
-   Pflicht-Tests je Stage als Tabelle, und ein Stage-Move-Vorschlag als Callout
-   mit Freigeben/Ablehnen (→ Outbox, auditiert).
-3. **Test-Triage:** Tabelle der Inbox-Dateien mit Parser, erkannter Komponente,
-   Vorschau, Validierungs-Chip (valide/FAILED/Zuordnung noetig/ignoriert) und
-   Aktionen (Ansehen, Freigeben, Zuordnen). Deckt sich mit der
-   Ingestion-Parser-Registry + Preview/Dry-Run (siehe Roadmap Phase 2).
-4. **Dashboard:** KPI-Kacheln (Module in Arbeit, Outbox offen, Tests
+   (Modul → Sensor/Hybrid/Powerboard), Pflicht-Tests je Stage, gespiegelte
+   Testlaeufe/Attachments, Stage-Move-Vorschlag und die Karte `Add test result`.
+   Offene Aenderungen werden als serverberechnete Ghost-Projektion gezeigt;
+   die Detailseite berechnet keine Stage-Regeln selbst. Bildgalerie,
+   Testlaufkarten und Thumbnails verwenden ausschliesslich lokal gespiegelte
+   Attachment-Bytes; ein geoeffneter Screen holt keine Bilder direkt aus PDB
+   oder EOS.
+3. **Staged:** Arbeitsvorrat offener PDB-Absichten, nach Komponente gruppiert.
+   Jede Gruppe zeigt Local Name, SN, Thumbnail und aktuelle Stage; jede Action
+   zeigt eine lesbare Summary, Status, `Push to PDB` oder `Discard` und ein
+   aufklappbares technisches Detail. Terminale Actions liegen in `History`.
+4. **Ingest log:** read-only Tabelle der eingegangenen Dateien mit Parser,
+   erkannter Komponente als Detail-Link, Status, Uploader, Zeit, Fehler und
+   einsehbarem Dry-Run. Upload, manuelle Erfassung und `Stage upload` liegen
+   ausschliesslich auf der Komponentendetailseite.
+5. **Dashboard:** KPI-Kacheln (Module in Arbeit, Staged offen, Tests
    ausstehend, Yield) plus Charts (Module je Stage, Durchsatz/Woche).
+6. **Account / persoenliche PDB-Verbindung + Preferences:** Klick auf den angemeldeten
+   User-Block in der Rail oeffnet einen eigenen Screen; Logout bleibt eine
+   getrennte Aktion. Links stehen lokale Identitaet/Rolle/Institut, rechts die
+   PDB-Verbindung mit `not configured|verified|invalid|unreachable`, Identity,
+   Instituten und Pruefzeitpunkten. Codes sind zwei leere Password-Felder und
+   werden nie maskiert zurueckgelesen oder im Browser gespeichert. Muster:
+   Connect & test, Test, Replace sowie Disconnect mit Inline-Bestaetigung. Ein
+   eigenes `Preferences`-Panel bietet `Staged preview: Tabs | Inline | Off`.
+7. **Admin Settings:** Nur fuer Admins sichtbarer Screen fuer ein ausgewaehltes
+   Institutsprofil. Er bietet strukturierte Abschnitte fuer Name/Prefix,
+   Mattermost-/Webhook-Kanaele, Shipment-Empfangscheckliste,
+   komponententypabhaengige Reception-Tests, Glue-Topfzeiten und den
+   Evidence-Komponentenscope. Reception-Tests werden als wiederholbare Paare
+   `Component type` / `Required test type` gepflegt und beim Speichern gruppiert;
+   es gibt keinen Raw-JSON-Editor. Gespeicherte Webhook-URLs erscheinen nur als
+   maskiertes Secret; unveraendertes Speichern bewahrt das Secret, Entfernen
+   eines Kanals entfernt es bewusst. Kanaltests verwenden nur den gespeicherten
+   Kanalnamen.
+8. **Assembly-Wizard:** Eigener, vom Board-CTA erreichbarer scanner-first
+   Arbeitsbereich mit vier sichtbaren Schritten: Parent, Child, Resources,
+   Review. Komponenten werden exakt per SN/lokalem Namen aufgeloest. Das
+   Resource-Panel bietet typgefilterte aktive Tools (Quick-Select plus
+   RFID/Code-Scan), optionale benutzbare Glue-Batches samt Topfzeit und den
+   Assembly-Slot. Erst der serverseitige Dry-run zeigt Blocking Issues,
+   Warnings und abgeleitete PDB-Properties; nur ein gueltiger Preview kann eine
+   Staged-Action erzeugen. `submittable=false` bleibt sichtbar erklaert. Der
+   Wizard schreibt nie direkt in die PDB.
+9. **Operations Health:** Admin-only Cockpit aus ausschliesslich lokal
+   gespeicherter Telemetrie. Textuell benannte Heartbeat-Zustaende fuer
+   Outbox-Worker und Reminder-Scheduler stehen neben aktiven/letzten Sync-Jobs,
+   Staged-Backlog und Retry-Limit, offenen Reminder-Tasks sowie Parser-/Triage-
+   Problemen. Institutsgebundene Admins sehen nur ihr eigenes Profil; globale
+   Admins koennen Institut oder Gesamtansicht waehlen. Jede Problemgruppe
+   verlinkt direkt nach `Staged`, `Ingest log` oder `Reminders`. Ein Refresh
+   fuehrt niemals einen Live-PDB-Probe aus.
+
+### Staged-Preview auf der Komponentendetailseite
+
+- **`Tabs` (Default):** Im Detailkopf stehen `Current` und, nur bei mindestens
+  einer offenen Action, `Staged (n)`. `Current` zeigt ausschliesslich den
+  bestaetigten Mirror. `Staged` zeigt die projizierte Stage, Pending-Checks und
+  Ghost-Testlaeufe gestrichelt/abgesetzt. Jede Action bleibt einzeln push- oder
+  verwerfbar.
+- **`Inline`:** Keine zweite Tab-Ansicht. Der Stage-Chip zeigt beispielsweise
+  `HV Tab Attached → ⌇Glued⌇`; Ghost-Testlaeufe stehen in der bestehenden
+  Testliste und Pflicht-Checks erhalten einen textuell bezeichneten
+  `Pending`-Chip.
+- **`Off`:** Keine projizierte Stage und keine Ghost-Testzeilen. Die bestehende
+  kompakte Liste `Staged changes` bleibt sichtbar, damit die Praeferenz offene
+  Arbeit nie versteckt oder verwirft.
+
+Die Einstellung wird best effort in `localStorage` unter
+`itkflow.stagedPreview` gespeichert. Jeder Zugriff ist mit Fallback auf `tabs`
+abgesichert; blockierter Storage darf den Screen nicht brechen. Die
+Praeferenz ist browserlokal, enthaelt keine Secrets und veraendert keine
+Berechtigung oder Outbox-Action.
+
+### Testerfassung auf der Komponentendetailseite
+
+Die Karte `Add test result` bietet zwei Eingaenge in denselben serverseitigen
+Pfad:
+
+- Datei ablegen/auswaehlen: Upload mit an die aktuelle Komponente gebundenem
+  `component_sn`; eine abweichende SN im Inhalt wird als blockierendes Issue
+  gezeigt, nicht korrigiert.
+- `Record test`: Testtyp aus dem lokalen PDB-Schema-Mirror waehlen und ein
+  kontrolliertes Formular ausfuellen. Skalare Typen erhalten passende Felder,
+  Arrays eine validierte Zeilen-Eingabe; unbekannte Typen bleiben read-only mit
+  Erklaerung. Rohes JSON wird nie angezeigt oder editiert.
+
+Beide Eingaenge erzeugen zuerst einen `IngestFile`, zeigen denselben Dry-Run
+mit Messwerten, Warnungen und Issues und bieten erst bei gueltigem Ergebnis
+`Stage upload` an. Das erzeugt eine Ghost-Action; es schreibt nicht direkt in
+die PDB.
+
+Kommt die Testerfassung vom Shipment-Screen, werden Seriennummer und Testtyp
+als gemeinsamer Navigation-Intent uebergeben. Die Detailkarte oeffnet sofort
+das Formular, zeigt `Pinned test: <TYPE>` und sperrt den Testtyp-Select auf den
+exakten geforderten Typ. Fehlt dessen lokales Schema, bleibt die Erfassung mit
+einer konkreten Sync-Erklaerung blockiert. Datei- und Formularpfad senden beide
+Pins an den Server; Browserzustand allein gilt nie als Bindung.
+
+### Shipment-Empfang und Reception-Tests
+
+Die Shipment-Tabelle zeigt neben dem Empfangsstatus eine eigene Spalte
+`Reception tests` mit textuell benannten Chips `Missing`, `Pending`, `Passed`
+oder `Failed`; ohne Profilanforderung steht `Not required`. Im Detail wird je
+Shipment-Item die Seriennummer, der Komponententyp und jede geforderte
+Testtyp-/Status-Zeile gezeigt. Fuer `Missing` und `Failed` fuehrt `Record test`
+in den oben beschriebenen gepinnten Flow. `Pending` bietet keinen zweiten
+Erfassungsbutton und wird nie wie `Passed` dargestellt.
+
+Unter jeder Requirement-Gruppe steht der Schreib-Scope explizit: ein lokal
+registrierter DUMMY kann nach Review ueber den geschuetzten Staged-Flow gepusht
+werden; bei Produktionskomponenten oder noch nicht gespiegelten Items lautet
+die Aussage, dass Erfassen/Stagen moeglich bleibt, Production Writes aber
+deaktiviert sind.
+
+Vor der Empfangscheckliste fasst ein Banner den serverseitig projizierten Gate-
+Status zusammen. `Finish receiving check` bleibt deaktiviert, solange ein
+konfigurierter Test nicht bestanden ist. Admins koennen bewusst `Override
+incomplete reception tests` aktivieren, muessen einen Grund eingeben und sehen
+den Audit-Hinweis; der Button benennt sich dann in `Finish with admin override`
+um. Operatoren sehen stattdessen die Aussage, dass nur ein Admin uebersteuern
+kann. Die UI ist eine Erklaerung des Gates, nicht dessen Sicherheitsgrenze; der
+Server prueft den Status erneut.
+
+### Ehrlichkeit im Staged-Fenster
+
+`Push to PDB` kettet nur die bestehende Outbox-Statusmaschine bis
+`submitted`; der Worker, die persoenliche Credential-Bindung, Audit und ADR
+003 bleiben die einzige Schreibgrenze. Bei `submittable=false` fehlt der
+Push-Button. Stattdessen erklaert der Screen sichtbar: `Production writes are
+not enabled — stays staged (dummy-only scope)`. Farbe allein reicht fuer Ghost,
+Pending, Fehler oder Schreibschutz nie als Unterscheidungsmerkmal.
 
 ## Globale UI-Elemente
 
 - **Scanner-first:** globale Scan-Leiste oben (SN/RFID/lokaler Name), Enter
   oeffnet die Komponente. Erfassung ist scan-getrieben, nicht maus-getrieben.
-- **Nav-Rail** mit Gruppen „Produktion" und „Standort"; noch nicht gebaute
-  Bereiche (Glue-Batches, Shipments, Werkzeuge, Reminder) sind sichtbar,
-  deaktiviert und mit Phasen-Badge (`P4`) markiert.
-- **PDB-Sync-Indikator** und **`itkpd-test`-Kennzeichnung** in der Topbar —
-  nie so tun, als sei Produktion im Spiel.
-- **Wizard-Modal** (z.B. Kleben erfassen) mit Schritt-Indikator und
-  Live-Berechnung (Klebegewicht + Toleranz-Verdikt); Ergebnis geht in die
-  Outbox, nicht direkt in die PDB.
-- **Toast** fuer Aktions-Feedback; jede PDB-wirksame Aktion formuliert „… in
-  Outbox eingereiht", nie „gespeichert".
+- **User-Rail als Account-Einstieg:** Avatar/Name/Rolle sind ein klar
+  fokussierbarer Button zum Account-Screen. Der danebenliegende Logout-Button
+  bleibt separat, damit Kontoeinstellungen nicht versehentlich abmelden.
+- **Nav-Rail** mit Gruppen „Produktion" und „Standort". Der Produktionsblock
+  nennt die Arbeitsorte `Assembly board`, `Components`, `Ingest log`, `Staged`,
+  `Dashboard` und `Statistics`. Der Standortblock enthaelt `Tools`,
+  `Glue batches`, `Shipments` und `Reminders`; Admins sehen zusaetzlich
+  `Operations health` und `Settings`. Nur tatsaechlich noch nicht gebaute Bereiche sind deaktiviert und
+  tragen ein Phasen-Badge.
+- **Globaler PDB-Sync-Indikator** in der Topbar: Ein laufender Component- oder
+  Evidence-Sync
+  bleibt beim Screen-Wechsel und nach Reload sichtbar. Er zeigt Statuspunkt,
+  aktuelle Phase, `aktuell/gesamt` (sobald bekannt), Laufzeit und einen schmalen
+  Fortschrittsbalken. Die Components-Ansicht ergaenzt ein kompaktes Detailpanel
+  mit Phase, Laufzeit, letztem Update und persistentem Erfolg/Fehler. Vor dem
+  ersten Gesamtwert ist der Balken unbestimmt; Farbe ist nie der einzige
+  Statustraeger. Nach erfolgreichem Component-Mirror folgt sichtbar der
+  Evidence-/Attachment-Mirror; `Sync complete` darf erst den vorgesehenen
+  Offline-Umfang ehrlich benennen. Der Sync laeuft als Server-Job weiter, nicht
+  als Lebensdauer des gerade montierten React-Screens.
+- **PDB-Umgebung ehrlich kennzeichnen:** Im inerten Default ist Remote-Sync als
+  nicht verfuegbar erkennbar; bei explizit aktivierten Produktions-Reads lautet
+  die Kennzeichnung entsprechend `Production reads` und verschweigt nie den
+  separaten DUMMY-Schreib-Scope. Die historische, nicht mehr existente
+  `itkpd-test`-Instanz ist kein Produktlabel mehr.
+- **Assembly als eigener Wizard-Screen:** Der laengere Scan-/Resource-/Review-
+  Flow bleibt als eigener Arbeitsbereich stabil und darf nicht durch ein
+  versehentlich geschlossenes Modal verloren gehen. Kurze Test-Erfassungen
+  duerfen weiterhin als kompakte Karte/Modal erscheinen; jedes Ergebnis geht
+  in Staged-Actions, nie direkt in die PDB.
+- **Toast** fuer Aktions-Feedback; jede PDB-wirksame Aktion formuliert zum
+  Beispiel `… staged for PDB review`, nie `saved to PDB`.
 
 ## Pflege
 

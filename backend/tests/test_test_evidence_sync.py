@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
-from app.models import Component
+from app.models import Component, TestRunAttachment
 from app.pdb_test_evidence import fetch_test_run_evidence
 from app.stage_service import satisfied_test_results
 
@@ -55,8 +56,11 @@ def test_fetch_empty_when_not_configured():
 
 
 def test_sync_evidence_endpoint_populates_and_feeds_stage_engine(
-    client: TestClient, session_factory, as_operator
+    client: TestClient, session_factory, tudo, as_operator
 ):
+    with session_factory() as session:
+        session.add(_module("20USEM00000001"))
+        session.commit()
     client.app.state.pdb_gateway = _FakeGateway(component=COMPONENT)
     resp = client.post("/api/components/20USEM00000001/sync-evidence").json()
     assert resp["created"] == 3
@@ -72,18 +76,83 @@ def test_sync_evidence_endpoint_populates_and_feeds_stage_engine(
     assert again["created"] == 0 and again["unchanged"] == 3
 
 
-def test_sync_evidence_endpoint_reports_a_missing_connection(client: TestClient, as_operator):
+def test_sync_evidence_endpoint_reports_a_missing_connection(
+    client: TestClient, session_factory, tudo, as_operator
+):
     """Without a PDB connection this must say so, not report a successful zero.
 
     "created: 0" is indistinguishable from "this module genuinely has no test
     runs", which is how a whole institute ends up looking like every required
     test is missing.
     """
+    with session_factory() as session:
+        session.add(_module("20USEM00000001"))
+        session.commit()
     client.app.state.pdb_gateway = _FakeGateway(configured=False, component=COMPONENT)
     response = client.post("/api/components/20USEM00000001/sync-evidence")
 
     assert response.status_code == 503
     assert "PDB" in response.json()["detail"]
+
+
+class _AttachmentClient:
+    def get(self, action, json=None):
+        if action == "getComponent":
+            return {
+                "tests": [
+                    {
+                        "testType": {"code": "VISUAL_INSPECTION"},
+                        "testRuns": [{"id": "RUN-ATT", "passed": True}],
+                    }
+                ]
+            }
+        if action == "getTestRun":
+            assert json == {"testRun": "RUN-ATT", "noEosToken": True}
+            return {
+                "attachments": [
+                    {
+                        "code": "image-code",
+                        "filename": "inspection.jpg",
+                        "contentType": "image/jpeg",
+                        "type": "file",
+                    }
+                ]
+            }
+        if action == "getTestRunAttachment":
+            assert json == {"code": "image-code", "testRun": "RUN-ATT"}
+
+            class _BinaryFile:
+                content = b"\xff\xd8\xff itkflow"
+                mimetype = "image/jpeg"
+
+            return _BinaryFile()
+        raise AssertionError(f"unexpected request {action}")
+
+
+def test_component_evidence_sync_also_downloads_attachments(
+    client: TestClient, session_factory, tudo, as_operator, tmp_path
+):
+    with session_factory() as session:
+        session.add(_module("20USEM00000001"))
+        session.commit()
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    client.app.state.pdb_gateway = _FakeGateway(component=COMPONENT)
+    client.app.state.pdb_gateway._client = _AttachmentClient()
+
+    response = client.post("/api/components/20USEM00000001/sync-evidence")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["attachments_downloaded"] == 1
+    assert body["attachments_failed"] == 0
+    with session_factory() as session:
+        row = session.scalar(select(TestRunAttachment))
+        assert row is not None and row.relative_path.endswith("image-code.jpg")
+        assert (tmp_path / "attachments" / row.relative_path).is_file()
+
+    again = client.post("/api/components/20USEM00000001/sync-evidence").json()
+    assert again["attachments_downloaded"] == 0
+    assert again["attachments_reused"] == 1
 
 
 class _MultiClient:
@@ -112,7 +181,7 @@ def _module(sn: str) -> Component:
 
 
 def test_institute_evidence_sync_covers_only_live_modules(
-    client: TestClient, session_factory, as_operator
+    client: TestClient, session_factory, tudo, as_operator
 ):
     with session_factory() as session:
         session.add(_module("20USEM00000001"))

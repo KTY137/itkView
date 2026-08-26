@@ -83,15 +83,31 @@ def sync_tools_from_components(session: Session, institute: InstituteProfile) ->
         )
     )
 
-    created = updated = unchanged = skipped = 0
+    desired_rows: list[dict[str, Any]] = []
+    skipped = 0
     for component in rows:
         desired = _tool_values(component, institute, settings)
         if desired is None:
             skipped += 1
             continue
-        tool = session.scalar(select(Tool).where(Tool.code == desired["code"]))
+        desired_rows.append(desired)
+
+    # Production mirrors can contain many TOOLS rows. Resolve existing local
+    # entries in bounded batches instead of issuing one SELECT per component.
+    existing_by_code: dict[str, Tool] = {}
+    desired_codes = sorted({desired["code"] for desired in desired_rows})
+    for offset in range(0, len(desired_codes), 500):
+        code_chunk = desired_codes[offset : offset + 500]
+        for tool in session.scalars(select(Tool).where(Tool.code.in_(code_chunk))):
+            existing_by_code[tool.code] = tool
+
+    created = updated = unchanged = 0
+    for desired in desired_rows:
+        tool = existing_by_code.get(desired["code"])
         if tool is None:
-            session.add(Tool(**desired))
+            tool = Tool(**desired)
+            session.add(tool)
+            existing_by_code[desired["code"]] = tool
             created += 1
             continue
 

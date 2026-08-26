@@ -1,10 +1,15 @@
-"""Build the itkFlow desktop sidecar: frontend -> PyInstaller -> Tauri binary.
+"""Build the itkFlow desktop app: frontend -> PyInstaller -> Tauri bundle.
 
 Tauri's `externalBin` looks for a file named `<name>-<target-triple>` next to
-the configured path, so the last step is a rename, not a copy into place by
-hand. Run this before `npm run build` in desktop/.
+the configured path, so the sidecar step ends in a rename, not a copy into
+place by hand. `--bundle` then runs `tauri build --target <host triple>`
+itself: the explicit target keeps the bundler's triple aligned with the
+sidecar's file name (without it, an MSVC-defaulting bundler looks for a
+sidecar the GNU host never produced — ADR 005).
 
-    python desktop/build-sidecar.py [--skip-frontend]
+    python desktop/build-sidecar.py [--skip-frontend] [--bundle]
+
+`npm run build` in desktop/ runs the whole chain.
 """
 
 from __future__ import annotations
@@ -45,11 +50,26 @@ def target_triple() -> str:
     return match.group(1)
 
 
-def build_frontend() -> None:
+def npm_command() -> str:
     npm = shutil.which("npm.cmd") or shutil.which("npm")
     if npm is None:
         raise SystemExit("npm was not found on PATH.")
-    run([npm, "run", "build"], cwd=FRONTEND_DIR)
+    return npm
+
+
+def build_frontend() -> None:
+    run([npm_command(), "run", "build"], cwd=FRONTEND_DIR)
+
+
+def bundle_app(triple: str) -> None:
+    run(
+        [npm_command(), "exec", "--", "tauri", "build", "--target", triple],
+        cwd=DESKTOP_DIR,
+    )
+    bundle_dir = DESKTOP_DIR / "src-tauri" / "target" / triple / "release" / "bundle"
+    installers = sorted(bundle_dir.rglob("*.exe")) if bundle_dir.is_dir() else []
+    for installer in installers:
+        print(f"installer ready: {installer.relative_to(REPO_ROOT)}")
 
 
 def build_sidecar() -> Path:
@@ -86,6 +106,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Reuse the existing frontend/dist instead of rebuilding it.",
     )
+    parser.add_argument(
+        "--bundle",
+        action="store_true",
+        help="After the sidecar, run 'tauri build --target <host triple>' too.",
+    )
     args = parser.parse_args(argv)
 
     if not args.skip_frontend:
@@ -95,11 +120,15 @@ def main(argv: list[str] | None = None) -> int:
 
     built = build_sidecar()
 
+    triple = target_triple()
     BINARIES_DIR.mkdir(parents=True, exist_ok=True)
-    target = BINARIES_DIR / f"itkflow-server-{target_triple()}{built.suffix}"
+    target = BINARIES_DIR / f"itkflow-server-{triple}{built.suffix}"
     shutil.copy2(built, target)
     size_mb = target.stat().st_size / (1024 * 1024)
     print(f"\nsidecar ready: {target.relative_to(REPO_ROOT)} ({size_mb:.0f} MB)")
+
+    if args.bundle:
+        bundle_app(triple)
     return 0
 
 

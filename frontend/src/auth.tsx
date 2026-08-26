@@ -11,24 +11,28 @@ import type { ReactNode } from "react";
 import {
   ApiError,
   getMe,
+  getSetupStatus,
   postLogin,
   postLogout,
+  postSetupAdmin,
   setCsrfToken,
   setForbiddenHandler,
   setUnauthorizedHandler,
 } from "./api";
-import type { MeOut, Role } from "./api";
+import type { MeOut, Role, SetupAdminBody } from "./api";
 import { t } from "./i18n";
 
 /**
  * Session state machine:
  *  - `loading`         — the initial `/api/auth/me` probe is in flight.
  *  - `authenticated`   — a real user is signed in (live backend).
+ *  - `setup`           — backend reachable and no account exists yet → show the
+ *                        first-run "create the first admin" screen.
  *  - `unauthenticated` — backend reachable, no session → show the login screen.
  *  - `demo`            — backend unreachable → stay usable on built-in demo data
  *                        instead of trapping the user on a dead login screen.
  */
-export type AuthStatus = "loading" | "authenticated" | "unauthenticated" | "demo";
+export type AuthStatus = "loading" | "authenticated" | "setup" | "unauthenticated" | "demo";
 
 type AuthContextValue = {
   status: AuthStatus;
@@ -41,6 +45,8 @@ type AuthContextValue = {
   isAdmin: boolean;
   demo: boolean;
   login: (email: string, password: string) => Promise<void>;
+  /** First-run only: create the initial admin account and sign it in. */
+  bootstrapAdmin: (body: SetupAdminBody) => Promise<void>;
   logout: () => Promise<void>;
   /** Escape hatch from a login screen when the backend is unreachable. */
   enterDemo: () => void;
@@ -90,15 +96,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Initial session probe. A network error means "backend down" → demo mode;
-  // anything else (typically 401) means "not signed in" → login screen.
+  // anything else (typically 401) means "not signed in". Before settling on the
+  // login screen, ask whether any account exists at all — a fresh deployment
+  // shows the first-run setup instead, so no CLI step is ever needed.
   useEffect(() => {
     const ctrl = new AbortController();
     getMe(ctrl.signal)
       .then((me) => applyUser(me))
-      .catch((err: unknown) => {
+      .catch(async (err: unknown) => {
         if (ctrl.signal.aborted) return;
-        if (err instanceof ApiError && err.isNetwork) clearSession("demo");
-        else clearSession("unauthenticated");
+        if (err instanceof ApiError && err.isNetwork) {
+          clearSession("demo");
+          return;
+        }
+        try {
+          const setup = await getSetupStatus(ctrl.signal);
+          if (ctrl.signal.aborted) return;
+          clearSession(setup.needs_admin ? "setup" : "unauthenticated");
+        } catch {
+          if (!ctrl.signal.aborted) clearSession("unauthenticated");
+        }
       });
     return () => ctrl.abort();
   }, [applyUser, clearSession]);
@@ -135,6 +152,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [applyUser],
   );
 
+  const bootstrapAdmin = useCallback(
+    async (body: SetupAdminBody) => {
+      const me = await postSetupAdmin(body);
+      applyUser(me);
+    },
+    [applyUser],
+  );
+
   const logout = useCallback(async () => {
     try {
       await postLogout();
@@ -161,11 +186,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAdmin: demo || role === "admin",
       demo,
       login,
+      bootstrapAdmin,
       logout,
       enterDemo,
       showToast,
     };
-  }, [status, user, csrf, login, logout, enterDemo, showToast]);
+  }, [status, user, csrf, login, bootstrapAdmin, logout, enterDemo, showToast]);
 
   return (
     <AuthContext.Provider value={value}>

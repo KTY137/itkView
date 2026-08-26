@@ -1,61 +1,72 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import type { FormEvent } from "react";
-import {
-  ApiError,
-  getIngestFiles,
-  getIngestPreview,
-  postIngestFile,
-  postIngestOutboxProposal,
-} from "../api";
+import { ApiError, getIngestFiles, getIngestPreview } from "../api";
 import type { IngestFile, IngestPreview } from "../api";
-import { useAuth } from "../auth";
-import { makeDemoIngestFiles } from "../demoData";
+import { getDemoComponent, makeDemoIngestFiles } from "../demoData";
 import { formatTimestamp, t } from "../i18n";
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-function parseJsonObject(text: string): Record<string, unknown> {
-  const parsed = JSON.parse(text) as unknown;
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(t.triage.invalidJson);
-  }
-  return parsed as Record<string, unknown>;
+function statusChip(file: IngestFile): string {
+  if (file.error !== null || file.status === "failed") return "chip red";
+  if (file.status === "triage") return "chip amber";
+  if (file.status === "proposed" || file.status === "processed") return "chip green";
+  return "chip neutral";
 }
 
-export default function TriageScreen() {
-  const { canWrite, user } = useAuth();
+function demoPreview(file: IngestFile): IngestPreview {
+  const component = file.component_sn === null ? null : getDemoComponent(file.component_sn);
+  const uploadReady = file.error === null && file.component_sn !== null && file.test_type !== null;
+  return {
+    file_id: file.id,
+    parser: file.parser ?? t.triage.unknownParser,
+    upload_ready: uploadReady,
+    component_sn: file.component_sn,
+    local_name: component?.local_name ?? null,
+    component_mirrored: component !== null,
+    component_stage: component?.stage ?? null,
+    institute_code: component?.institute_code ?? null,
+    test_type: file.test_type,
+    run_number: null,
+    institution: component?.institute_code ?? null,
+    measured_at: null,
+    passed: null,
+    problems: file.error !== null,
+    n_properties: 0,
+    results: [],
+    issues: file.error === null ? [] : [file.error],
+    warnings: uploadReady ? [t.triage.demoPreviewWarning] : [],
+  };
+}
+
+export default function TriageScreen({
+  onOpenComponent,
+}: {
+  onOpenComponent: (sn: string) => void;
+}) {
   const [files, setFiles] = useState<IngestFile[]>([]);
-  const [filename, setFilename] = useState("");
-  const [uploadedBy, setUploadedBy] = useState(user?.email ?? "ui-demo-user");
-  const [payloadText, setPayloadText] = useState(t.triage.payloadPlaceholder);
   const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const [busyProposalId, setBusyProposalId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [demo, setDemo] = useState(false);
-  const demoStore = useRef<IngestFile[] | null>(null);
   const [previewId, setPreviewId] = useState<number | null>(null);
   const [preview, setPreview] = useState<IngestPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const previewRequest = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await getIngestFiles();
-      setFiles(data);
+      setFiles(await getIngestFiles());
       setDemo(false);
-    } catch (err) {
-      if (err instanceof ApiError && err.isNetwork) {
-        if (demoStore.current === null) demoStore.current = makeDemoIngestFiles();
-        setFiles(demoStore.current);
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.isNetwork) {
+        setFiles(makeDemoIngestFiles());
         setDemo(true);
       } else {
-        setError(errorMessage(err));
+        setError(errorMessage(caught));
       }
     } finally {
       setLoading(false);
@@ -66,84 +77,38 @@ export default function TriageScreen() {
     void load();
   }, [load]);
 
-  async function handleUpload(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setNotice(null);
-    setError(null);
-    let payload: Record<string, unknown>;
-    try {
-      payload = parseJsonObject(payloadText);
-    } catch (err) {
-      setError(errorMessage(err));
-      return;
-    }
-
-    setUploading(true);
-    try {
-      const created = await postIngestFile({
-        filename: filename.trim(),
-        uploaded_by: uploadedBy.trim(),
-        payload,
-      });
-      setFiles((current) => [created, ...current]);
-      setNotice(t.triage.uploadReceived(created.id, created.status));
-      setFilename("");
-    } catch (err) {
-      if (err instanceof ApiError && err.isNetwork && demoStore.current !== null) {
-        setNotice(t.outbox.transitionNetwork);
-      } else {
-        setError(`${t.triage.uploadFailed}: ${errorMessage(err)}`);
-      }
-    } finally {
-      setUploading(false);
-    }
-  }
-
-  async function handlePropose(file: IngestFile) {
-    setNotice(null);
-    setError(null);
-    if (demo) {
-      setNotice(t.outbox.transitionNetwork);
-      return;
-    }
-    setBusyProposalId(file.id);
-    try {
-      const action = await postIngestOutboxProposal(file.id, { created_by: uploadedBy.trim() });
-      setFiles((current) =>
-        current.map((item) =>
-          item.id === file.id
-            ? { ...item, status: "proposed", error: null, outbox_action_id: action.id }
-            : item,
-        ),
-      );
-      setNotice(t.triage.proposedOutbox(action.id));
-    } catch (err) {
-      setError(`${t.triage.proposalFailed}: ${errorMessage(err)}`);
-    } finally {
-      setBusyProposalId(null);
-    }
-  }
+  useEffect(() => () => previewRequest.current?.abort(), []);
 
   async function handleTogglePreview(file: IngestFile) {
+    previewRequest.current?.abort();
+    previewRequest.current = null;
     if (previewId === file.id) {
       setPreviewId(null);
       setPreview(null);
-      return;
-    }
-    if (demo) {
-      setNotice(t.triage.previewUnavailableDemo);
+      setPreviewError(null);
+      setPreviewLoading(false);
       return;
     }
     setPreviewId(file.id);
     setPreview(null);
     setPreviewError(null);
+    if (demo) {
+      setPreview(demoPreview(file));
+      return;
+    }
+    const ctrl = new AbortController();
+    previewRequest.current = ctrl;
     setPreviewLoading(true);
     try {
-      setPreview(await getIngestPreview(file.id));
-    } catch (err) {
-      setPreviewError(errorMessage(err));
+      const next = await getIngestPreview(file.id, ctrl.signal);
+      if (!ctrl.signal.aborted) setPreview(next);
+    } catch (caught) {
+      if (!ctrl.signal.aborted) setPreviewError(errorMessage(caught));
     } finally {
-      setPreviewLoading(false);
+      if (previewRequest.current === ctrl) {
+        previewRequest.current = null;
+        setPreviewLoading(false);
+      }
     }
   }
 
@@ -152,6 +117,7 @@ export default function TriageScreen() {
       <div className="sc-head">
         <h1>{t.nav.triage}</h1>
         <span className="sub">{t.triage.subtitle}</span>
+        <span className="chip neutral">{t.triage.readOnly}</span>
         {demo && <span className="badge warn">{t.common.demoBadge}</span>}
       </div>
       {demo && (
@@ -159,55 +125,12 @@ export default function TriageScreen() {
           <span className="muted">{t.common.demoNote}</span>
         </div>
       )}
-      {canWrite && (
-        <form className="panel compact-panel triage-form" onSubmit={handleUpload}>
-          <div className="toolbar">
-            <input
-              className="text-input"
-              value={filename}
-              onChange={(event) => setFilename(event.target.value)}
-              placeholder={t.triage.filenamePlaceholder}
-              aria-label={t.triage.filenameLabel}
-              maxLength={240}
-              required
-            />
-            <input
-              className="text-input"
-              value={uploadedBy}
-              onChange={(event) => setUploadedBy(event.target.value)}
-              placeholder={t.triage.uploadedByPlaceholder}
-              aria-label={t.triage.uploadedByLabel}
-              maxLength={120}
-              required
-            />
-            <button className="btn" type="submit" disabled={uploading}>
-              {uploading ? t.common.loading : t.triage.submit}
-            </button>
-          </div>
-          <textarea
-            className="json-input mono"
-            value={payloadText}
-            onChange={(event) => setPayloadText(event.target.value)}
-            aria-label={t.triage.payloadLabel}
-            rows={7}
-            required
-          />
-        </form>
-      )}
-      {notice !== null && (
-        <div className="info-banner" role="status">
-          <span>{notice}</span>
-          <button className="btn" onClick={() => setNotice(null)}>
-            OK
-          </button>
-        </div>
-      )}
       {error !== null ? (
         <div className="error-banner" role="alert">
           <span>
             {t.triage.loadError}: {error}
           </span>
-          <button className="btn" onClick={() => void load()}>
+          <button type="button" className="btn" onClick={() => void load()}>
             {t.common.retry}
           </button>
         </div>
@@ -217,80 +140,86 @@ export default function TriageScreen() {
         <p className="state-note">{t.triage.empty}</p>
       ) : (
         <div className="panel">
-          <table className="data-table">
+          <table className="data-table ingest-log-table">
             <thead>
               <tr>
-                <th scope="col">{t.triage.colId}</th>
                 <th scope="col">{t.triage.colFile}</th>
-                <th scope="col">{t.triage.colStatus}</th>
+                <th scope="col">{t.triage.colParser}</th>
                 <th scope="col">{t.triage.colComponent}</th>
-                <th scope="col">{t.triage.colTestType}</th>
+                <th scope="col">{t.triage.colStatus}</th>
                 <th scope="col">{t.triage.colUploadedBy}</th>
                 <th scope="col">{t.triage.colCreated}</th>
                 <th scope="col">{t.triage.colError}</th>
-                <th scope="col">{t.triage.colActions}</th>
+                <th scope="col">{t.triage.colPreview}</th>
               </tr>
             </thead>
             <tbody>
               {files.map((file) => (
                 <Fragment key={file.id}>
-                <tr>
-                  <td className="mono">#{file.id}</td>
-                  <td>
-                    <div className="tree-row">
-                      <span>{file.filename}</span>
-                      <span className="mono muted">{file.sha256.slice(0, 10)}</span>
-                    </div>
-                  </td>
-                  <td>
-                    <span className={file.status === "triage" ? "chip amber" : "chip green"}>
-                      {file.status}
-                    </span>
-                  </td>
-                  <td className="mono">{file.component_sn ?? t.common.none}</td>
-                  <td className="mono">{file.test_type ?? t.common.none}</td>
-                  <td>{file.uploaded_by}</td>
-                  <td className="muted">{formatTimestamp(file.created_at)}</td>
-                  <td className="error-text">{file.error ?? t.common.none}</td>
-                  <td>
-                    <div className="row-actions">
-                      <button className="btn" onClick={() => void handleTogglePreview(file)}>
+                  <tr>
+                    <td>
+                      <div className="tree-row">
+                        <strong>{file.filename}</strong>
+                        <span className="mono muted">
+                          #{file.id} · {file.sha256.slice(0, 10)} · {t.triage.fileSize(file.size_bytes)}
+                        </span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="tree-row">
+                        <span className="mono">{file.parser ?? t.triage.unknownParser}</span>
+                        {file.test_type !== null && (
+                          <span className="mono muted">{file.test_type}</span>
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      {file.component_sn === null ? (
+                        <span className="muted">{t.common.none}</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="link-btn mono"
+                          onClick={() => onOpenComponent(file.component_sn as string)}
+                        >
+                          {file.component_sn}
+                        </button>
+                      )}
+                    </td>
+                    <td>
+                      <span className={statusChip(file)}>{file.status}</span>
+                    </td>
+                    <td>{file.uploaded_by}</td>
+                    <td className="muted">{formatTimestamp(file.created_at)}</td>
+                    <td className={file.error === null ? "muted" : "error-text"}>
+                      {file.error ?? t.common.none}
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn"
+                        aria-expanded={previewId === file.id}
+                        onClick={() => void handleTogglePreview(file)}
+                      >
                         {previewId === file.id ? t.triage.hidePreview : t.triage.preview}
                       </button>
-                      {file.outbox_action_id !== null ? (
-                        <span className="chip neutral">
-                          {t.triage.alreadyProposed(file.outbox_action_id)}
-                        </span>
-                      ) : file.component_sn === null || file.test_type === null ? (
-                        <span className="muted">{t.triage.cannotPropose}</span>
-                      ) : canWrite ? (
-                        <button
-                          className="btn"
-                          type="button"
-                          disabled={busyProposalId === file.id}
-                          onClick={() => void handlePropose(file)}
-                        >
-                          {busyProposalId === file.id ? t.common.loading : t.triage.proposeOutbox}
-                        </button>
-                      ) : null}
-                    </div>
-                  </td>
-                </tr>
-                {previewId === file.id && (
-                  <tr className="preview-row">
-                    <td colSpan={9}>
-                      {previewLoading ? (
-                        <p className="state-note">{t.common.loading}</p>
-                      ) : previewError !== null ? (
-                        <p className="error-text">
-                          {t.triage.previewFailed}: {previewError}
-                        </p>
-                      ) : preview !== null ? (
-                        <PreviewPanel preview={preview} />
-                      ) : null}
                     </td>
                   </tr>
-                )}
+                  {previewId === file.id && (
+                    <tr className="preview-row">
+                      <td colSpan={8}>
+                        {previewLoading ? (
+                          <p className="state-note">{t.common.loading}</p>
+                        ) : previewError !== null ? (
+                          <p className="error-text">
+                            {t.triage.previewFailed}: {previewError}
+                          </p>
+                        ) : preview !== null ? (
+                          <PreviewPanel preview={preview} />
+                        ) : null}
+                      </td>
+                    </tr>
+                  )}
                 </Fragment>
               ))}
             </tbody>

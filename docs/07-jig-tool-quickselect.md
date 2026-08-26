@@ -4,10 +4,13 @@
 > (Jigs, Pickup-Tools, Glue-Batches) im Assembly-Wizard **abhaengig vom
 > Modultyp per Quick-Select** ausgewaehlt werden statt per Handeingabe.
 >
-> Stand 2026-07-08: Basis umgesetzt fuer lokale `Tool`-Registry, Tools-Screen,
-> Scanner-Aufloesung und read-only Import aus bereits gespiegelten
-> PDB-`TOOLS`-Komponenten (`POST /api/sync/tools/{institute}`). Glue-Batches
-> und direkte Assembly-Wizard-Integration sind noch offen.
+> Stand 2026-08-26: Vollstaendig umgesetzt. Die lokale `Tool`-Registry besitzt
+> auditiertes strukturiertes Create/Edit/Delete und explizite
+> `active|flagged|blacklisted`-Pflege; der Tools-Screen bietet Scanner,
+> Filter, Mirror-Sync und alle Registry-Aktionen. Der scanner-first
+> Assembly-Wizard bindet typgefilterte aktive Tools und benutzbare
+> Glue-Batches ein, zeigt den kanonischen Server-Dry-Run und staged danach
+> ausschliesslich eine `assemble_component`-Outbox-Aktion.
 >
 > Stand 2026-07-10: **Pflicht-Property-Pruefung beim Upload** umgesetzt —
 > `InstituteProfile.settings['required_properties']` = `{test_type: [key, …]}`
@@ -53,13 +56,18 @@ Institut-Profil — statt fixer Felder im Wizard.
 - Der Wizard liest den **gescannten Modultyp** und filtert die Registry:
   `GET /api/tools?kind=jig&fits=R5M1&status=active`.
 
-## API (Skizze)
+## API (umgesetzt)
 
 - `GET /api/tools?kind=&fits=<component_type>&status=` — gefilterte Liste fuer
   den Quick-Select.
 - `GET /api/tools/by-rfid/{rfid}` — Scanner: RFID -> Tool aufloesen.
-- `POST/PATCH /api/tools` (operator/admin) — Registry pflegen, flaggen,
-  blacklisten (auditiert ueber die Outbox-/Audit-Spur).
+- `POST /api/tools`, `PATCH /api/tools/{id}` (operator/admin) — alle
+  strukturierten Felder pflegen, optionale Werte explizit leeren, Status setzen;
+  normalisiert, institutsgebunden, mit eindeutigen Codes/RFIDs und Audit-Events.
+- `DELETE /api/tools/{id}` (admin) — Registry-Eintrag entfernen; die Loeschung
+  bleibt als `tool.deleted` nachvollziehbar.
+- `GET /api/assembly/scan-component`, `POST /api/assembly/preview` und
+  `POST /api/assembly/actions` bilden den kanonischen Wizard-Vertrag.
 
 Umgesetzt zusaetzlich: `POST /api/sync/tools/{institute}` aktualisiert die
 lokale Registry aus bereits gespiegelten PDB-`TOOLS`-Komponenten, ohne die PDB
@@ -76,19 +84,39 @@ erneut anzufragen.
 - Ergebnis geht als validierte Aktion in die **Outbox** (nichts direkt in die
   PDB).
 
+Der Worker wiederholt unmittelbar vor einem Submit die Komponenten-,
+Instituts-, Location-, Tool-, Kompatibilitaets-, Glue-Status-, Ablauf- und
+Topfzeit-Pruefung und vergleicht den aktuellen Zustand mit dem Dry-run-Snapshot.
+Der reale Submitter prueft **vor Client-Aufbau** beide Teilnehmer erneut:
+nur itkFlow-registrierte DUMMY-Komponenten der sicheren Schnittmenge
+`MODULE|HYBRID` sind zulaessig; Sensoren und ASICs sind invariant gesperrt.
+Die aus Tool, Glue und Slot abgeleiteten PDB-Property-Keys kommen aus
+`InstituteProfile.settings['assembly_property_keys']`, nie aus
+institutsspezifischem Anwendungscode.
+
 ## Rule-#4-Check
 
 - Modultyp->Jig-Kompatibilitaet, Zielwerte, Namensschemata: alles Registry/
   Profil, kein Institut-/Typ-Hardcoding im Code.
 
-## Offene Fragen
+## Verbleibende Domaenenklaerungen
 
 - Welche Attachment-Properties je Komponententyp kommen aus dem **PDB-Schema**
   (gespiegelt) vs. rein lokaler Registry?
 - RFID-Format/Mapping (vgl. zFlow `toolConverter`).
-- Blacklist-/Flag-Workflow: rein lokal oder mit PDB-Property gekoppelt?
-- Wie viel „Auto-Vorbelegung" (einziges kompatibles Jig automatisch waehlen) vs.
-  bewusste Bestaetigung?
+- Ob Blacklist-/Flag-Zustaende spaeter mit einer PDB-Property gekoppelt werden,
+  bleibt eine separate Produktentscheidung; aktuell sind sie bewusst lokal.
+- Die exakten instituts-/typspezifischen PDB-Property-Codes muessen vor Nutzung
+  je Profil bestaetigt werden. Ohne Mapping sendet der Wizard keine erfundenen
+  Property-Keys.
+
+## Offline-Verifikation
+
+`backend/tests/test_tools.py` und `backend/tests/test_assembly.py` pruefen CRUD,
+Audit, Eindeutigkeit, Dry-run, Snapshot-Revalidierung, Tool-/Glue-Gates und den
+Submitter mit Fakes. `AssemblyWizardScreen.test.tsx` und
+`ToolsScreen.test.tsx` pruefen den scanner-first UI-Pfad und strukturierte
+Registry-Aktionen. Kein Test ruft die Live-PDB auf.
 
 ## Roadmap-Einordnung
 

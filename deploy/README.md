@@ -12,12 +12,15 @@ docker compose up --build
 - Backend API + OpenAPI docs: http://localhost:8000/docs
 - Health: http://localhost:8000/health — reports the active `pdb_instance`
 
-The first sign-in needs a local account; there is no default one. Create an
-admin inside the running backend container:
+On the very first visit the app shows a **first-run setup screen**: create the
+initial admin account right in the browser — no shell access needed. The form
+disappears permanently once any account exists; from then on the admin manages
+accounts under **Users**. (The CLI fallback
+`docker compose exec backend python -m app.create_admin` still works.)
 
-```bash
-docker compose exec backend python -m app.create_admin --help
-```
+**Complete the setup immediately after the first start.** Until the first
+admin exists, anyone who can reach the port can claim the instance — do not
+expose the service beyond a trusted network before that account is created.
 
 Then sign in and connect your personal PDB access codes under **Account**.
 If that connection test reports “The PDB could not be reached” while

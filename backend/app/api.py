@@ -5,13 +5,18 @@ from collections.abc import Iterator
 from datetime import timezone
 from typing import Literal
 
-from fastapi.responses import FileResponse
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import func, or_, select
+from fastapi.responses import FileResponse
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app import __version__
+from app.assembly import (
+    ASSEMBLY_ACTION_KIND,
+    canonical_action_payload,
+    evaluate_assembly,
+)
 from app.auth import (
     CSRF_COOKIE,
     CSRF_HEADER,
@@ -24,25 +29,42 @@ from app.auth import (
     verify_password,
 )
 from app.config import Settings
+from app.domain.glue import pot_life_state
 from app.domain.stages import DEFAULT_STAGE_ORDER
 from app.ingestion import ParsedTestRun, missing_required_properties, parse_payload
+from app.institute_settings import (
+    InstituteSettingsValidationError,
+    normalize_institute_settings_update,
+)
 from app.models import (
     AuditEvent,
     Component,
+    GlueBatch,
+    GlueUsage,
     IngestFile,
     InstituteProfile,
     OutboxAction,
     OutboxPdbPrincipal,
     PdbCredential,
+    Reminder,
+    ReminderOccurrence,
+    Shipment,
     StageEvent,
     SyncJob,
     TestRunAttachment,
     TestRunEvidence,
+    TestTypeSchema,
     Tool,
     User,
     UserSession,
     utcnow,
 )
+from app.notifications import (
+    NotificationError,
+    channel_configs,
+    redact_channel_urls,
+)
+from app.ops_health import collect_ops_health
 from app.outbox import (
     TERMINAL,
     InvalidTransition,
@@ -67,16 +89,26 @@ from app.pdb_gateway import PdbClientUnavailable
 from app.pdb_scope import is_registrable_type
 from app.pdb_sync import PdbSyncUnavailable
 from app.schemas import (
+    AssemblyDraftIn,
+    AssemblyPreviewOut,
+    AssemblyStageOut,
     AttachmentSyncOut,
     AuditOut,
     ComponentDetailOut,
     ComponentImageOut,
     ComponentOut,
+    ComponentPreviewOut,
     ComponentRegisterIn,
     ComponentSyncOut,
     CountBucket,
     DashboardSummaryOut,
     EvidenceSyncOut,
+    GlueBatchCreate,
+    GlueBatchMixIn,
+    GlueBatchOut,
+    GlueBatchUpdate,
+    GlueUsageCreate,
+    GlueUsageOut,
     HealthOut,
     IngestFileCreate,
     IngestFileOut,
@@ -88,6 +120,10 @@ from app.schemas import (
     InstituteUpdate,
     LoginIn,
     MeOut,
+    NotificationChannelOut,
+    NotificationTestIn,
+    NotificationTestOut,
+    OpsHealthOut,
     OutboxContractOut,
     OutboxCreate,
     OutboxOut,
@@ -95,12 +131,24 @@ from app.schemas import (
     PdbConnectionOut,
     PdbCredentialsPut,
     ProductionStatsOut,
+    ReminderCreate,
+    ReminderOccurrenceOut,
+    ReminderOut,
+    ReminderUpdate,
     RequirementCheckOut,
+    SetupAdminIn,
+    SetupStatusOut,
+    ShipmentItemOut,
+    ShipmentOut,
+    ShipmentReceptionUpdate,
+    ShipmentSyncOut,
     StageSuggestionOut,
     StatsDimensionsOut,
     SyncJobOut,
     TestRunAttachmentOut,
     TestRunDetailOut,
+    TestTypeSchemaOut,
+    TestTypeSchemaSyncOut,
     ToolCreate,
     ToolOut,
     ToolSyncOut,
@@ -113,10 +161,11 @@ from app.stage_service import evaluate_for_component
 from app.stats import production_stats
 from app.sync import UnknownParentError, sync_components
 from app.sync_jobs import (
-    COMPONENT_SYNC_ACTIVE_KEY,
+    ACTIVE_SYNC_STATUSES,
     COMPONENT_SYNC_KIND,
     SyncLeaseBusy,
     acquire_component_sync_lease,
+    acquire_evidence_sync_lease,
     fail_sync_job,
 )
 from app.tool_sync import sync_tools_from_components
@@ -209,6 +258,16 @@ def require_role(*roles: str):
 # Module-level singletons (FastAPI resolves these; avoids calls in arg defaults).
 require_admin = require_role("admin")
 require_operator = require_role("operator", "admin")
+
+
+def _require_institute_scope(user: User, institute: InstituteProfile) -> None:
+    """Reject an institute-bound user targeting another institute's writes."""
+
+    if user.institute_id is not None and user.institute_id != institute.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only modify data for your own institute.",
+        )
 
 
 def _me(user: User, csrf_token: str) -> MeOut:
@@ -308,6 +367,64 @@ def whoami(
         session.csrf_token = csrf_token
         db.commit()
     _set_csrf_cookie(response, csrf_token, request.app.state.settings)
+    return _me(user, csrf_token)
+
+
+# --------------------------------------------------------------------------
+# First-run setup: create the initial admin from the UI, never the CLI
+# --------------------------------------------------------------------------
+
+
+@router.get("/api/setup", response_model=SetupStatusOut, tags=["auth"])
+def setup_status(db: Session = Depends(get_db)) -> SetupStatusOut:
+    return SetupStatusOut(needs_admin=db.scalar(select(User.id).limit(1)) is None)
+
+
+@router.post("/api/setup/admin", response_model=MeOut, status_code=201, tags=["auth"])
+def bootstrap_admin(
+    body: SetupAdminIn, request: Request, response: Response, db: Session = Depends(get_db)
+) -> MeOut:
+    """Create the very first admin account and sign it in.
+
+    Open only while the user table is empty, so a fresh deployment needs no
+    shell access; from the first user on, account management is admin-gated
+    (`/api/users`, docs/06).
+    """
+    # Two concurrent bootstrap calls could both see an empty table under READ
+    # COMMITTED and both create a "first" admin. A transaction-scoped advisory
+    # lock serialises them on PostgreSQL; single-writer SQLite needs none.
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(715001)"))
+    if db.scalar(select(User.id).limit(1)) is not None:
+        raise HTTPException(status_code=409, detail="Setup is already complete.")
+    user = User(
+        email=body.email.strip().lower(),
+        display_name=body.display_name,
+        role="admin",
+        password_hash=hash_password(body.password),
+    )
+    db.add(user)
+    db.flush()
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action="setup.admin_created",
+            subject=f"user:{user.id}",
+            detail={"email": user.email},
+        )
+    )
+    token = new_session_token()
+    csrf_token = new_csrf_token()
+    db.add(
+        UserSession(
+            token=token, user_id=user.id, csrf_token=csrf_token, expires_at=session_expiry()
+        )
+    )
+    db.commit()
+    settings = request.app.state.settings
+    _set_session_cookie(response, token, settings)
+    _set_csrf_cookie(response, csrf_token, settings)
     return _me(user, csrf_token)
 
 
@@ -765,21 +882,106 @@ def health(request: Request) -> HealthOut:
 # --------------------------------------------------------------------------
 
 
+def _institute_out(institute: InstituteProfile) -> InstituteOut:
+    """Serialize a profile with notification webhook URLs masked.
+
+    The profile is readable by every role, but channel URLs are effectively
+    write tokens for the channel they point at. Admins re-enter the URL when
+    editing; the API never returns it (same stance as PDB access codes)."""
+    out = InstituteOut.model_validate(institute)
+    out.settings = redact_channel_urls(out.settings)
+    return out
+
+
 @router.get("/api/institutes", response_model=list[InstituteOut], tags=["institutes"])
-def list_institutes(db: Session = Depends(get_db)) -> list[InstituteProfile]:
-    return list(db.scalars(select(InstituteProfile).order_by(InstituteProfile.code)))
+def list_institutes(db: Session = Depends(get_db)) -> list[InstituteOut]:
+    institutes = db.scalars(select(InstituteProfile).order_by(InstituteProfile.code))
+    return [_institute_out(institute) for institute in institutes]
 
 
 @router.post("/api/institutes", response_model=InstituteOut, status_code=201, tags=["institutes"])
-def create_institute(body: InstituteCreate, db: Session = Depends(get_db)) -> InstituteProfile:
+def create_institute(
+    body: InstituteCreate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> InstituteOut:
+    """Create a tenant profile.
+
+    Only a global admin may create a new tenant. An institute-bound admin is
+    deliberately unable to widen their own scope by minting another profile.
+    """
+    if admin.institute_id is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Only a global admin can create an institute.",
+        )
     exists = db.scalar(select(InstituteProfile).where(InstituteProfile.code == body.code))
     if exists:
         raise HTTPException(status_code=409, detail=f"Institute '{body.code}' already exists.")
-    institute = InstituteProfile(**body.model_dump())
+    try:
+        normalized_settings = normalize_institute_settings_update({}, body.settings)
+    except InstituteSettingsValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    institute = InstituteProfile(
+        **body.model_dump(exclude={"settings"}),
+        settings=normalized_settings,
+    )
     db.add(institute)
+    db.flush()
+    db.add(
+        AuditEvent(
+            actor=admin.email,
+            user_id=admin.id,
+            action="institute.created",
+            subject=f"institute:{institute.code}",
+            detail={"institute_id": institute.id},
+        )
+    )
     db.commit()
     db.refresh(institute)
-    return institute
+    return _institute_out(institute)
+
+
+@router.get("/api/ops/health", response_model=OpsHealthOut, tags=["operations"])
+def operations_health(
+    request: Request,
+    institute_code: str | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> dict:
+    """Return local operational telemetry without contacting the PDB.
+
+    Institute-bound admins always see their own tenant.  A global admin may
+    select one institute or omit ``institute_code`` for an installation-wide
+    aggregate.
+    """
+
+    institute: InstituteProfile | None
+    if admin.institute_id is not None:
+        institute = db.get(InstituteProfile, admin.institute_id)
+        if institute is None:
+            raise HTTPException(status_code=409, detail="Admin institute is not configured.")
+        if institute_code is not None and institute_code != institute.code:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only view operations for your own institute.",
+            )
+    elif institute_code is not None:
+        institute = db.scalar(
+            select(InstituteProfile).where(InstituteProfile.code == institute_code)
+        )
+        if institute is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Institute '{institute_code}' not found.",
+            )
+    else:
+        institute = None
+    return collect_ops_health(
+        db,
+        request.app.state.settings,
+        institute=institute,
+    )
 
 
 @router.patch("/api/institutes/{code}", response_model=InstituteOut, tags=["institutes"])
@@ -788,25 +990,77 @@ def update_institute(
     body: InstituteUpdate,
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
-) -> InstituteProfile:
+) -> InstituteOut:
     """Update an institute profile's config — branding, `stage_requirements`,
-    `required_properties` (docs/07), etc. Admin-only: a per-institute admin may
-    edit only their own institute, a global admin any. `settings` is
-    shallow-merged so unrelated config survives."""
+    `required_properties` (docs/07), `notification_channels` (docs/11), etc.
+    Admin-only: a per-institute admin may edit only their own institute, a
+    global admin any. `settings` is shallow-merged so unrelated config
+    survives."""
     institute = db.scalar(select(InstituteProfile).where(InstituteProfile.code == code))
     if institute is None:
         raise HTTPException(status_code=404, detail=f"Institute '{code}' not found.")
     if admin.institute_id is not None and admin.institute_id != institute.id:
         raise HTTPException(status_code=403, detail="You can only edit your own institute.")
-    if body.name is not None:
+
+    changed_fields: list[str] = []
+    changed_settings_keys: list[str] = []
+    changed_channel_names: list[str] = []
+    if body.name is not None and body.name != institute.name:
         institute.name = body.name
-    if body.local_name_prefix is not None:
+        changed_fields.append("name")
+    if (
+        body.local_name_prefix is not None
+        and body.local_name_prefix != institute.local_name_prefix
+    ):
         institute.local_name_prefix = body.local_name_prefix
+        changed_fields.append("local_name_prefix")
     if body.settings is not None:
-        institute.settings = {**(institute.settings or {}), **body.settings}
+        current_settings = institute.settings if isinstance(institute.settings, dict) else {}
+        try:
+            settings_patch = normalize_institute_settings_update(
+                current_settings,
+                body.settings,
+            )
+        except InstituteSettingsValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+        changed_settings_keys = sorted(
+            key
+            for key, value in settings_patch.items()
+            if key not in current_settings or current_settings[key] != value
+        )
+        if "notification_channels" in changed_settings_keys:
+            previous_channels = current_settings.get("notification_channels")
+            next_channels = settings_patch["notification_channels"]
+            previous_channels = previous_channels if isinstance(previous_channels, dict) else {}
+            changed_channel_names = sorted(
+                name
+                for name in set(previous_channels) | set(next_channels)
+                if previous_channels.get(name) != next_channels.get(name)
+            )
+        if changed_settings_keys:
+            institute.settings = {**current_settings, **settings_patch}
+
+    if changed_fields or changed_settings_keys:
+        detail: dict[str, list[str]] = {}
+        if changed_fields:
+            detail["profile_fields"] = sorted(changed_fields)
+        if changed_settings_keys:
+            detail["settings_keys"] = changed_settings_keys
+        if changed_channel_names:
+            detail["notification_channels"] = changed_channel_names
+        db.add(
+            AuditEvent(
+                actor=admin.email,
+                user_id=admin.id,
+                action="institute.updated",
+                subject=f"institute:{institute.code}",
+                detail=detail,
+            )
+        )
     db.commit()
     db.refresh(institute)
-    return institute
+    return _institute_out(institute)
 
 
 # --------------------------------------------------------------------------
@@ -819,6 +1073,7 @@ def list_tools(
     kind: str | None = None,
     fits: str | None = None,
     status: str | None = None,
+    institute: str | None = None,
     db: Session = Depends(get_db),
 ) -> list[Tool]:
     stmt = select(Tool).order_by(Tool.kind, Tool.code)
@@ -826,22 +1081,45 @@ def list_tools(
         stmt = stmt.where(Tool.kind == kind)
     if status:
         stmt = stmt.where(Tool.status == status)
+    if institute:
+        profile = db.scalar(
+            select(InstituteProfile).where(
+                func.lower(InstituteProfile.code) == institute.strip().lower()
+            )
+        )
+        if profile is None:
+            return []
+        stmt = stmt.where(Tool.institute_id == profile.id)
     tools = list(db.scalars(stmt))
     if fits:  # keep only tools compatible with this component/module type
-        tools = [tool for tool in tools if fits in (tool.compatible_types or [])]
+        fits_code = fits.strip().upper()
+        tools = [tool for tool in tools if fits_code in (tool.compatible_types or [])]
     return tools
 
 
 @router.get("/api/tools/by-rfid/{rfid}", response_model=ToolOut, tags=["tools"])
-def get_tool_by_rfid(rfid: str, db: Session = Depends(get_db)) -> Tool:
-    tool = db.scalar(select(Tool).where(Tool.rfid == rfid))
+def get_tool_by_rfid(
+    rfid: str,
+    institute: str | None = None,
+    db: Session = Depends(get_db),
+) -> Tool:
+    stmt = select(Tool).where(func.lower(Tool.rfid) == rfid.strip().lower())
+    if institute:
+        stmt = stmt.join(InstituteProfile).where(
+            func.lower(InstituteProfile.code) == institute.strip().lower()
+        )
+    tool = db.scalar(stmt)
     if tool is None:
         raise HTTPException(status_code=404, detail=f"No tool with RFID '{rfid}'.")
     return tool
 
 
 @router.get("/api/tools/scan", response_model=ToolOut, tags=["tools"])
-def scan_tool(code: str, db: Session = Depends(get_db)) -> Tool:
+def scan_tool(
+    code: str,
+    institute: str | None = None,
+    db: Session = Depends(get_db),
+) -> Tool:
     """Resolve a scanned value to a tool by RFID *or* printed code.
 
     Scanner-first: a wedge scanner emits either the RFID tag or the label code,
@@ -851,15 +1129,18 @@ def scan_tool(code: str, db: Session = Depends(get_db)) -> Tool:
     needle = code.strip()
     if needle == "":
         raise HTTPException(status_code=422, detail="Empty scan value.")
-    tool = db.scalar(
-        select(Tool).where(
-            or_(
-                func.lower(Tool.rfid) == needle.lower(),
-                func.lower(Tool.code) == needle.lower(),
-                func.lower(Tool.label) == needle.lower(),
-            )
+    stmt = select(Tool).where(
+        or_(
+            func.lower(Tool.rfid) == needle.lower(),
+            func.lower(Tool.code) == needle.lower(),
+            func.lower(Tool.label) == needle.lower(),
         )
     )
+    if institute:
+        stmt = stmt.join(InstituteProfile).where(
+            func.lower(InstituteProfile.code) == institute.strip().lower()
+        )
+    tool = db.scalar(stmt)
     if tool is None:
         raise HTTPException(status_code=404, detail=f"No tool matches scan '{code}'.")
     return tool
@@ -869,16 +1150,42 @@ def scan_tool(code: str, db: Session = Depends(get_db)) -> Tool:
 def create_tool(
     body: ToolCreate, db: Session = Depends(get_db), user: User = Depends(require_operator)
 ) -> Tool:
-    tool = Tool(
+    institute = _tool_institute(db, user, body.institute_code)
+    values = _normalized_tool_values(
         kind=body.kind,
         code=body.code,
         label=body.label,
         rfid=body.rfid,
         compatible_types=body.compatible_types,
+    )
+    _ensure_tool_identifiers_available(
+        db,
+        institute_id=institute.id,
+        code=values["code"],
+        rfid=values["rfid"],
+    )
+    tool = Tool(
+        **values,
         status=body.status,
-        institute_id=user.institute_id,
+        institute_id=institute.id,
     )
     db.add(tool)
+    db.flush()
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action="tool.created",
+            subject=f"tool:{tool.id}",
+            detail={
+                "institute": institute.code,
+                "kind": tool.kind,
+                "code": tool.code,
+                "status": tool.status,
+                "compatible_types": list(tool.compatible_types or []),
+            },
+        )
+    )
     db.commit()
     db.refresh(tool)
     return tool
@@ -894,17 +1201,610 @@ def update_tool(
     tool = db.get(Tool, tool_id)
     if tool is None:
         raise HTTPException(status_code=404, detail=f"Tool {tool_id} not found.")
-    if body.code is not None:
-        tool.code = body.code
-    if body.rfid is not None:
-        tool.rfid = body.rfid
-    if body.compatible_types is not None:
-        tool.compatible_types = body.compatible_types
-    if body.status is not None:
+    if tool.institute_id is not None:
+        institute = db.get(InstituteProfile, tool.institute_id)
+        if institute is not None:
+            _require_institute_scope(user, institute)
+    target_institute_id = tool.institute_id or user.institute_id
+    if target_institute_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="The tool must belong to an institute before it can be edited.",
+        )
+
+    fields_set = body.model_fields_set
+    if "kind" in fields_set and body.kind is None:
+        raise HTTPException(status_code=422, detail="Tool kind cannot be cleared.")
+    if "code" in fields_set and body.code is None:
+        raise HTTPException(status_code=422, detail="Tool code cannot be cleared.")
+    if "compatible_types" in fields_set and body.compatible_types is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Tool compatible_types must be a list; use [] to clear it.",
+        )
+    values = _normalized_tool_values(
+        kind=body.kind if "kind" in fields_set else tool.kind,
+        code=body.code if "code" in fields_set else tool.code,
+        label=body.label if "label" in fields_set else tool.label,
+        rfid=body.rfid if "rfid" in fields_set else tool.rfid,
+        compatible_types=(
+            body.compatible_types
+            if "compatible_types" in fields_set
+            else list(tool.compatible_types or [])
+        ),
+    )
+    _ensure_tool_identifiers_available(
+        db,
+        institute_id=target_institute_id,
+        code=values["code"],
+        rfid=values["rfid"],
+        exclude_id=tool.id,
+    )
+    changed_fields: list[str] = []
+    for field, value in values.items():
+        if value != getattr(tool, field):
+            setattr(tool, field, value)
+            changed_fields.append(field)
+    if body.status is not None and body.status != tool.status:
         tool.status = body.status
+        changed_fields.append("status")
+    if tool.institute_id is None:
+        tool.institute_id = target_institute_id
+        changed_fields.append("institute_id")
+    if changed_fields:
+        db.add(
+            AuditEvent(
+                actor=user.email,
+                user_id=user.id,
+                action="tool.updated",
+                subject=f"tool:{tool.id}",
+                detail={
+                    "changed_fields": sorted(changed_fields),
+                    "status": tool.status,
+                },
+            )
+        )
     db.commit()
     db.refresh(tool)
     return tool
+
+
+@router.delete("/api/tools/{tool_id}", status_code=204, tags=["tools"])
+def delete_tool(
+    tool_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    tool = db.get(Tool, tool_id)
+    if tool is None:
+        raise HTTPException(status_code=404, detail=f"Tool {tool_id} not found.")
+    institute = db.get(InstituteProfile, tool.institute_id) if tool.institute_id else None
+    if institute is not None:
+        _require_institute_scope(user, institute)
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action="tool.deleted",
+            subject=f"tool:{tool.id}",
+            detail={
+                "institute": institute.code if institute is not None else None,
+                "kind": tool.kind,
+                "code": tool.code,
+            },
+        )
+    )
+    db.delete(tool)
+    db.commit()
+    return Response(status_code=204)
+
+
+def _tool_institute(
+    db: Session,
+    user: User,
+    requested_code: str | None,
+) -> InstituteProfile:
+    if requested_code is not None:
+        institute = db.scalar(
+            select(InstituteProfile).where(
+                func.lower(InstituteProfile.code) == requested_code.strip().lower()
+            )
+        )
+        if institute is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Institute '{requested_code}' not found.",
+            )
+        _require_institute_scope(user, institute)
+        return institute
+    if user.institute_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Select an institute for the new tool.",
+        )
+    institute = db.get(InstituteProfile, user.institute_id)
+    if institute is None:
+        raise HTTPException(status_code=422, detail="The user's institute is unavailable.")
+    return institute
+
+
+def _normalized_tool_values(
+    *,
+    kind: str,
+    code: str,
+    label: str | None,
+    rfid: str | None,
+    compatible_types: list[str],
+) -> dict[str, object]:
+    normalized_kind = kind.strip().lower()
+    normalized_code = code.strip()
+    normalized_label = label.strip() if isinstance(label, str) else None
+    normalized_rfid = rfid.strip() if isinstance(rfid, str) else None
+    if not normalized_kind or not normalized_code:
+        raise HTTPException(status_code=422, detail="Tool kind and code are required.")
+    normalized_types: list[str] = []
+    for raw in compatible_types:
+        if not isinstance(raw, str):
+            raise HTTPException(
+                status_code=422,
+                detail="Compatible component types must be strings.",
+            )
+        value = raw.strip().upper()
+        if not value:
+            continue
+        if len(value) > 32:
+            raise HTTPException(
+                status_code=422,
+                detail="Compatible component types must be at most 32 characters.",
+            )
+        if value not in normalized_types:
+            normalized_types.append(value)
+    if len(normalized_types) > 100:
+        raise HTTPException(status_code=422, detail="A tool may list at most 100 types.")
+    return {
+        "kind": normalized_kind,
+        "code": normalized_code,
+        "label": normalized_label or None,
+        "rfid": normalized_rfid or None,
+        "compatible_types": normalized_types,
+    }
+
+
+def _ensure_tool_identifiers_available(
+    db: Session,
+    *,
+    institute_id: int,
+    code: str,
+    rfid: str | None,
+    exclude_id: int | None = None,
+) -> None:
+    stmt = select(Tool).where(
+        Tool.institute_id == institute_id,
+        func.lower(Tool.code) == code.lower(),
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(Tool.id != exclude_id)
+    if db.scalar(stmt) is not None:
+        raise HTTPException(status_code=409, detail=f"Tool code '{code}' already exists.")
+    if rfid is None:
+        return
+    stmt = select(Tool).where(
+        Tool.institute_id == institute_id,
+        func.lower(Tool.rfid) == rfid.lower(),
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(Tool.id != exclude_id)
+    if db.scalar(stmt) is not None:
+        raise HTTPException(status_code=409, detail=f"Tool RFID '{rfid}' already exists.")
+
+
+# --------------------------------------------------------------------------
+# Scanner-first assembly wizard.  Preview is local; staging creates an outbox
+# intent only.  No route in this section opens a PDB client.
+# --------------------------------------------------------------------------
+
+
+@router.get("/api/assembly/scan-component", response_model=ComponentOut, tags=["assembly"])
+def scan_assembly_component(
+    code: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> Component:
+    needle = code.strip()
+    if not needle:
+        raise HTTPException(status_code=422, detail="Empty scan value.")
+    matches = list(
+        db.scalars(
+            select(Component)
+            .where(
+                or_(
+                    func.lower(Component.sn) == needle.lower(),
+                    func.lower(Component.local_name) == needle.lower(),
+                )
+            )
+            .order_by(Component.id)
+            .limit(2)
+        )
+    )
+    if not matches:
+        raise HTTPException(status_code=404, detail=f"No component matches scan '{code}'.")
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail="The scanned local name is ambiguous; scan the PDB serial number.",
+        )
+    component = matches[0]
+    if user.institute is not None and component.institute_code != user.institute.code:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only assemble components for your own institute.",
+        )
+    return component
+
+
+@router.post(
+    "/api/assembly/preview",
+    response_model=AssemblyPreviewOut,
+    tags=["assembly"],
+)
+def preview_assembly(
+    body: AssemblyDraftIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> dict:
+    evaluation = evaluate_assembly(
+        db,
+        request.app.state.settings,
+        parent_sn=body.parent_sn,
+        child_sn=body.child_sn,
+        slot=body.slot,
+        tool_id=body.tool_id,
+        glue_batch_id=body.glue_batch_id,
+    )
+    if evaluation.institute is not None:
+        _require_institute_scope(user, evaluation.institute)
+    return evaluation.as_dict()
+
+
+@router.post(
+    "/api/assembly/actions",
+    response_model=AssemblyStageOut,
+    status_code=201,
+    tags=["assembly"],
+)
+def stage_assembly(
+    body: AssemblyDraftIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> dict:
+    evaluation = evaluate_assembly(
+        db,
+        request.app.state.settings,
+        parent_sn=body.parent_sn,
+        child_sn=body.child_sn,
+        slot=body.slot,
+        tool_id=body.tool_id,
+        glue_batch_id=body.glue_batch_id,
+    )
+    if evaluation.institute is not None:
+        _require_institute_scope(user, evaluation.institute)
+    if not evaluation.valid:
+        detail = "; ".join(issue.message for issue in evaluation.issues)
+        raise HTTPException(status_code=409, detail=f"Assembly dry-run blocked: {detail}")
+    if evaluation.institute is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Assembly dry-run blocked: parent institute is not configured.",
+        )
+    payload = canonical_action_payload(evaluation)
+    action = OutboxAction(
+        institute_id=evaluation.institute.id,
+        kind=ASSEMBLY_ACTION_KIND,
+        payload=payload,
+        status=OutboxStatus.DRAFT.value,
+        created_by=user.email,
+        user_id=user.id,
+    )
+    db.add(action)
+    db.flush()
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action="outbox.created",
+            subject=f"outbox:{action.id}",
+            detail={
+                "kind": ASSEMBLY_ACTION_KIND,
+                "institute": evaluation.institute.code,
+                "parent_sn": evaluation.parent.sn if evaluation.parent is not None else None,
+                "child_sn": evaluation.child.sn if evaluation.child is not None else None,
+                "tool_code": evaluation.tool.code if evaluation.tool is not None else None,
+                "glue_batch": (
+                    evaluation.glue_batch.batch_no
+                    if evaluation.glue_batch is not None
+                    else None
+                ),
+                "dry_run": "passed",
+                "submittable": evaluation.submittable,
+            },
+            outbox_action_id=action.id,
+        )
+    )
+    db.commit()
+    db.refresh(action)
+    return {"preview": evaluation.as_dict(), "action": action}
+
+
+# --------------------------------------------------------------------------
+# Glue batches (Phase 4, docs/11). Reads open; writes require operator/admin.
+# --------------------------------------------------------------------------
+
+
+def _default_pot_life_minutes(institute: InstituteProfile | None, glue_type: str) -> int | None:
+    """Per-type pot-life default from the institute profile — never from code."""
+    if institute is None:
+        return None
+    raw = (institute.settings or {}).get("glue_pot_life_minutes")
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get(glue_type)
+    if isinstance(value, (int, float)) and value > 0:
+        return int(value)
+    return None
+
+
+def _glue_batch_out(batch: GlueBatch, usage_count: int) -> GlueBatchOut:
+    out = GlueBatchOut.model_validate(batch)
+    out.usage_count = usage_count
+    state = pot_life_state(batch.mixed_at, batch.pot_life_minutes)
+    if state is not None:
+        out.pot_life_remaining_seconds = state.remaining_seconds
+        out.pot_life_expired = state.expired
+    return out
+
+
+def _glue_usage_counts(db: Session, batch_ids: list[int]) -> dict[int, int]:
+    if not batch_ids:
+        return {}
+    rows = db.execute(
+        select(GlueUsage.glue_batch_id, func.count())
+        .where(GlueUsage.glue_batch_id.in_(batch_ids))
+        .group_by(GlueUsage.glue_batch_id)
+    )
+    return {batch_id: count for batch_id, count in rows}
+
+
+@router.get("/api/glue-batches", response_model=list[GlueBatchOut], tags=["glue"])
+def list_glue_batches(
+    status: str | None = None,
+    glue_type: str | None = None,
+    q: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[GlueBatchOut]:
+    stmt = select(GlueBatch).order_by(GlueBatch.status, GlueBatch.glue_type, GlueBatch.batch_no)
+    if status:
+        stmt = stmt.where(GlueBatch.status == status)
+    if glue_type:
+        stmt = stmt.where(GlueBatch.glue_type == glue_type)
+    if q:
+        needle = f"%{q.strip().lower()}%"
+        stmt = stmt.where(
+            or_(
+                func.lower(GlueBatch.batch_no).like(needle),
+                func.lower(GlueBatch.pdb_sn).like(needle),
+                func.lower(GlueBatch.glue_type).like(needle),
+            )
+        )
+    batches = list(db.scalars(stmt))
+    counts = _glue_usage_counts(db, [batch.id for batch in batches])
+    return [_glue_batch_out(batch, counts.get(batch.id, 0)) for batch in batches]
+
+
+@router.get("/api/glue-batches/scan", response_model=GlueBatchOut, tags=["glue"])
+def scan_glue_batch(code: str, db: Session = Depends(get_db)) -> GlueBatchOut:
+    """Resolve a scanned value to a batch by PDB serial or batch number,
+    case-insensitively (scanner-first, same contract as the tool scan)."""
+    needle = code.strip()
+    if needle == "":
+        raise HTTPException(status_code=422, detail="Empty scan value.")
+    batch = db.scalar(
+        select(GlueBatch).where(
+            or_(
+                func.lower(GlueBatch.pdb_sn) == needle.lower(),
+                func.lower(GlueBatch.batch_no) == needle.lower(),
+            )
+        )
+    )
+    if batch is None:
+        raise HTTPException(status_code=404, detail=f"No glue batch matches scan '{code}'.")
+    counts = _glue_usage_counts(db, [batch.id])
+    return _glue_batch_out(batch, counts.get(batch.id, 0))
+
+
+@router.post("/api/glue-batches", response_model=GlueBatchOut, status_code=201, tags=["glue"])
+def create_glue_batch(
+    body: GlueBatchCreate, db: Session = Depends(get_db), user: User = Depends(require_operator)
+) -> GlueBatchOut:
+    batch = GlueBatch(
+        glue_type=body.glue_type,
+        batch_no=body.batch_no,
+        pdb_sn=body.pdb_sn,
+        status=body.status,
+        manufacturing_date=body.manufacturing_date,
+        expiry_date=body.expiry_date,
+        opening_date=body.opening_date,
+        bipack_count=body.bipack_count,
+        note=body.note,
+        institute_id=user.institute_id,
+    )
+    db.add(batch)
+    db.flush()
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action="glue_batch.created",
+            subject=f"glue_batch:{batch.id}",
+            detail={"glue_type": batch.glue_type, "batch_no": batch.batch_no},
+        )
+    )
+    db.commit()
+    db.refresh(batch)
+    return _glue_batch_out(batch, 0)
+
+
+@router.patch("/api/glue-batches/{batch_id}", response_model=GlueBatchOut, tags=["glue"])
+def update_glue_batch(
+    batch_id: int,
+    body: GlueBatchUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> GlueBatchOut:
+    batch = db.get(GlueBatch, batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail=f"Glue batch {batch_id} not found.")
+    changed: dict[str, object] = {}
+    for field in (
+        "batch_no",
+        "pdb_sn",
+        "status",
+        "manufacturing_date",
+        "expiry_date",
+        "opening_date",
+        "bipack_count",
+        "note",
+    ):
+        value = getattr(body, field)
+        if value is not None and value != getattr(batch, field):
+            setattr(batch, field, value)
+            changed[field] = str(value)
+    if changed:
+        db.add(
+            AuditEvent(
+                actor=user.email,
+                user_id=user.id,
+                action="glue_batch.updated",
+                subject=f"glue_batch:{batch.id}",
+                detail={"changed": changed},
+            )
+        )
+    db.commit()
+    db.refresh(batch)
+    counts = _glue_usage_counts(db, [batch.id])
+    return _glue_batch_out(batch, counts.get(batch.id, 0))
+
+
+@router.post("/api/glue-batches/{batch_id}/mix", response_model=GlueBatchOut, tags=["glue"])
+def mix_glue_batch(
+    batch_id: int,
+    body: GlueBatchMixIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> GlueBatchOut:
+    """Start the pot-life timer: the batch was just mixed at the bench.
+
+    The pot life comes from the request, else from the institute profile's
+    `glue_pot_life_minutes[glue_type]`; without either the batch is marked
+    mixed but untimed (expiry warnings then rely on `expiry_date` alone)."""
+    batch = db.get(GlueBatch, batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail=f"Glue batch {batch_id} not found.")
+    if batch.status in ("expired", "empty"):
+        raise HTTPException(
+            status_code=409, detail=f"Glue batch {batch_id} is {batch.status} — mix a fresh one."
+        )
+    institute = db.get(InstituteProfile, batch.institute_id) if batch.institute_id else None
+    batch.mixed_at = utcnow()
+    batch.pot_life_minutes = body.pot_life_minutes or _default_pot_life_minutes(
+        institute, batch.glue_type
+    )
+    if batch.status == "new":
+        batch.status = "in_use"
+    if batch.opening_date is None:
+        batch.opening_date = batch.mixed_at
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action="glue_batch.mixed",
+            subject=f"glue_batch:{batch.id}",
+            detail={
+                "glue_type": batch.glue_type,
+                "batch_no": batch.batch_no,
+                "pot_life_minutes": batch.pot_life_minutes,
+            },
+        )
+    )
+    db.commit()
+    db.refresh(batch)
+    counts = _glue_usage_counts(db, [batch.id])
+    return _glue_batch_out(batch, counts.get(batch.id, 0))
+
+
+@router.get(
+    "/api/glue-batches/{batch_id}/usage", response_model=list[GlueUsageOut], tags=["glue"]
+)
+def list_glue_usage(batch_id: int, db: Session = Depends(get_db)) -> list[GlueUsage]:
+    if db.get(GlueBatch, batch_id) is None:
+        raise HTTPException(status_code=404, detail=f"Glue batch {batch_id} not found.")
+    return list(
+        db.scalars(
+            select(GlueUsage)
+            .where(GlueUsage.glue_batch_id == batch_id)
+            .order_by(GlueUsage.used_at.desc(), GlueUsage.id.desc())
+        )
+    )
+
+
+@router.post(
+    "/api/glue-batches/{batch_id}/usage",
+    response_model=GlueUsageOut,
+    status_code=201,
+    tags=["glue"],
+)
+def record_glue_usage(
+    batch_id: int,
+    body: GlueUsageCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> GlueUsage:
+    """Record consumption for a component (roadmap: glue data joinable with
+    production). The SN is accepted as scanned — the component may not be
+    mirrored yet when glue is logged at the bench."""
+    batch = db.get(GlueBatch, batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail=f"Glue batch {batch_id} not found.")
+    if batch.status in ("expired", "empty"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Glue batch {batch_id} is {batch.status} and must not be used.",
+        )
+    usage = GlueUsage(
+        glue_batch_id=batch.id,
+        component_sn=body.component_sn.strip(),
+        amount_mg=body.amount_mg,
+        note=body.note,
+        used_by=user.email,
+        user_id=user.id,
+    )
+    if batch.status == "new":
+        batch.status = "in_use"
+    db.add(usage)
+    db.flush()
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action="glue_batch.usage_recorded",
+            subject=f"glue_batch:{batch.id}",
+            detail={"component_sn": usage.component_sn, "amount_mg": usage.amount_mg},
+        )
+    )
+    db.commit()
+    db.refresh(usage)
+    return usage
 
 
 # --------------------------------------------------------------------------
@@ -999,6 +1899,28 @@ def get_component(sn: str, db: Session = Depends(get_db)) -> Component:
 
 
 @router.get(
+    "/api/components/{sn}/preview",
+    response_model=ComponentPreviewOut,
+    tags=["components", "outbox"],
+)
+def component_preview(
+    sn: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> ComponentPreviewOut:
+    """Project staged work over the local mirror without contacting the PDB."""
+    from app.preview import build_component_preview
+
+    component = db.scalar(select(Component).where(Component.sn == sn))
+    if component is None:
+        raise HTTPException(status_code=404, detail=f"Component '{sn}' not found.")
+    return ComponentPreviewOut.model_validate(
+        build_component_preview(db, component, request.app.state.settings)
+    )
+
+
+@router.get(
     "/api/components/{sn}/stage-suggestion",
     response_model=StageSuggestionOut,
     tags=["components", "workflow"],
@@ -1034,18 +1956,47 @@ def component_stage_suggestion(sn: str, db: Session = Depends(get_db)) -> StageS
     tags=["components", "sync"],
 )
 def active_sync_job(
-    kind: Literal["components"] = COMPONENT_SYNC_KIND,
+    kind: Literal["components", "evidence"] = COMPONENT_SYNC_KIND,
+    institute_code: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ) -> SyncJob | Response:
-    """Discover the global live job after navigation, refresh or another tab."""
+    """Discover a live job after navigation, refresh or another tab."""
 
+    statement = select(SyncJob).where(
+        SyncJob.kind == kind,
+        SyncJob.status.in_(ACTIVE_SYNC_STATUSES),
+    )
+    if institute_code is not None:
+        statement = statement.where(SyncJob.institute_code == institute_code)
     job = db.scalar(
-        select(SyncJob).where(
-            SyncJob.kind == kind,
-            SyncJob.active_key == COMPONENT_SYNC_ACTIVE_KEY,
+        statement.order_by(
+            (SyncJob.status == "running").desc(),
+            SyncJob.updated_at.desc(),
+            SyncJob.id.desc(),
         )
     )
+    return job if job is not None else Response(status_code=204)
+
+
+@router.get(
+    "/api/sync/jobs/latest",
+    response_model=SyncJobOut,
+    responses={204: {"description": "No matching sync job exists."}},
+    tags=["components", "sync"],
+)
+def latest_sync_job(
+    kind: Literal["components", "evidence"] = COMPONENT_SYNC_KIND,
+    institute_code: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> SyncJob | Response:
+    """Recover the newest persisted job, including terminal success/errors."""
+
+    statement = select(SyncJob).where(SyncJob.kind == kind)
+    if institute_code is not None:
+        statement = statement.where(SyncJob.institute_code == institute_code)
+    job = db.scalar(statement.order_by(SyncJob.id.desc()))
     return job if job is not None else Response(status_code=204)
 
 
@@ -1084,6 +2035,7 @@ def start_component_sync_job(
     )
     if institute is None:
         raise HTTPException(status_code=404, detail=f"Institute '{institute_code}' not found.")
+    _require_institute_scope(user, institute)
 
     # Fail before acquiring the global lease. The worker resolves this same
     # user's codes again in its own short-lived session; no secret enters the
@@ -1114,6 +2066,46 @@ def start_component_sync_job(
 
 
 @router.post(
+    "/api/sync/jobs/evidence/{institute_code}",
+    response_model=SyncJobOut,
+    status_code=202,
+    tags=["components", "sync"],
+)
+def start_evidence_sync_job(
+    institute_code: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> SyncJob:
+    """Start the detailed evidence/attachment mirror, or return its live job."""
+
+    institute = db.scalar(
+        select(InstituteProfile).where(InstituteProfile.code == institute_code)
+    )
+    if institute is None:
+        raise HTTPException(status_code=404, detail=f"Institute '{institute_code}' not found.")
+    _require_institute_scope(user, institute)
+    _load_personal_pdb_access(request, db, user)
+    try:
+        lease = acquire_evidence_sync_lease(
+            db,
+            institute_code=institute.code,
+            requested_by=user.email,
+            user_id=user.id,
+        )
+    except SyncLeaseBusy as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not lease.created:
+        return lease.job
+    try:
+        request.app.state.sync_job_manager.start_evidence(lease.job.id)
+    except Exception as exc:
+        fail_sync_job(request.app.state.session_factory, lease.job.id, exc)
+        raise HTTPException(status_code=503, detail="Could not schedule evidence sync.") from exc
+    return lease.job
+
+
+@router.post(
     "/api/sync/components/{institute_code}",
     response_model=ComponentSyncOut,
     tags=["components", "sync"],
@@ -1127,6 +2119,7 @@ def sync_components_for_institute(
     institute = db.scalar(select(InstituteProfile).where(InstituteProfile.code == institute_code))
     if institute is None:
         raise HTTPException(status_code=404, detail=f"Institute '{institute_code}' not found.")
+    _require_institute_scope(user, institute)
 
     access_codes = _load_personal_pdb_access(request, db, user)
 
@@ -1404,6 +2397,7 @@ def register_component_draft(
     )
     if institute is None:
         raise HTTPException(status_code=404, detail=f"Institute '{body.institute_code}' not found.")
+    _require_institute_scope(user, institute)
     payload: dict = {
         "component_type": body.component_type,
         "type_code": body.type_code,
@@ -1452,6 +2446,7 @@ def create_outbox_action(
     )
     if institute is None:
         raise HTTPException(status_code=404, detail=f"Institute '{body.institute_code}' not found.")
+    _require_institute_scope(user, institute)
     action = OutboxAction(
         institute_id=institute.id,
         kind=body.kind,
@@ -1488,6 +2483,11 @@ def transition_outbox_action(
     action = db.get(OutboxAction, action_id)
     if action is None:
         raise HTTPException(status_code=404, detail=f"Outbox action {action_id} not found.")
+    if user.institute_id is not None and user.institute_id != action.institute_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only modify PDB actions for your own institute.",
+        )
 
     current = OutboxStatus(action.status)
     try:
@@ -1496,11 +2496,6 @@ def transition_outbox_action(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     if body.to is OutboxStatus.APPROVED:
-        if user.institute_id is not None and user.institute_id != action.institute_id:
-            raise HTTPException(
-                status_code=403,
-                detail="You can only approve PDB actions for your own institute.",
-            )
         # Decryption here proves that the bound identity is usable by this
         # deployment. The codes themselves are discarded; the worker reloads
         # them for this exact user when it later submits or retries.
@@ -1558,6 +2553,93 @@ def transition_outbox_action(
 
 
 # --------------------------------------------------------------------------
+# Test-type schema mirror (read-only PDB catalogue for manual-entry forms)
+# --------------------------------------------------------------------------
+
+
+@router.get(
+    "/api/test-types",
+    response_model=list[TestTypeSchemaOut],
+    tags=["ingestion"],
+)
+def list_test_type_schemas(
+    component_type: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> list[TestTypeSchemaOut]:
+    del user
+    normalized = component_type.strip()
+    if not normalized or len(normalized) > 32:
+        raise HTTPException(status_code=422, detail="A valid component_type is required.")
+    rows = db.scalars(
+        select(TestTypeSchema)
+        .where(TestTypeSchema.component_type == normalized)
+        .order_by(TestTypeSchema.name, TestTypeSchema.test_code)
+    )
+    return [
+        TestTypeSchemaOut(
+            id=row.id,
+            component_type=row.component_type,
+            test_code=row.test_code,
+            name=row.name,
+            schema=row.schema_data,
+            synced_at=row.synced_at,
+        )
+        for row in rows
+    ]
+
+
+@router.post(
+    "/api/test-types/sync",
+    response_model=TestTypeSchemaSyncOut,
+    tags=["ingestion"],
+)
+def sync_test_type_schemas(
+    component_type: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> TestTypeSchemaSyncOut:
+    from app.pdb_test_types import (
+        DEFAULT_PDB_PROJECT,
+        PdbTestTypesUnavailable,
+        fetch_test_type_schemas,
+    )
+    from app.test_type_schemas import upsert_test_type_schemas
+
+    normalized = component_type.strip()
+    if not normalized or len(normalized) > 32:
+        raise HTTPException(status_code=422, detail="A valid component_type is required.")
+
+    profile = db.get(InstituteProfile, user.institute_id) if user.institute_id else None
+    configured_project = (profile.settings or {}).get("pdb_project") if profile else None
+    project = (
+        configured_project.strip()
+        if isinstance(configured_project, str) and configured_project.strip()
+        else DEFAULT_PDB_PROJECT
+    )
+    fetcher = getattr(request.app.state, "test_type_schema_fetcher", fetch_test_type_schemas)
+    try:
+        records = fetcher(
+            _pdb_gateway(request, db, user),
+            normalized,
+            project=project,
+        )
+    except PdbTestTypesUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+
+    stats = upsert_test_type_schemas(db, records, component_type=normalized)
+    db.commit()
+    return TestTypeSchemaSyncOut(
+        component_type=normalized,
+        created=stats.created,
+        updated=stats.updated,
+        unchanged=stats.unchanged,
+        total=stats.total,
+    )
+
+
+# --------------------------------------------------------------------------
 # Ingestion inbox (local only; PDB uploads are later outbox actions)
 # --------------------------------------------------------------------------
 
@@ -1585,10 +2667,49 @@ def create_ingest_file(
 ) -> IngestFile:
     raw = canonical_json_bytes(body.payload)
     parsed = parse_payload(body.payload)
-    component = resolve_component(db, parsed)
-    component_sn = parsed.component_sn or (component.sn if component is not None else None)
+    pinned_sn = body.component_sn.strip() if body.component_sn is not None else None
+    pinned_test_type = (
+        body.test_type.strip().upper() if body.test_type is not None else None
+    )
+    if body.component_sn is not None and not pinned_sn:
+        raise HTTPException(status_code=422, detail="component_sn must not be blank.")
+    if body.test_type is not None and not pinned_test_type:
+        raise HTTPException(status_code=422, detail="test_type must not be blank.")
+    pinned_component = (
+        db.scalar(select(Component).where(Component.sn == pinned_sn)) if pinned_sn else None
+    )
+    if pinned_sn and pinned_component is None:
+        raise HTTPException(status_code=404, detail=f"Component '{pinned_sn}' not found.")
+    component = pinned_component or resolve_component(db, parsed)
+    if component is not None:
+        institute = db.scalar(
+            select(InstituteProfile).where(
+                InstituteProfile.code == component.institute_code
+            )
+        )
+        if institute is None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Component institute '{component.institute_code}' is not configured.",
+            )
+        _require_institute_scope(user, institute)
+    component_sn = pinned_sn or parsed.component_sn or (
+        component.sn if component is not None else None
+    )
 
     notes = list(parsed.issues)
+    if pinned_sn and parsed.component_sn and parsed.component_sn != pinned_sn:
+        notes.append(
+            f"Payload component '{parsed.component_sn}' does not match pinned component "
+            f"'{pinned_sn}'"
+        )
+    parsed_test_type = parsed.test_type.upper() if parsed.test_type is not None else None
+    if pinned_test_type and parsed_test_type != pinned_test_type:
+        embedded = parsed.test_type if parsed.test_type is not None else "missing"
+        notes.append(
+            f"Payload test type '{embedded}' does not match pinned test type "
+            f"'{pinned_test_type}'"
+        )
     if component_sn is None and parsed.local_name is not None:
         notes.append(f"Local name '{parsed.local_name}' does not match any mirrored component")
 
@@ -1598,8 +2719,8 @@ def create_ingest_file(
         size_bytes=len(raw),
         status="triage" if notes else "received",
         component_sn=component_sn,
-        test_type=parsed.test_type,
-        parser=parsed.parser,
+        test_type=pinned_test_type or parsed.test_type,
+        parser=body.parser or parsed.parser,
         error="; ".join(notes) if notes else None,
         payload=body.payload,
         uploaded_by=user.email,
@@ -1623,6 +2744,30 @@ def create_ingest_file(
     db.commit()
     db.refresh(ingest)
     return ingest
+
+
+def _ingest_target_issues(ingest: IngestFile, parsed: ParsedTestRun) -> list[str]:
+    """Detect a pinned/assigned target that conflicts with the untouched payload."""
+    issues: list[str] = []
+    if (
+        ingest.component_sn is not None
+        and parsed.component_sn is not None
+        and ingest.component_sn != parsed.component_sn
+    ):
+        issues.append(
+            f"Payload component '{parsed.component_sn}' does not match pinned component "
+            f"'{ingest.component_sn}'"
+        )
+    if ingest.test_type is not None and (
+        parsed.test_type is None
+        or ingest.test_type.upper() != parsed.test_type.upper()
+    ):
+        embedded = parsed.test_type if parsed.test_type is not None else "missing"
+        issues.append(
+            f"Payload test type '{embedded}' does not match pinned test type "
+            f"'{ingest.test_type}'"
+        )
+    return issues
 
 
 def _required_property_issues(
@@ -1664,12 +2809,22 @@ def preview_ingest_file(file_id: int, db: Session = Depends(get_db)) -> IngestPr
         raise HTTPException(status_code=404, detail=f"Ingest file {file_id} not found.")
 
     parsed = parse_payload(ingest.payload)
-    component = resolve_component(db, parsed)
-    component_sn = parsed.component_sn or (component.sn if component is not None else None)
-    issues = parsed.issues + _required_property_issues(db, ingest, parsed, component)
+    component = (
+        db.scalar(select(Component).where(Component.sn == ingest.component_sn))
+        if ingest.component_sn is not None
+        else resolve_component(db, parsed)
+    )
+    component_sn = ingest.component_sn or parsed.component_sn or (
+        component.sn if component is not None else None
+    )
+    issues = (
+        parsed.issues
+        + _ingest_target_issues(ingest, parsed)
+        + _required_property_issues(db, ingest, parsed, component)
+    )
     return IngestPreviewOut(
         file_id=ingest.id,
-        parser=parsed.parser,
+        parser=ingest.parser or parsed.parser,
         upload_ready=(
             not issues and component_sn is not None and parsed.test_type is not None
         ),
@@ -1721,7 +2876,11 @@ def propose_ingest_outbox_action(
         )
     parsed = parse_payload(ingest.payload)
     component = db.scalar(select(Component).where(Component.sn == ingest.component_sn))
-    issues = parsed.issues + _required_property_issues(db, ingest, parsed, component)
+    issues = (
+        parsed.issues
+        + _ingest_target_issues(ingest, parsed)
+        + _required_property_issues(db, ingest, parsed, component)
+    )
     if issues:
         raise HTTPException(
             status_code=409,
@@ -1740,6 +2899,7 @@ def propose_ingest_outbox_action(
     institute = db.scalar(select(InstituteProfile).where(InstituteProfile.code == institute_code))
     if institute is None:
         raise HTTPException(status_code=404, detail=f"Institute '{institute_code}' not found.")
+    _require_institute_scope(user, institute)
 
     action = OutboxAction(
         institute_id=institute.id,
@@ -1791,6 +2951,31 @@ def list_audit(limit: int = 100, db: Session = Depends(get_db)) -> list[AuditEve
         select(AuditEvent)
         .order_by(AuditEvent.ts.desc(), AuditEvent.id.desc())
         .limit(min(limit, 500))
+    )
+    return list(db.scalars(stmt))
+
+
+@router.get(
+    "/api/outbox/{action_id}/audit",
+    response_model=list[AuditOut],
+    tags=["audit"],
+)
+def list_outbox_audit(
+    action_id: int,
+    db: Session = Depends(get_db),
+) -> list[AuditEvent]:
+    """Return the complete audit trail for one staged action.
+
+    This targeted route avoids deriving an action's history from a capped
+    instance-wide audit page. Outbox actions have a bounded state machine, so
+    their complete trail is safe to return without a global pagination cap.
+    """
+    if db.get(OutboxAction, action_id) is None:
+        raise HTTPException(status_code=404, detail=f"Outbox action {action_id} not found.")
+    stmt = (
+        select(AuditEvent)
+        .where(AuditEvent.outbox_action_id == action_id)
+        .order_by(AuditEvent.ts.asc(), AuditEvent.id.asc())
     )
     return list(db.scalars(stmt))
 
@@ -1863,19 +3048,9 @@ def _attachment_rows_by_run(db: Session, sn: str) -> dict[str | None, list]:
 
 
 def _attachment_out(settings: Settings, row) -> TestRunAttachmentOut:
-    from app.attachment_store import resolve_path
+    from app.attachment_store import attachment_read_model
 
-    return TestRunAttachmentOut(
-        code=row.pdb_code,
-        test_type=row.test_type,
-        test_run_ref=row.test_run_ref,
-        filename=row.filename,
-        content_type=row.content_type,
-        title=row.title,
-        size_bytes=row.size_bytes,
-        stored=resolve_path(settings, row) is not None,
-        is_image=row.is_image,
-    )
+    return TestRunAttachmentOut.model_validate(attachment_read_model(settings, row))
 
 
 @router.get(
@@ -2059,19 +3234,45 @@ def component_sync_evidence(
 
     Answers 503 when the PDB cannot be read. Reporting a successful zero there
     would be indistinguishable from a module that has no test runs at all."""
+    from app.attachment_store import download_attachments
     from app.pdb_test_evidence import PdbEvidenceUnavailable, fetch_test_run_evidence
     from app.test_run_evidence import upsert_test_run_evidence
 
+    component = db.scalar(select(Component).where(Component.sn == sn))
+    if component is None:
+        raise HTTPException(status_code=404, detail=f"Component '{sn}' not found.")
+    institute = db.scalar(
+        select(InstituteProfile).where(
+            InstituteProfile.code == component.institute_code
+        )
+    )
+    if institute is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Component institute '{component.institute_code}' is not configured.",
+        )
+    _require_institute_scope(user, institute)
+
     # One opened component is worth the extra request per run: this is what
     # fills the glue-weight, metrology and IV views.
+    gateway = _pdb_gateway(request, db, user)
     try:
         records = fetch_test_run_evidence(
-            _pdb_gateway(request, db, user), sn, with_detail=True, strict=True
+            gateway, sn, with_detail=True, strict=True
         )
     except PdbEvidenceUnavailable as exc:
         # Reporting "0 mirrored" here would be a lie that looks like a fact.
         raise HTTPException(status_code=503, detail=str(exc)) from None
     stats = upsert_test_run_evidence(db, records)
+    # Flush makes newly inserted evidence visible to pending_attachments while
+    # keeping evidence rows and their local attachment index in one commit.
+    db.flush()
+    attachment_stats = download_attachments(
+        db,
+        gateway,
+        request.app.state.settings,
+        sn,
+    )
     db.commit()
     return EvidenceSyncOut(
         component_sn=sn,
@@ -2079,6 +3280,10 @@ def component_sync_evidence(
         updated=stats.updated,
         unchanged=stats.unchanged,
         total=stats.total,
+        attachments_downloaded=attachment_stats.downloaded,
+        attachments_reused=attachment_stats.reused,
+        attachments_failed=attachment_stats.failed,
+        attachments_total=attachment_stats.total,
     )
 
 
@@ -2098,29 +3303,578 @@ def sync_institute_evidence(
     institute, so the dashboard's required-test gaps and stage suggestions
     reflect real PDB results. One PDB read per component; a no-op when the
     gateway is not configured."""
+    from app.attachment_store import AttachmentSyncStats, download_attachments
     from app.pdb_test_evidence import fetch_test_run_evidence
     from app.test_run_evidence import upsert_test_run_evidence
 
+    institute = db.scalar(
+        select(InstituteProfile).where(InstituteProfile.code == institute_code)
+    )
+    if institute is None:
+        raise HTTPException(status_code=404, detail=f"Institute '{institute_code}' not found.")
+    _require_institute_scope(user, institute)
+
     gateway = _pdb_gateway(request, db, user)
-    components = db.scalars(
-        select(Component).where(
-            Component.institute_code == institute_code,
-            Component.component_type == component_type,
-            Component.trashed.is_(False),
+    components = list(
+        db.scalars(
+            select(Component).where(
+                Component.institute_code == institute_code,
+                Component.component_type == component_type,
+                Component.trashed.is_(False),
+                Component.stale.is_(False),
+            )
         )
     )
     records = []
-    processed = 0
     for component in components:
-        records.extend(fetch_test_run_evidence(gateway, component.sn))
-        processed += 1
+        records.extend(fetch_test_run_evidence(gateway, component.sn, with_detail=True))
     stats = upsert_test_run_evidence(db, records)
+    db.flush()
+    attachment_stats = AttachmentSyncStats()
+    for component in components:
+        current = download_attachments(
+            db,
+            gateway,
+            request.app.state.settings,
+            component.sn,
+        )
+        attachment_stats = AttachmentSyncStats(
+            downloaded=attachment_stats.downloaded + current.downloaded,
+            reused=attachment_stats.reused + current.reused,
+            failed=attachment_stats.failed + current.failed,
+        )
     db.commit()
     return InstituteEvidenceSyncOut(
         institute_code=institute_code,
-        components_processed=processed,
+        component_types=[component_type],
+        components_processed=len(components),
+        created=stats.created,
+        updated=stats.updated,
+        unchanged=stats.unchanged,
+        total=stats.total,
+        attachments_downloaded=attachment_stats.downloaded,
+        attachments_reused=attachment_stats.reused,
+        attachments_failed=attachment_stats.failed,
+        attachments_total=attachment_stats.total,
+    )
+
+
+# --------------------------------------------------------------------------
+# Shipments (Phase 4, docs/11): PDB mirror + local receiving check
+# --------------------------------------------------------------------------
+
+
+def _shipment_direction(shipment: Shipment, institute_code: str | None) -> str:
+    if not institute_code:
+        return "unknown"
+    incoming = shipment.recipient_code == institute_code
+    outgoing = shipment.sender_code == institute_code
+    if incoming and outgoing:
+        return "internal"
+    if incoming:
+        return "incoming"
+    if outgoing:
+        return "outgoing"
+    return "unknown"
+
+
+def _shipment_out(
+    shipment: Shipment,
+    institute_codes: dict[int, str],
+    projection: dict | None = None,
+) -> ShipmentOut:
+    out = ShipmentOut.model_validate(shipment)
+    code = institute_codes.get(shipment.institute_id) if shipment.institute_id else None
+    out.direction = _shipment_direction(shipment, code)
+    if projection is not None:
+        out.items = [ShipmentItemOut.model_validate(item) for item in projection["items"]]
+        out.reception_tests_configured = projection["reception_tests_configured"]
+        out.reception_test_status = projection["reception_test_status"]
+    return out
+
+
+def _institute_codes(db: Session) -> dict[int, str]:
+    rows = db.execute(select(InstituteProfile.id, InstituteProfile.code))
+    return {institute_id: code for institute_id, code in rows}
+
+
+@router.get("/api/shipments", response_model=list[ShipmentOut], tags=["shipments"])
+def list_shipments(
+    direction: str | None = None,
+    status: str | None = None,
+    reception: str | None = None,
+    q: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[ShipmentOut]:
+    stmt = select(Shipment).order_by(Shipment.sent_at.desc().nulls_last(), Shipment.id.desc())
+    if status:
+        stmt = stmt.where(Shipment.status == status)
+    if reception:
+        stmt = stmt.where(Shipment.reception_status == reception)
+    if q:
+        needle = f"%{q.strip().lower()}%"
+        stmt = stmt.where(
+            or_(
+                func.lower(Shipment.name).like(needle),
+                func.lower(Shipment.pdb_id).like(needle),
+                func.lower(Shipment.sender_code).like(needle),
+                func.lower(Shipment.recipient_code).like(needle),
+            )
+        )
+    codes = _institute_codes(db)
+    shipment_rows = list(db.scalars(stmt))
+    from app.shipment_reception import project_shipment_reception_tests
+
+    projections = project_shipment_reception_tests(db, shipment_rows)
+    shipments = [
+        _shipment_out(shipment, codes, projections.get(shipment.id))
+        for shipment in shipment_rows
+    ]
+    if direction:
+        shipments = [shipment for shipment in shipments if shipment.direction == direction]
+    return shipments
+
+
+@router.get("/api/shipments/{shipment_id}", response_model=ShipmentOut, tags=["shipments"])
+def get_shipment(shipment_id: int, db: Session = Depends(get_db)) -> ShipmentOut:
+    shipment = db.get(Shipment, shipment_id)
+    if shipment is None:
+        raise HTTPException(status_code=404, detail=f"Shipment {shipment_id} not found.")
+    from app.shipment_reception import project_shipment_reception_tests
+
+    projection = project_shipment_reception_tests(db, [shipment])[shipment.id]
+    return _shipment_out(shipment, _institute_codes(db), projection)
+
+
+@router.post(
+    "/api/sync/shipments/{institute_code}", response_model=ShipmentSyncOut, tags=["shipments"]
+)
+def sync_institute_shipments(
+    institute_code: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> ShipmentSyncOut:
+    """Mirror the institute's PDB shipments (both directions, read-only).
+
+    Small lists, so this runs synchronously like the evidence sync. Answers 503
+    when the PDB cannot be read — a successful zero would be a lie."""
+    from app.pdb_shipments import PdbShipmentsUnavailable, fetch_shipments_for_institute
+    from app.shipment_sync import delivered_pdb_ids, sync_shipments
+
+    institute = db.scalar(
+        select(InstituteProfile).where(InstituteProfile.code == institute_code)
+    )
+    if institute is None:
+        raise HTTPException(status_code=404, detail=f"Institute '{institute_code}' not found.")
+    _require_institute_scope(user, institute)
+    gateway = _pdb_gateway(request, db, user)
+    try:
+        records = fetch_shipments_for_institute(
+            gateway, institute_code, skip_items_for=delivered_pdb_ids(db)
+        )
+    except PdbShipmentsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    stats = sync_shipments(db, institute, records)
+    db.commit()
+    return ShipmentSyncOut(
+        institute_code=institute_code,
         created=stats.created,
         updated=stats.updated,
         unchanged=stats.unchanged,
         total=stats.total,
     )
+
+
+@router.post(
+    "/api/shipments/{shipment_id}/reception", response_model=ShipmentOut, tags=["shipments"]
+)
+def update_shipment_reception(
+    shipment_id: int,
+    body: ShipmentReceptionUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> ShipmentOut:
+    """Record the local receiving check. Partial: omitted fields are kept.
+
+    These fields are locally leading — a later PDB sync never overwrites them."""
+    shipment = db.get(Shipment, shipment_id)
+    if shipment is None:
+        raise HTTPException(status_code=404, detail=f"Shipment {shipment_id} not found.")
+    institute = (
+        db.get(InstituteProfile, shipment.institute_id)
+        if shipment.institute_id is not None
+        else None
+    )
+    if institute is None:
+        raise HTTPException(
+            status_code=409,
+            detail="The shipment is not linked to an institute profile.",
+        )
+    _require_institute_scope(user, institute)
+
+    override_reason = (body.test_override_reason or "").strip()
+    if body.test_override and body.status != "done":
+        raise HTTPException(
+            status_code=422,
+            detail="A reception-test override is only valid when marking reception done.",
+        )
+    if body.test_override and not override_reason:
+        raise HTTPException(
+            status_code=422,
+            detail="A reception-test override requires a reason.",
+        )
+    if body.test_override and user.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Only an admin may override incomplete reception tests.",
+        )
+    if body.test_override_reason is not None and not body.test_override:
+        raise HTTPException(
+            status_code=422,
+            detail="Set test_override when supplying an override reason.",
+        )
+
+    from app.shipment_reception import project_shipment_reception_tests
+
+    projection = project_shipment_reception_tests(db, [shipment])[shipment.id]
+    tests_block_done = (
+        projection["reception_tests_configured"]
+        and projection["reception_test_status"] != "passed"
+    )
+    if body.status == "done" and tests_block_done:
+        if not body.test_override:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": (
+                        "Reception cannot be marked done until every configured "
+                        "reception test has passed."
+                    ),
+                    "reception_test_status": projection["reception_test_status"],
+                },
+            )
+        db.add(
+            AuditEvent(
+                actor=user.email,
+                user_id=user.id,
+                action="shipment.reception_test_override",
+                subject=f"shipment:{shipment.id}",
+                detail={
+                    "pdb_id": shipment.pdb_id,
+                    "reception_test_status": projection["reception_test_status"],
+                    "reason": override_reason,
+                },
+            )
+        )
+    elif body.test_override:
+        raise HTTPException(
+            status_code=409,
+            detail="Reception tests already pass; an override is not applicable.",
+        )
+    if body.checklist is not None:
+        shipment.reception_checklist = [item.model_dump() for item in body.checklist]
+    if body.items is not None:
+        shipment.reception_items = [item.model_dump() for item in body.items]
+    if body.note is not None:
+        shipment.reception_note = body.note
+    if body.status is not None:
+        shipment.reception_status = body.status
+    elif shipment.reception_status == "pending":
+        shipment.reception_status = "in_progress"
+    shipment.reception_by = user.email
+    shipment.reception_user_id = user.id
+    shipment.reception_updated_at = utcnow()
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action="shipment.reception_updated",
+            subject=f"shipment:{shipment.id}",
+            detail={
+                "pdb_id": shipment.pdb_id,
+                "reception_status": shipment.reception_status,
+            },
+        )
+    )
+    db.commit()
+    db.refresh(shipment)
+    refreshed = project_shipment_reception_tests(db, [shipment])[shipment.id]
+    return _shipment_out(shipment, _institute_codes(db), refreshed)
+
+
+# --------------------------------------------------------------------------
+# Reminders & notification channels (Phase 4, docs/11)
+# --------------------------------------------------------------------------
+
+
+def _validate_reminder_channel(db: Session, user: User, channel: str | None) -> None:
+    """A named channel must exist in the user's institute profile."""
+    if not channel:
+        return
+    institute = db.get(InstituteProfile, user.institute_id) if user.institute_id else None
+    if institute is None or channel not in channel_configs(institute.settings):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Notification channel '{channel}' is not configured for your institute.",
+        )
+
+
+@router.get("/api/reminders", response_model=list[ReminderOut], tags=["reminders"])
+def list_reminders(
+    active: bool | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> list[Reminder]:
+    stmt = select(Reminder).order_by(Reminder.active.desc(), Reminder.next_due_at)
+    if user.institute_id is not None:
+        stmt = stmt.where(Reminder.institute_id == user.institute_id)
+    if active is not None:
+        stmt = stmt.where(Reminder.active.is_(active))
+    return list(db.scalars(stmt))
+
+
+@router.post("/api/reminders", response_model=ReminderOut, status_code=201, tags=["reminders"])
+def create_reminder(
+    body: ReminderCreate, db: Session = Depends(get_db), user: User = Depends(require_operator)
+) -> Reminder:
+    _validate_reminder_channel(db, user, body.channel)
+    reminder = Reminder(
+        title=body.title,
+        note=body.note,
+        channel=body.channel or None,
+        schedule_kind=body.schedule_kind,
+        next_due_at=body.next_due_at,
+        created_by=user.email,
+        user_id=user.id,
+        institute_id=user.institute_id,
+    )
+    db.add(reminder)
+    db.flush()
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action="reminder.created",
+            subject=f"reminder:{reminder.id}",
+            detail={"title": reminder.title, "schedule_kind": reminder.schedule_kind},
+        )
+    )
+    db.commit()
+    db.refresh(reminder)
+    return reminder
+
+
+@router.patch("/api/reminders/{reminder_id}", response_model=ReminderOut, tags=["reminders"])
+def update_reminder(
+    reminder_id: int,
+    body: ReminderUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> Reminder:
+    reminder = db.get(Reminder, reminder_id)
+    if reminder is None:
+        raise HTTPException(status_code=404, detail=f"Reminder {reminder_id} not found.")
+    if user.institute_id is not None and reminder.institute_id != user.institute_id:
+        raise HTTPException(status_code=403, detail="You can only edit your own reminders.")
+    if body.channel is not None:
+        # Empty string clears the channel; a non-empty name must be configured.
+        channel = body.channel.strip() or None
+        _validate_reminder_channel(db, user, channel)
+        reminder.channel = channel
+    if body.title is not None:
+        reminder.title = body.title
+    if body.note is not None:
+        reminder.note = body.note
+    if body.schedule_kind is not None:
+        reminder.schedule_kind = body.schedule_kind
+    if body.next_due_at is not None:
+        reminder.next_due_at = body.next_due_at
+    if body.active is not None:
+        reminder.active = body.active
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action="reminder.updated",
+            subject=f"reminder:{reminder.id}",
+            detail={"title": reminder.title, "active": reminder.active},
+        )
+    )
+    db.commit()
+    db.refresh(reminder)
+    return reminder
+
+
+@router.delete("/api/reminders/{reminder_id}", status_code=204, tags=["reminders"])
+def delete_reminder(
+    reminder_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> Response:
+    reminder = db.get(Reminder, reminder_id)
+    if reminder is None:
+        raise HTTPException(status_code=404, detail=f"Reminder {reminder_id} not found.")
+    if user.institute_id is not None and reminder.institute_id != user.institute_id:
+        raise HTTPException(status_code=403, detail="You can only delete your own reminders.")
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action="reminder.deleted",
+            subject=f"reminder:{reminder.id}",
+            detail={"title": reminder.title},
+        )
+    )
+    db.delete(reminder)
+    db.commit()
+    return Response(status_code=204)
+
+
+@router.get(
+    "/api/reminder-occurrences",
+    response_model=list[ReminderOccurrenceOut],
+    tags=["reminders"],
+)
+def list_reminder_occurrences(
+    reminder_id: int | None = None,
+    open_only: bool = False,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> list[ReminderOccurrence]:
+    """List durable reminder tasks; institute-bound users see only their own."""
+
+    stmt = select(ReminderOccurrence).order_by(
+        ReminderOccurrence.acknowledged_at.is_(None).desc(),
+        ReminderOccurrence.fired_at.desc(),
+        ReminderOccurrence.id.desc(),
+    )
+    if user.institute_id is not None:
+        stmt = stmt.where(ReminderOccurrence.institute_id == user.institute_id)
+    if reminder_id is not None:
+        stmt = stmt.where(ReminderOccurrence.reminder_id == reminder_id)
+    if open_only:
+        stmt = stmt.where(ReminderOccurrence.acknowledged_at.is_(None))
+    return list(db.scalars(stmt))
+
+
+@router.post(
+    "/api/reminder-occurrences/{occurrence_id}/ack",
+    response_model=ReminderOccurrenceOut,
+    tags=["reminders"],
+)
+def acknowledge_reminder_occurrence(
+    occurrence_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_operator),
+) -> ReminderOccurrence:
+    occurrence = db.get(ReminderOccurrence, occurrence_id)
+    if occurrence is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Reminder occurrence {occurrence_id} not found.",
+        )
+    if user.institute_id is not None and occurrence.institute_id != user.institute_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only acknowledge reminders for your own institute.",
+        )
+    if occurrence.acknowledged_at is None:
+        occurrence.acknowledged_at = utcnow()
+        occurrence.acknowledged_by = user.email
+        occurrence.acknowledged_user_id = user.id
+        db.add(
+            AuditEvent(
+                actor=user.email,
+                user_id=user.id,
+                action="reminder.acknowledged",
+                subject=f"reminder:{occurrence.reminder_id}",
+                detail={"occurrence_id": occurrence.id},
+            )
+        )
+        db.commit()
+        db.refresh(occurrence)
+    return occurrence
+
+
+@router.get(
+    "/api/notifications/channels",
+    response_model=list[NotificationChannelOut],
+    tags=["reminders"],
+)
+def list_notification_channels(
+    db: Session = Depends(get_db), user: User = Depends(require_user)
+) -> list[NotificationChannelOut]:
+    """Channel names and kinds for the user's institute — URLs stay server-side."""
+    institute = db.get(InstituteProfile, user.institute_id) if user.institute_id else None
+    if institute is None:
+        return []
+    return [
+        NotificationChannelOut(name=name, kind=config.get("kind", "webhook"))
+        for name, config in sorted(channel_configs(institute.settings).items())
+    ]
+
+
+@router.post("/api/notifications/test", response_model=NotificationTestOut, tags=["reminders"])
+def send_test_notification(
+    body: NotificationTestIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> NotificationTestOut:
+    """Send a test message through one configured channel (admin-only).
+
+    An institute-bound admin is always confined to their own profile.  A
+    global admin has no implicit tenant and must select one explicitly.
+    """
+    if admin.institute_id is not None:
+        institute = db.get(InstituteProfile, admin.institute_id)
+        if body.institute_code is not None and (
+            institute is None or body.institute_code != institute.code
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only test channels for your own institute.",
+            )
+    elif body.institute_code is not None:
+        institute = db.scalar(
+            select(InstituteProfile).where(InstituteProfile.code == body.institute_code)
+        )
+        if institute is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Institute '{body.institute_code}' not found.",
+            )
+    else:
+        institute = None
+    if institute is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Select an institute before testing a notification channel.",
+        )
+    channel = channel_configs(institute.settings).get(body.channel)
+    if channel is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Notification channel '{body.channel}' is not configured.",
+        )
+    notifier = getattr(request.app.state, "notifier", None)
+    if notifier is None:
+        from app.notifications import make_notifier
+
+        notifier = make_notifier(request.app.state.settings)
+    try:
+        notifier(channel, "itkFlow test notification", "Channel configuration works.")
+    except NotificationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None
+    db.add(
+        AuditEvent(
+            actor=admin.email,
+            user_id=admin.id,
+            action="notification.test_sent",
+            subject=f"channel:{body.channel}",
+            detail={"institute": institute.code},
+        )
+    )
+    db.commit()
+    return NotificationTestOut(channel=body.channel, sent=True)

@@ -7,7 +7,7 @@ submitter is not even called when it must not be.
 """
 
 import pytest
-from authutil import authenticate
+from authutil import authenticate, create_institute_profile
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -82,9 +82,11 @@ def seed_upload_action(
     """Create a mirrored component set, an ingest file and an outbox
     `upload_test_run` action moved to the requested status. Returns its id."""
     authenticate(client, session_factory, role="operator")  # ingest writes are gated
-    client.post(
-        "/api/institutes",
-        json={"code": "TUDO", "name": "TU Dortmund", "local_name_prefix": "TUDO-"},
+    create_institute_profile(
+        session_factory,
+        code="TUDO",
+        name="TU Dortmund",
+        local_name_prefix="TUDO-",
     )
     with session_factory() as session:
         sync_components(session, load_fixture_records(DEMO_FIXTURE_PATH))
@@ -386,18 +388,17 @@ def _seed_mirror_component(session_factory, sn: str, *, is_dummy: bool) -> None:
         session.commit()
 
 
-def test_real_submitter_is_inactive_without_access_codes(session_factory):
-    """Guard: the real PDB submitter must never write without configured codes.
+def test_real_submitter_is_inactive_without_bound_identity(session_factory):
+    """The real PDB submitter never writes without an action-bound identity.
 
     An approved stage_move on a legitimate DUMMY target is processed with the
-    *real* submitter, which must refuse (PdbSubmitUnavailable -> transient),
-    not reach itkdb, because no access codes are configured.
+    *real* submitter, which must refuse (PdbSubmitUnavailable -> transient)
+    before constructing an itkdb client.
     """
     from app.config import Settings
     from app.pdb_submit import make_pdb_submitter
 
     settings = Settings(database_url="sqlite:///:memory:", _env_file=None)
-    assert settings.itkdb_access_code1 is None and settings.itkdb_access_code2 is None
     submitter = make_pdb_submitter(settings)
 
     _seed_mirror_component(session_factory, "20UPGM19999999", is_dummy=True)
@@ -477,15 +478,18 @@ def test_real_submitter_rejects_upload_outside_dummy_scope(session_factory):
 
 def test_real_submitter_upload_uses_normalized_payload(session_factory, client, monkeypatch):
     """A local-name instrument file must become a serial-number PDB upload."""
-    from app.config import Settings
-    from app.models import IngestFile
+    from app.models import IngestFile, OutboxPdbPrincipal, User
+    from app.pdb_credentials import PdbAccessCodes, save_pdb_credentials
     from app.pdb_submit import make_pdb_submitter
     from app.sync import SyncRecord
 
-    institute = client.post(
-        "/api/institutes",
-        json={"code": "TUDO", "name": "TU Dortmund", "local_name_prefix": "TUDO-"},
-    ).json()
+    settings = client.app.state.settings
+    institute = create_institute_profile(
+        session_factory,
+        code="TUDO",
+        name="TU Dortmund",
+        local_name_prefix="TUDO-",
+    )
     with session_factory() as session:
         sync_components(
             session,
@@ -517,14 +521,41 @@ def test_real_submitter_upload_uses_normalized_payload(session_factory, client, 
         )
         session.add(ingest)
         session.flush()
+        approver = User(
+            email="payload-reviewer@example.org",
+            display_name="Payload Reviewer",
+            role="operator",
+            is_active=True,
+            institute_id=institute["id"],
+        )
+        session.add(approver)
+        session.flush()
+        access_codes = PdbAccessCodes("payload-code-one", "payload-code-two")
+        save_pdb_credentials(
+            session,
+            user_id=approver.id,
+            access_codes=access_codes,
+            pdb_identity="payload-reviewer-pdb",
+            institutions=("TUDO",),
+            encryption_key=settings.pdb_credential_encryption_key,
+        )
         action = OutboxAction(
             institute_id=institute["id"],
             kind="upload_test_run",
             status=OutboxStatus.APPROVED.value,
             created_by="tests",
+            user_id=approver.id,
             payload={"ingest_file_id": ingest.id},
         )
         session.add(action)
+        session.flush()
+        session.add(
+            OutboxPdbPrincipal(
+                outbox_action_id=action.id,
+                user_id=approver.id,
+                pdb_identity="payload-reviewer-pdb",
+            )
+        )
         session.commit()
         action_id = action.id
 
@@ -538,18 +569,15 @@ def test_real_submitter_upload_uses_normalized_payload(session_factory, client, 
     class _Gateway:
         is_configured = True
 
-        def __init__(self, settings):
+        def __init__(self, settings, *, access_codes=None):
             self.settings = settings
+            assert access_codes.access_code1 == "payload-code-one"
+            assert access_codes.access_code2 == "payload-code-two"
 
         def client(self):
             return _Client()
 
     monkeypatch.setattr("app.pdb_submit.PdbGateway", _Gateway)
-    settings = Settings(
-        itkdb_access_code1="one",
-        itkdb_access_code2="two",
-        _env_file=None,
-    )
     submitter = make_pdb_submitter(settings)
 
     with session_factory() as session:
@@ -579,10 +607,12 @@ def seed_stage_move(
 ) -> int:
     """Mirror components, confirm the requirements through GLUED (so the move
     is endorsed), and create a stage_move action in the requested status."""
-    tudo = client.post(
-        "/api/institutes",
-        json={"code": "TUDO", "name": "TU Dortmund", "local_name_prefix": "TUDO-"},
-    ).json()
+    tudo = create_institute_profile(
+        session_factory,
+        code="TUDO",
+        name="TU Dortmund",
+        local_name_prefix="TUDO-",
+    )
     with session_factory() as session:
         sync_components(session, load_fixture_records(DEMO_FIXTURE_PATH))
         session.commit()
