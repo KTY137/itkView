@@ -886,8 +886,29 @@ export type AssemblyDraft = {
   parent_sn: string;
   child_sn: string;
   slot: string;
-  tool_id: number;
+  /** Legacy single-tool contract. Sent only when the institute profile has
+   * no configured `assembly_tool_slots` layout (docs/05 §8). */
+  tool_id?: number;
+  /** Tool IDs keyed by `assembly_tool_slots[].key`. Sent instead of
+   * `tool_id` once the institute profile defines a slot layout. */
+  tools?: Record<string, number[]>;
   glue_batch_id?: number | null;
+};
+
+/** One configured tool slot from `Institute.settings.assembly_tool_slots`
+ * (docs/05 §8, docs/07). A missing or invalid setting means the wizard falls
+ * back to a single legacy tool slot instead. `label` is institute data and
+ * must never be translated or hardcoded. */
+export type AssemblyToolSlot = {
+  key: string;
+  label: string;
+  kinds?: string[];
+  multiple?: boolean;
+  /** PDB property code the resolved tool(s) map to. The wizard never reads
+   * this itself — it is applied server-side (mirrors `assembly_property_keys`,
+   * docs/07) when deriving `AssemblyPreview.pdb_properties`. Kept on this
+   * type only so it stays symmetric with the profile contract it renders. */
+  property_key?: string;
 };
 
 export type AssemblyIssue = { code: string; message: string };
@@ -933,6 +954,14 @@ export type AssemblyPreview = {
   parent: AssemblyComponent | null;
   child: AssemblyComponent | null;
   tool: AssemblyTool | null;
+  /** Resolved tools per `assembly_tool_slots[].key`, in selection order —
+   * the server's `AssemblyPreviewOut.tools` (schemas.py), defaulting to `{}`
+   * once only the legacy single `tool` is in play. This is the source of
+   * truth for the Review step: never re-derive it from locally selected
+   * tools, the server already revalidated everything. Optional here only so
+   * the offline demo preview (which never uses a slot layout) still
+   * type-checks without it. */
+  tools?: Record<string, AssemblyTool[]>;
   glue_batch: AssemblyGlueBatch | null;
   pdb_properties: Record<string, string>;
   issues: AssemblyIssue[];

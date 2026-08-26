@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { NavIntent, ScreenId } from "../App";
 import AddTestResult from "../AddTestResult";
+import type { RecordTestIntent } from "../AddTestResult";
 import ImageLightbox from "../ImageLightbox";
 import {
   ApiError,
@@ -761,6 +762,14 @@ function ComponentDetailPanel({
   const [testSchemasSyncing, setTestSchemasSyncing] = useState(false);
   const [testSchemasError, setTestSchemasError] = useState<string | null>(null);
   const [testSchemasReloadKey, setTestSchemasReloadKey] = useState(0);
+  // Set by a row-level edit-ghost click in the required-tests table below;
+  // preselects (but does not lock) the Add-test-result test-type dropdown.
+  // `token` must be bumped on every click (see handleRecordTest) — a
+  // re-click of the same "missing"/"failed" row carries the same test-type
+  // string, which alone would not change React state / re-fire the effect
+  // that opens the form a second time (review IMPORTANT #2).
+  const [initialTestType, setInitialTestType] = useState<RecordTestIntent | null>(null);
+  const recordTestTokenRef = useRef(0);
   const testSchemaSyncRequest = useRef(0);
   const currentTestSchemaComponentType = useRef<string | null>(null);
   const seenEvidenceJob = useRef<number | null>(evidenceJobId);
@@ -976,6 +985,11 @@ function ComponentDetailPanel({
     }
   }
 
+  function handleRecordTest(testType: string) {
+    recordTestTokenRef.current += 1;
+    setInitialTestType({ testType, token: recordTestTokenRef.current });
+  }
+
   return (
     <div className="screen">
       {toolbar}
@@ -1151,6 +1165,7 @@ function ComponentDetailPanel({
                 schemasSyncing={testSchemasSyncing}
                 pinnedTestType={pinnedTestType ?? undefined}
                 intentToken={testIntentToken}
+                initialTestType={initialTestType ?? undefined}
                 onSyncSchemas={handleSyncTestSchemas}
                 onRefresh={() => {
                   setReloadKey((key) => key + 1);
@@ -1168,6 +1183,7 @@ function ComponentDetailPanel({
                   suggestion={suggestion}
                   instituteCode={detail.institute_code}
                   onStagedChanged={refreshPreview}
+                  onRecordTest={handleRecordTest}
                 />
               ) : (
                 <UnavailableStageSection />
@@ -1185,6 +1201,8 @@ function ComponentDetailPanel({
               <ProjectedChecksSection
                 stage={preview.projected.stage}
                 checks={preview.projected.checks}
+                instituteCode={detail.institute_code}
+                onRecordTest={handleRecordTest}
               />
               <TestResultsSection
                 sn={detail.sn}
@@ -1199,6 +1217,7 @@ function ComponentDetailPanel({
                   suggestion={suggestion}
                   instituteCode={detail.institute_code}
                   onStagedChanged={refreshPreview}
+                  onRecordTest={handleRecordTest}
                 />
               ) : (
                 <UnavailableStageSection />
@@ -1401,13 +1420,21 @@ function previewCheckLabel(status: PreviewRequirementCheck["status"]): string {
   return t.components.previewPending;
 }
 
-function ProjectedChecksSection({
+export function ProjectedChecksSection({
   stage,
   checks,
+  instituteCode,
+  onRecordTest,
 }: {
   stage: string;
   checks: PreviewRequirementCheck[];
+  instituteCode: string;
+  onRecordTest?: (testType: string) => void;
 }) {
+  const { canWrite, user } = useAuth();
+  const canWriteInstitute =
+    canWrite &&
+    (user?.institute_code === null || user?.institute_code === instituteCode);
   return (
     <>
       <h3 className="section-title">{t.components.previewProjectedChecks}</h3>
@@ -1428,13 +1455,43 @@ function ProjectedChecksSection({
               </tr>
             </thead>
             <tbody>
-              {checks.map((check) => (
-                <tr className={check.status === "pending" ? "ghost-check-row" : undefined} key={`${check.stage}:${check.test_type}`}>
-                  <td className="mono">{check.test_type}</td>
-                  <td><span className={stageChipClass(check.stage)} title={check.stage}>{stageLabel(check.stage)}</span></td>
-                  <td><span className={PREVIEW_CHECK_CLASS[check.status]}>{previewCheckLabel(check.status)}</span></td>
-                </tr>
-              ))}
+              {checks.map((check) => {
+                const editable =
+                  canWriteInstitute &&
+                  onRecordTest !== undefined &&
+                  (check.status === "missing" || check.status === "failed");
+                return (
+                  <tr
+                    className={
+                      check.status === "pending"
+                        ? "ghost-check-row"
+                        : editable
+                          ? "req-row-editable"
+                          : undefined
+                    }
+                    key={`${check.stage}:${check.test_type}`}
+                  >
+                    <td className="mono">{check.test_type}</td>
+                    <td><span className={stageChipClass(check.stage)} title={check.stage}>{stageLabel(check.stage)}</span></td>
+                    <td>
+                      <span className="req-status-cell">
+                        <span className={PREVIEW_CHECK_CLASS[check.status]}>{previewCheckLabel(check.status)}</span>
+                        {editable && (
+                          <button
+                            type="button"
+                            className="req-edit-ghost"
+                            title={t.components.recordTestFor(check.test_type)}
+                            aria-label={t.components.recordTestFor(check.test_type)}
+                            onClick={() => onRecordTest?.(check.test_type)}
+                          >
+                            <span aria-hidden="true" className="req-edit-ghost-glyph">✎</span>
+                          </button>
+                        )}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -1530,14 +1587,16 @@ const STATUS_LABEL: Record<RequirementCheck["status"], string> = {
   missing: t.components.stageMissing,
 };
 
-function StageSuggestionSection({
+export function StageSuggestionSection({
   suggestion,
   instituteCode,
   onStagedChanged,
+  onRecordTest,
 }: {
   suggestion: StageSuggestion;
   instituteCode: string;
   onStagedChanged: () => void;
+  onRecordTest?: (testType: string) => void;
 }) {
   const { canWrite, user } = useAuth();
   const canWriteInstitute =
@@ -1588,19 +1647,41 @@ function StageSuggestionSection({
               </tr>
             </thead>
             <tbody>
-              {suggestion.checks.map((check) => (
-                <tr key={`${check.stage}:${check.test_type}`}>
-                  <td className="mono">{check.test_type}</td>
-                  <td>
-                    <span className={stageChipClass(check.stage)} title={check.stage}>
-                      {stageLabel(check.stage)}
-                    </span>
-                  </td>
-                  <td>
-                    <span className={STATUS_CHIP[check.status]}>{STATUS_LABEL[check.status]}</span>
-                  </td>
-                </tr>
-              ))}
+              {suggestion.checks.map((check) => {
+                const editable =
+                  canWriteInstitute &&
+                  onRecordTest !== undefined &&
+                  (check.status === "missing" || check.status === "failed");
+                return (
+                  <tr
+                    className={editable ? "req-row-editable" : undefined}
+                    key={`${check.stage}:${check.test_type}`}
+                  >
+                    <td className="mono">{check.test_type}</td>
+                    <td>
+                      <span className={stageChipClass(check.stage)} title={check.stage}>
+                        {stageLabel(check.stage)}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="req-status-cell">
+                        <span className={STATUS_CHIP[check.status]}>{STATUS_LABEL[check.status]}</span>
+                        {editable && (
+                          <button
+                            type="button"
+                            className="req-edit-ghost"
+                            title={t.components.recordTestFor(check.test_type)}
+                            aria-label={t.components.recordTestFor(check.test_type)}
+                            onClick={() => onRecordTest?.(check.test_type)}
+                          >
+                            <span aria-hidden="true" className="req-edit-ghost-glyph">✎</span>
+                          </button>
+                        )}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}

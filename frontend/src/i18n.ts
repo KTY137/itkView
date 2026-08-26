@@ -115,9 +115,9 @@ const en = {
     instituteCodeLabel: "Code",
     instituteNameLabel: "Name",
     institutePrefixLabel: "Local prefix",
-    instituteCodePlaceholder: "e.g. TUDO",
-    instituteNamePlaceholder: "e.g. TU Dortmund",
-    institutePrefixPlaceholder: "e.g. TUDO-",
+    instituteCodePlaceholder: "e.g. ABCD",
+    instituteNamePlaceholder: "e.g. Example Institute",
+    institutePrefixPlaceholder: "e.g. ABCD-",
     syncSelected: "Sync components & evidence",
     syncingComponents: "Component sync running; evidence follows…",
     checkingSync: "Checking sync status…",
@@ -248,6 +248,7 @@ const en = {
     stageProposed: (id: number, stage: string) =>
       `Staged action #${id} created: stage move → ${stage}. Review it in Staged.`,
     stageProposeFailed: "Could not create the stage-move draft",
+    recordTestFor: (testType: string) => `Record ${testType} result`,
   },
   register: {
     title: "Register module",
@@ -256,7 +257,7 @@ const en = {
     typeCodeLabel: "Type code",
     typeCodePlaceholder: "e.g. R5M0",
     localNameLabel: "Local name",
-    localNamePlaceholder: "e.g. TUDO-R5M0-99",
+    localNamePlaceholder: "e.g. ABCD-R5M0-99",
     submit: "Register → Staged",
     submitting: "Creating draft…",
     needsInstitute: "Select an institute first.",
@@ -695,6 +696,19 @@ const en = {
     toolScanPlaceholder: "Scan tool RFID or code",
     toolScanLabel: "Scan compatible tool",
     scan: "Scan",
+    // Per-slot resource picker (Institute.settings.assembly_tool_slots,
+    // docs/05 §8). Slot `label` values are institute data and are rendered
+    // as-is, never translated.
+    toolSlotChoosePlaceholder: "Add a tool…",
+    toolSlotQuickSelectLabel: (label: string) => `Add a tool to ${label}`,
+    toolSlotRequired: (label: string) => `${label} needs at least one tool.`,
+    toolSlotFull: (label: string, max: number) => `${label} already has its maximum of ${max} tools.`,
+    toolSlotNoCandidates: (label: string) =>
+      `No active compatible tool is available for ${label}.`,
+    toolScanRejectedForSlot: (code: string, label: string) =>
+      `${code} is not a compatible tool kind for ${label}.`,
+    toolSlotRemove: (code: string, label: string) => `Remove ${code} from ${label}`,
+    toolSlotScanTarget: (label: string) => `Scanning target: ${label}`,
     glueLabel: "Glue batch (optional)",
     noGlue: "No glue batch",
     glueUntimed: "Mixed, no pot-life timer",

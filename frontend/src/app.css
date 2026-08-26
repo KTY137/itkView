@@ -3209,3 +3209,139 @@ g:hover > .curve-line {
   fill: var(--ink2);
   font-family: var(--sans);
 }
+
+/* Required-tests-per-stage row edit ghost (Components detail): a dashed,
+   muted pencil affordance on "missing"/"failed" rows that opens the existing
+   Add-test-result entry with that test type preselected. Muted (not
+   invisible) at rest on every input type; brightens on row hover/focus.
+   Never colour-only — dashed border + glyph, on top of the status chip. The
+   flex layout lives on an inner <span> (not the <td> itself), so the cell
+   keeps `display: table-cell` and the table's column layout stays intact. */
+.req-status-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.req-edit-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px dashed var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  background: none;
+  opacity: 0.35;
+  transition: opacity 0.12s, border-color 0.12s, color 0.12s, background 0.12s;
+}
+.req-row-editable:hover .req-edit-ghost,
+.req-row-editable:focus-within .req-edit-ghost,
+.req-edit-ghost:focus-visible {
+  opacity: 1;
+  border-color: var(--accent);
+  color: var(--accent-hi);
+  background: var(--accent-soft);
+}
+.req-edit-ghost-glyph {
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* Assembly wizard: institute-configured tool slots (docs/05 §8, docs/07).
+   Renders in the Resources step instead of the single legacy tool select
+   whenever the institute profile defines `assembly_tool_slots`; the legacy
+   select markup above is untouched and keeps its own styling. */
+.assembly-tool-slots {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.assembly-tool-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* Border width changes on `.active` (1px -> 2px); padding shrinks by the
+     same 1px so the card's outer box size never jumps. */
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface2);
+}
+.assembly-tool-slot.active {
+  padding: 9px 11px;
+  border-width: 2px;
+  border-color: var(--accent);
+}
+.assembly-tool-slot-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px 10px;
+}
+.assembly-tool-slot-label {
+  font: 700 12.5px var(--sans);
+  min-height: 36px;
+  padding: 2px 6px;
+}
+.assembly-tool-slot.active .assembly-tool-slot-label {
+  color: var(--accent-hi);
+}
+.assembly-tool-slot-target {
+  /* Active-slot marker: never colour-only (docs/05). Chip text names the
+     slot explicitly, so a screen reader hears it too via role="status". */
+  color: var(--accent-hi);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.assembly-tool-slot-count {
+  font-size: 11px;
+  white-space: nowrap;
+  margin-left: auto;
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.removable-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+  padding: 0 2px;
+  min-width: 28px;
+  min-height: 28px;
+  cursor: pointer;
+  border-radius: 999px;
+}
+.chip-remove:hover {
+  color: var(--crit);
+  background: rgba(208, 59, 59, 0.12);
+}
+.chip-remove:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.assembly-tool-slot-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.assembly-tool-slot-hint.serious-text {
+  color: var(--serious);
+}

@@ -22,6 +22,7 @@ never recorded as stored, so the next sweep simply tries it again.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections.abc import Callable
 from contextlib import closing
@@ -29,7 +30,7 @@ from dataclasses import dataclass
 from ipaddress import ip_address
 from pathlib import Path
 from time import sleep
-from typing import Any
+from typing import Any, Literal
 from urllib.error import HTTPError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -168,6 +169,18 @@ def attachment_read_model(settings: Any, attachment: TestRunAttachment) -> dict[
     }
 
 
+def _existing_attachment_row(
+    session: Session, source: str, pdb_code: str
+) -> TestRunAttachment | None:
+    """Look up a mirrored attachment by its natural key. Read-only."""
+    return session.scalar(
+        select(TestRunAttachment).where(
+            TestRunAttachment.source == source,
+            TestRunAttachment.pdb_code == pdb_code,
+        )
+    )
+
+
 def _upsert_row(
     session: Session,
     *,
@@ -180,12 +193,7 @@ def _upsert_row(
     title: str | None,
     source: str = "pdb",
 ) -> TestRunAttachment:
-    existing = session.scalar(
-        select(TestRunAttachment).where(
-            TestRunAttachment.source == source,
-            TestRunAttachment.pdb_code == pdb_code,
-        )
-    )
+    existing = _existing_attachment_row(session, source, pdb_code)
     if existing is None:
         existing = TestRunAttachment(
             component_sn=component_sn,
@@ -236,13 +244,48 @@ def pending_attachments(session: Session, component_sn: str) -> list[dict[str, A
     return descriptors
 
 
-def _write_bytes(root: Path, relative_path: str, data: bytes) -> int:
+def _temp_path_for(target: Path) -> Path:
+    """The ``.part`` sibling a download is staged under before it is renamed.
+
+    Deterministic (not a random name): a ``.part`` file orphaned by a crash or
+    a killed process sits at exactly this path, so the next attempt at the
+    same attachment silently overwrites it (``Path.write_bytes`` truncates)
+    instead of tripping over a stale leftover.
+    """
+    return target.with_name(target.name + ".part")
+
+
+def _write_temp_bytes(root: Path, relative_path: str, data: bytes) -> Path:
+    """Write attachment bytes to a ``.part`` file beside their final target.
+
+    Never the final name: a reader must never be able to open a half-written
+    attachment. Bytes are fully in hand before this is called (no network
+    happens while this — or any later disk write — is in progress), so the
+    only failure mode here is a local disk problem; that leaves no partial
+    ``.part`` file behind either.
+    """
     target = (root / relative_path).resolve()
     if not target.is_relative_to(root):
         raise ValueError("refusing to write an attachment outside its directory")
+    temp = _temp_path_for(target)
+    temp.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        temp.write_bytes(data)
+    except OSError:
+        temp.unlink(missing_ok=True)
+        raise
+    return temp
+
+
+def _finalize_download(temp_path: Path, root: Path, relative_path: str) -> None:
+    """Atomically move a fetched ``.part`` file onto its public name.
+
+    The only filesystem step in the commit phase: by the time this runs, the
+    bytes are already durable on disk, so this is a rename, not a write.
+    """
+    target = (root / relative_path).resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(data)
-    return len(data)
+    os.replace(temp_path, target)
 
 
 def _as_bytes(result: Any) -> bytes | None:
@@ -645,6 +688,201 @@ def _beat(heartbeat: Callable[[], None] | None) -> None:
         heartbeat()
 
 
+@dataclass
+class _FetchOutcome:
+    """One descriptor's result, carried from the fetch phase to the commit
+    phase without a live network handle or a ``Session`` anywhere in sight."""
+
+    descriptor: dict[str, Any]
+    outcome: Literal["reused", "downloaded", "failed"]
+    content_type: str | None = None
+    relative_path: str | None = None
+    temp_path: Path | None = None
+    size: int = 0
+
+
+def _plan_resolved(
+    session: Session, settings: Any, descriptors: list[dict[str, Any]]
+) -> dict[tuple[str, str], bool]:
+    """Phase 1 - plan (read-only): which ``(source, code)`` keys already have
+    a mirrored file on disk.
+
+    No row is created and no attribute is written here — only ``select``
+    statements — so this may run freely while another connection elsewhere in
+    the app holds a write transaction open.
+    """
+    resolved: dict[tuple[str, str], bool] = {}
+    for descriptor in descriptors:
+        key = (descriptor["source"], descriptor["code"])
+        if key in resolved:
+            continue
+        existing = _existing_attachment_row(session, descriptor["source"], descriptor["code"])
+        resolved[key] = existing is not None and resolve_path(settings, existing) is not None
+    return resolved
+
+
+def _fetch_all(
+    gateway: Any,
+    descriptors: list[dict[str, Any]],
+    resolved: dict[tuple[str, str], bool],
+    *,
+    component_sn: str,
+    root: Path,
+    force: bool,
+    timeout: int,
+    max_bytes: int,
+    max_attempts: int,
+    heartbeat: Callable[[], None] | None,
+) -> list[_FetchOutcome]:
+    """Phase 2 - fetch: network only, no ``Session`` in reach at all.
+
+    A retried download used to run *inside* an open database write
+    transaction (the row was upserted and flushed before the bytes were
+    fetched), which held SQLite's write lock for as long as a flaky line took
+    to deliver a large image — every other request and worker tick failed
+    with "database is locked" in the meantime. Bytes now land in a ``.part``
+    file beside their final target as soon as they arrive, so a whole sweep's
+    worth of images never accumulates in memory waiting for the commit phase
+    either (docs/09, Attachment-Phase).
+    """
+    outcomes: list[_FetchOutcome] = []
+    client: Any = None
+    # Set once client construction has exhausted its own retry budget: every
+    # remaining PDB descriptor would fail identically, so fail them fast this
+    # sweep instead of hammering the gateway once per file. None of them is
+    # recorded as stored, so the next sweep retries them all.
+    client_unavailable = False
+
+    for descriptor in descriptors:
+        key = (descriptor["source"], descriptor["code"])
+
+        # Resolved either before this call (a previous sweep) or by an
+        # earlier descriptor in this same call (two test runs can list the
+        # same attachment code) — `force` re-fetches either way.
+        if not force and resolved.get(key):
+            outcomes.append(_FetchOutcome(descriptor, "reused"))
+            _beat(heartbeat)
+            continue
+
+        needs_pdb_client = descriptor["source"] != "share_link"
+        if needs_pdb_client and client is None and client_unavailable:
+            outcomes.append(_FetchOutcome(descriptor, "failed"))
+            _beat(heartbeat)
+            continue
+
+        fetched: tuple[bytes, str | None] | None = None
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                if needs_pdb_client and client is None:
+                    client = _open_pdb_client(gateway)
+                fetched = _fetch_bytes(
+                    client,
+                    descriptor,
+                    timeout=timeout,
+                    max_bytes=max_bytes,
+                )
+                break
+            except _PdbClientUnavailable:
+                break
+            except _TransientDownloadFailure:
+                if attempt >= max_attempts:
+                    break
+                _beat(heartbeat)
+                sleep(DOWNLOAD_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+        if needs_pdb_client and client is None:
+            client_unavailable = True
+
+        if fetched is None:
+            outcomes.append(_FetchOutcome(descriptor, "failed"))
+            _beat(heartbeat)
+            continue
+        data, reported_type = fetched
+
+        # itkdb sniffs the actual type from the response; the listing metadata
+        # is often just "file". Prefer the sniffed one for both the stored
+        # extension and what the API later serves.
+        content_type = reported_type or descriptor["content_type"]
+        relative_path = storage_path(
+            component_sn, descriptor["code"], content_type, descriptor["filename"]
+        )
+        try:
+            temp_path = _write_temp_bytes(root, relative_path, data)
+        except (OSError, ValueError):
+            outcomes.append(_FetchOutcome(descriptor, "failed"))
+            _beat(heartbeat)
+            continue
+
+        resolved[key] = True
+        outcomes.append(
+            _FetchOutcome(
+                descriptor,
+                "downloaded",
+                content_type=content_type,
+                relative_path=relative_path,
+                temp_path=temp_path,
+                size=len(data),
+            )
+        )
+        _beat(heartbeat)
+
+    return outcomes
+
+
+def _commit_outcomes(
+    session: Session, root: Path, outcomes: list[_FetchOutcome]
+) -> AttachmentSyncStats:
+    """Phase 3 - commit: the only phase that writes to ``session``.
+
+    Short by construction: every byte is already durable on disk and every
+    network retry already happened, so this loop is pure local bookkeeping —
+    an upsert per descriptor plus one rename per successful download. The
+    caller still commits afterwards, exactly as before.
+    """
+    downloaded = reused = failed = 0
+    for item in outcomes:
+        descriptor = item.descriptor
+        row = _upsert_row(
+            session,
+            component_sn=descriptor["component_sn"],
+            test_type=descriptor["test_type"],
+            test_run_ref=descriptor["test_run_ref"],
+            pdb_code=descriptor["code"],
+            filename=descriptor["filename"],
+            content_type=descriptor["content_type"],
+            title=descriptor["title"],
+            source=descriptor["source"],
+        )
+        # This app's sessions run with autoflush disabled: a later descriptor
+        # sharing this (source, code) — the same attachment listed under two
+        # test runs — must see this row already persisted, not add a
+        # duplicate.
+        session.flush()
+
+        if item.outcome == "reused":
+            reused += 1
+            continue
+        if item.outcome == "failed" or item.temp_path is None or item.relative_path is None:
+            failed += 1
+            continue
+
+        try:
+            _finalize_download(item.temp_path, root, item.relative_path)
+        except OSError:
+            item.temp_path.unlink(missing_ok=True)
+            failed += 1
+            continue
+
+        row.content_type = item.content_type
+        row.relative_path = item.relative_path
+        row.size_bytes = item.size
+        row.downloaded_at = utcnow()
+        downloaded += 1
+
+    return AttachmentSyncStats(downloaded=downloaded, reused=reused, failed=failed)
+
+
 def download_attachments(
     session: Session,
     gateway: Any,
@@ -655,6 +893,16 @@ def download_attachments(
     heartbeat: Callable[[], None] | None = None,
 ) -> AttachmentSyncStats:
     """Mirror this component's attachment bytes to the local folder.
+
+    Three strictly separated phases keep this from ever holding a database
+    write transaction open across a network call: (1) a read-only plan of
+    what already resolves to a file on disk, (2) network fetches — no
+    ``Session`` write happens anywhere in this phase, and the phase is not
+    even given a ``Session`` — that stage bytes in a ``.part`` file beside
+    their final target, and (3) one short, network-free commit that renames
+    the finished files into place and upserts their rows. See
+    ``_fetch_all`` / ``_commit_outcomes`` and docs/09 (Attachment-Phase) for
+    the incident this replaced.
 
     Read-only against the PDB and best effort per attachment: one unavailable
     file must not cost the others. Transient network failures are retried with
@@ -686,90 +934,24 @@ def download_attachments(
         1,
         int(getattr(settings, "sync_page_max_attempts", DEFAULT_DOWNLOAD_MAX_ATTEMPTS)),
     )
-    downloaded = reused = failed = 0
-    client = None
-    # Set once client construction has exhausted its own retry budget: every
-    # remaining PDB descriptor would fail identically, so fail them fast this
-    # sweep instead of hammering the gateway once per file. None of them is
-    # recorded as stored, so the next sweep retries them all.
-    client_unavailable = False
 
-    for descriptor in descriptors:
-        row = _upsert_row(
-            session,
-            component_sn=descriptor["component_sn"],
-            test_type=descriptor["test_type"],
-            test_run_ref=descriptor["test_run_ref"],
-            pdb_code=descriptor["code"],
-            filename=descriptor["filename"],
-            content_type=descriptor["content_type"],
-            title=descriptor["title"],
-            source=descriptor["source"],
-        )
-        session.flush()
+    # Phase 1 - plan (read-only).
+    resolved = _plan_resolved(session, settings, descriptors)
 
-        if not force and resolve_path(settings, row) is not None:
-            reused += 1
-            _beat(heartbeat)
-            continue
+    # Phase 2 - fetch (network only; no session write is even possible here,
+    # since this helper is never handed a session).
+    outcomes = _fetch_all(
+        gateway,
+        descriptors,
+        resolved,
+        component_sn=component_sn,
+        root=root,
+        force=force,
+        timeout=timeout,
+        max_bytes=max_bytes,
+        max_attempts=max_attempts,
+        heartbeat=heartbeat,
+    )
 
-        needs_pdb_client = descriptor["source"] != "share_link"
-        if needs_pdb_client and client is None and client_unavailable:
-            failed += 1
-            _beat(heartbeat)
-            continue
-
-        fetched: tuple[bytes, str | None] | None = None
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                if needs_pdb_client and client is None:
-                    client = _open_pdb_client(gateway)
-                fetched = _fetch_bytes(
-                    client,
-                    descriptor,
-                    timeout=timeout,
-                    max_bytes=max_bytes,
-                )
-                break
-            except _PdbClientUnavailable:
-                break
-            except _TransientDownloadFailure:
-                if attempt >= max_attempts:
-                    break
-                _beat(heartbeat)
-                sleep(DOWNLOAD_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
-        if needs_pdb_client and client is None:
-            client_unavailable = True
-
-        if fetched is None:
-            failed += 1
-            _beat(heartbeat)
-            continue
-        data, reported_type = fetched
-
-        # itkdb sniffs the actual type from the response; the listing metadata
-        # is often just "file". Prefer the sniffed one for both the stored
-        # extension and what the API later serves.
-        content_type = reported_type or descriptor["content_type"]
-        if content_type != row.content_type:
-            row.content_type = content_type
-
-        relative_path = storage_path(
-            component_sn, descriptor["code"], content_type, descriptor["filename"]
-        )
-        try:
-            size = _write_bytes(root, relative_path, data)
-        except (OSError, ValueError):
-            failed += 1
-            _beat(heartbeat)
-            continue
-
-        row.relative_path = relative_path
-        row.size_bytes = size
-        row.downloaded_at = utcnow()
-        downloaded += 1
-        _beat(heartbeat)
-
-    return AttachmentSyncStats(downloaded=downloaded, reused=reused, failed=failed)
+    # Phase 3 - commit (short, network-free transaction).
+    return _commit_outcomes(session, root, outcomes)

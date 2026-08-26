@@ -1089,3 +1089,163 @@ def test_eos_download_refreshes_the_signed_url_and_never_persists_it(session, se
         select(TestRunEvidence).where(TestRunEvidence.external_ref == "RUN-1")
     )
     assert "fresh-signature" not in repr(mirrored.payload)
+
+
+# --- phased download: bytes before transaction, no .part corpses -----------
+#
+# A real institute sweep held SQLite's write lock open for as long as a
+# retried, multi-megabyte image took to download: `_upsert_row` + `flush()`
+# ran *before* the network fetch, so every other HTTP request and worker tick
+# saw "database is locked" while one attachment was still in flight. Bytes
+# must now be fully fetched (and staged on disk) before any row is touched.
+
+
+def test_no_session_writes_are_pending_during_the_network_fetch(
+    session, settings, evidence
+):
+    """Pins "bytes before transaction": while the fake client is answering a
+    `.get()` call, nothing may be staged on the session yet."""
+    observed: list[tuple[int, int]] = []
+
+    class _WatchingClient:
+        def get(self, action, json=None):
+            observed.append((len(session.new), len(session.dirty)))
+
+            class _BinaryFile:
+                content = JPEG
+                mimetype = "image/jpeg"
+
+            return _BinaryFile()
+
+    stats = download_attachments(
+        session, _FakeGateway(_WatchingClient()), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.downloaded == 1
+    assert observed, "the fake client was never called"
+    assert observed == [(0, 0)] * len(observed)
+
+
+def test_a_concurrent_writer_is_never_blocked_during_the_network_fetch(tmp_path):
+    """The actual production incident, reproduced: a second, independent
+    connection to the same database file must be able to write while a
+    download is in flight. `session.new`/`session.dirty` being empty (the
+    test above) is necessary but not sufficient — a `flush()` without commit
+    clears both while still holding SQLite's write lock. This uses a
+    file-backed database (`:memory:` is not shared across connections) and a
+    raw second `sqlite3` connection to prove the lock itself is free.
+
+    Confirmed to reproduce against the pre-fix implementation: the probe
+    below fails with "database is locked" when `_upsert_row` + `flush()` run
+    before the network call.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "lock_probe.db"
+    settings = Settings(
+        database_url=f"sqlite:///{db_path}",
+        attachment_dir=str(tmp_path / "attachments"),
+        _env_file=None,
+    )
+    engine = make_engine(settings.database_url)
+    Base.metadata.create_all(engine)
+    session = make_session_factory(engine)()
+    try:
+        session.add(
+            TestRunEvidence(
+                component_sn="20USEM20000041",
+                test_type="VISUAL_INSPECTION",
+                passed=True,
+                source="pdb",
+                external_ref="RUN-1",
+                payload={
+                    "attachments": [
+                        {
+                            "code": "abc123",
+                            "filename": "Untitled.jpg",
+                            "content_type": "image/jpeg",
+                            "title": None,
+                        }
+                    ]
+                },
+            )
+        )
+        session.commit()
+
+        probe_errors: list[str] = []
+
+        class _WatchingClient:
+            def get(self, action, json=None):
+                probe = sqlite3.connect(str(db_path), timeout=0.3)
+                try:
+                    probe.execute("PRAGMA user_version = 42")
+                    probe.commit()
+                except sqlite3.OperationalError as exc:
+                    probe_errors.append(str(exc))
+                finally:
+                    probe.close()
+
+                class _BinaryFile:
+                    content = JPEG
+                    mimetype = "image/jpeg"
+
+                return _BinaryFile()
+
+        stats = download_attachments(
+            session, _FakeGateway(_WatchingClient()), settings, "20USEM20000041"
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    assert stats.downloaded == 1
+    assert probe_errors == []
+
+
+def test_a_failed_download_leaves_no_part_file_and_no_relative_path(
+    session, settings, evidence
+):
+    stats = download_attachments(
+        session, _FakeGateway(_FakeClient(fail=True)), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.failed == 1
+    row = session.scalar(select(TestRunAttachment))
+    assert row.relative_path is None
+    root = attachment_store.attachment_root(settings)
+    assert list(root.rglob("*.part")) == []
+
+
+def test_a_successful_download_lands_on_the_final_name_with_no_part_file(
+    session, settings, evidence
+):
+    stats = download_attachments(session, _FakeGateway(), settings, "20USEM20000041")
+    session.commit()
+
+    assert stats.downloaded == 1
+    row = session.scalar(select(TestRunAttachment))
+    stored = resolve_path(settings, row)
+    assert stored is not None and stored.name == "abc123.jpg"
+    root = attachment_store.attachment_root(settings)
+    assert list(root.rglob("*.part")) == []
+
+
+def test_a_stale_part_file_from_a_crashed_run_is_overwritten(
+    session, settings, evidence
+):
+    """A previous process could die mid-write; the leftover `.part` file must
+    not make the next sweep fail or serve stale bytes."""
+    root = attachment_store.attachment_root(settings)
+    stale = root / "20USEM20000041" / "abc123.jpg.part"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"leftover-from-a-crashed-process")
+
+    stats = download_attachments(session, _FakeGateway(), settings, "20USEM20000041")
+    session.commit()
+
+    assert stats.downloaded == 1
+    row = session.scalar(select(TestRunAttachment))
+    assert resolve_path(settings, row).read_bytes() == JPEG
+    assert list(root.rglob("*.part")) == []

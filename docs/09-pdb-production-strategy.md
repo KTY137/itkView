@@ -141,6 +141,26 @@ Mit dem Schalter startet er keinen Outbox-Worker, setzt
 `ITKFLOW_ALLOW_PDB_WRITES=false` und erzwingt weiter
 `ITKFLOW_PDB_WRITE_SCOPE=dummy_only`.
 
+**SQLite: WAL, Busy-Timeout und ruhige Skips bei Lastkontention (2026-08-26).**
+Ein Desktop-Bundle teilt eine einzelne SQLite-Datei zwischen API-Prozess,
+Outbox-Processor und Reminder-Scheduler; ohne PRAGMAs gibt Pythons
+sqlite3-Treiber nach 5 s auf, was live als 500er in einem Request sowie als
+„cycle failed"/„tick failed" auftrat. `make_engine` (`app/db.py`) aktiviert
+deshalb fuer jede dateibasierte SQLite-Engine ueber ein `connect`-Event
+`journal_mode=WAL`, `busy_timeout=30000` und `synchronous=NORMAL`;
+In-Memory-Engines (Tests) bleiben unangetastet. WAL hebt genau die Blockade
+auf, die den Bug ausloeste: Schreiber und Leser laufen nebenlaeufig, und
+`busy_timeout` faengt konkurrierende Schreiber mit 30 s Wartezeit statt 5 s ab.
+Die gemeinsam genutzte Klassifizierung `is_sqlite_busy` (von `sync_jobs.py`
+nach `app/db.py` gezogen) behandelt „database is locked" in
+`OutboxProcessor.tick` und im `ReminderScheduler` als erwarteten, ruhigen Skip
+(„database busy — skipped this cycle") statt als Fehler — insbesondere ohne
+Fehler-Heartbeat, der den Ops-Health-Screen faelschlich auf „error" springen
+liesse. Zusaetzlich holt `ensure_phase0_sqlite_schema` den Unique-Index
+`uq_tool_institute_code` auf Bestands-DBs nach (vorher echte Duplikate
+deduplizieren, kleinste `id` gewinnt; `institute_id IS NULL` bleibt
+unangetastet), idempotent bei jedem Start.
+
 ## Komponenten-Sync: Paging, Fortschritt und Fehlergrenze
 
 Der UI-Pfad startet einen persistenten `SyncJob` ueber
@@ -311,6 +331,26 @@ gefallen:
   jederzeit dazunehmen. Das Profil-Setting ueberschreibt die Liste weiterhin
   vollstaendig (harte Regel 4: Typcodes sind kollaborationsweit, nicht
   institutsspezifisch).
+
+**Attachment-Downloads hielten die Schreibsperre waehrend des Netzwerk-I/O
+offen (2026-08-26, Bugfix).** `download_attachments` schrieb bisher zuerst die
+Zeile (`_upsert_row` + `flush()`) und lud danach die Bytes aus dem Netz — bei
+einem 6,7-MB-Bild ueber eine wacklige Leitung inklusive Retries hielt das die
+SQLite-Datei minutenlang in einer offenen Schreibtransaktion. Live-Folge:
+parallele HTTP-Requests und Worker-Ticks scheiterten mit „database is locked".
+`app/attachment_store.py` trennt den Ablauf jetzt strikt in drei Phasen:
+(1) ein rein lesender Plan, welche `(source, code)`-Paare bereits eine Datei
+auf der Platte haben; (2) der Netzwerk-Fetch mit der bestehenden Retry-/
+Klassifikations-/Heartbeat-Logik, dem gar keine `Session` mehr uebergeben wird
+— die Bytes landen sofort in einer `.part`-Datei neben ihrem Zielpfad; und
+(3) ein kurzer, netzwerkfreier Commit, der die fertigen Dateien atomar
+(`os.replace`) umbenennt und die Zeilen upsertet. Ein Fehlschlag hinterlaesst
+weder eine `.part`-Leiche noch einen `relative_path`; verwaiste `.part`-Dateien
+aus abgestuerzten Laeufen werden ueberschrieben. Ein Regressionstest schreibt
+waehrend des simulierten Fetches ueber eine zweite unabhaengige
+`sqlite3`-Verbindung und beweist, dass nichts mehr blockiert (reproduzierbar
+rot gegen den alten Code). Stats, Share-Link-Kette, Client-Retry und
+Heartbeat-Timing unveraendert.
 
 **Evidence-Sync committet pro Komponente (2026-08-26):** Der Sweep sammelte
 alle Testlaeufe im Speicher und schrieb sie in einer einzigen Transaktion am

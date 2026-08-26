@@ -98,6 +98,27 @@ export type AddTestResultProps = {
   disabled?: boolean;
   pinnedTestType?: string;
   intentToken?: number;
+  /**
+   * Preselects the test-type dropdown once schemas are loaded (e.g. a click
+   * on a "missing"/"failed" row in the required-tests table). Unlike
+   * `pinnedTestType`, the select stays enabled and the full schema list
+   * stays choosable; a type with no local schema simply leaves the
+   * selection empty instead of blocking entry.
+   *
+   * `token` must be bumped on every click, even re-clicks of the same row:
+   * a plain string prop would not change value (and thus would not re-fire
+   * the effect that applies it) on a repeated click for the same test type,
+   * leaving the form dead on a second click. Mirrors the `intentToken`
+   * pattern used by `pinnedTestType` above, folded into one prop object so
+   * this remains a single new prop.
+   */
+  initialTestType?: RecordTestIntent;
+};
+
+/** See `AddTestResultProps.initialTestType`. */
+export type RecordTestIntent = {
+  testType: string;
+  token: number;
 };
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
@@ -137,6 +158,7 @@ export default function AddTestResult({
   disabled = false,
   pinnedTestType,
   intentToken = 0,
+  initialTestType,
 }: AddTestResultProps) {
   const rootRef = useRef<HTMLElement>(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -159,13 +181,27 @@ export default function AddTestResult({
       ),
     [componentType, schemas],
   );
+  // Read by the row-click effect below without being a dependency of it: a
+  // schema reload (e.g. "Sync schemas", or the parent's background refetch)
+  // must not re-open a form the user already closed, nor steal their scroll
+  // position, for an intent that was already applied (review IMPORTANT #3).
+  const availableSchemasRef = useRef(availableSchemas);
+  availableSchemasRef.current = availableSchemas;
   const normalizedPinnedTestType = pinnedTestType?.trim().toUpperCase() || null;
+  const initialTestTypeToken = initialTestType?.token ?? 0;
+  const normalizedInitialTestType = initialTestType?.testType.trim().toUpperCase() || null;
+  // NOTE (review IMPORTANT #17): initialTestTypeToken is deliberately NOT
+  // part of contextIdentity below. Only a genuine test-TYPE change resets
+  // ingest/preview state; re-clicking the same "missing"/"failed" row again
+  // (same type, bumped token — see the dedicated effect further down) must
+  // not silently discard an in-progress file-drop dry-run for that type.
   const contextIdentity = [
     componentSn,
     componentType,
     instituteCode ?? "",
     normalizedPinnedTestType ?? "",
     String(intentToken),
+    normalizedInitialTestType ?? "",
   ].join("\u0000");
   const operationGeneration = useRef(0);
   const contextIdentityRef = useRef(contextIdentity);
@@ -214,6 +250,33 @@ export default function AddTestResult({
     setSelectedSchemaId(match?.id ?? null);
     rootRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
   }, [intentToken, normalizedPinnedTestType, selectableSchemas]);
+
+  // A row-level "record this test" shortcut (e.g. from the required-tests
+  // table): open the manual-entry form and preselect the matching schema,
+  // but — unlike the pinned/locked flow above — leave the dropdown enabled
+  // and the full schema list choosable. A type without a local schema just
+  // leaves the selection empty; it never blocks or throws.
+  //
+  // Deps are deliberately `initialTestTypeToken` (not `normalizedInitialTestType`
+  // alone, and not `availableSchemas`/`selectableSchemas`):
+  //  - review IMPORTANT #2: a re-click of the same row carries the same test
+  //    type string, so a string-only dependency would never re-fire this
+  //    effect on the second click (React bails out — no value change, no
+  //    render). The token increments on every click, same type or not.
+  //  - review IMPORTANT #3: `availableSchemas` is intentionally read through
+  //    `availableSchemasRef` and left out of the dependency list, so an
+  //    unrelated schema reload after the intent was applied cannot reopen the
+  //    form or steal the user's scroll position again.
+  useEffect(() => {
+    if (normalizedPinnedTestType !== null) return;
+    if (initialTestTypeToken === 0 || normalizedInitialTestType === null) return;
+    setFormOpen(true);
+    const match = availableSchemasRef.current.find(
+      (schema) => schema.test_code.toUpperCase() === normalizedInitialTestType,
+    );
+    setSelectedSchemaId(match?.id ?? null);
+    rootRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [normalizedPinnedTestType, initialTestTypeToken, normalizedInitialTestType]);
 
   useEffect(() => {
     if (

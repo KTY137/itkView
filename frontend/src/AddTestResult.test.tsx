@@ -318,4 +318,161 @@ describe("AddTestResult", () => {
     expect(screen.queryByText("Ready to stage")).not.toBeInTheDocument();
     expect(screen.queryByText(/old-intent\.json/)).not.toBeInTheDocument();
   });
+
+  it("preselects initialTestType once schemas are loaded without locking the dropdown", async () => {
+    render(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[
+          {
+            id: 1,
+            component_type: "MODULE",
+            test_code: "MODULE_METROLOGY",
+            name: "Module metrology",
+            schema: {},
+            synced_at: "2026-08-26T10:00:00Z",
+          },
+          {
+            id: 2,
+            component_type: "MODULE",
+            test_code: "OTHER_TEST",
+            name: "Other",
+            schema: {},
+            synced_at: "2026-08-26T10:00:00Z",
+          },
+        ]}
+        // Lower-case on purpose: matching against the schema's test_code must
+        // be case-insensitive, same as the pinned flow.
+        initialTestType={{ testType: "module_metrology", token: 1 }}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Test type")).toHaveValue("1"));
+    const select = screen.getByLabelText("Test type");
+    expect(select).not.toBeDisabled();
+    // Unlike pinnedTestType, the full schema list stays choosable.
+    expect(screen.getByRole("option", { name: /Other/ })).toBeInTheDocument();
+    expect(screen.queryByText(/Pinned test:/)).not.toBeInTheDocument();
+  });
+
+  it("opens the record-test form but leaves the selection empty for an unknown initialTestType", async () => {
+    render(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[
+          {
+            id: 1,
+            component_type: "MODULE",
+            test_code: "MODULE_METROLOGY",
+            name: "Module metrology",
+            schema: {},
+            synced_at: "2026-08-26T10:00:00Z",
+          },
+        ]}
+        initialTestType={{ testType: "MODULE_BOW", token: 1 }}
+      />,
+    );
+
+    const select = await screen.findByLabelText("Test type");
+    expect(select).toHaveValue("");
+    expect(select).not.toBeDisabled();
+    expect(screen.queryByText(/pinnedSchemaMissing|No schema for/)).not.toBeInTheDocument();
+  });
+
+  it("reopens the form on a second click of the same row (token bump) even though the test type string is unchanged", async () => {
+    const schema = {
+      id: 1,
+      component_type: "MODULE",
+      test_code: "MODULE_METROLOGY",
+      name: "Module metrology",
+      schema: {},
+      synced_at: "2026-08-26T10:00:00Z",
+    };
+    const { rerender } = render(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[schema]}
+        initialTestType={{ testType: "MODULE_METROLOGY", token: 1 }}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Test type")).toHaveValue("1"));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Close form" }));
+    expect(screen.queryByLabelText("Test type")).not.toBeInTheDocument();
+
+    // Same row clicked again: the test-type string alone did not change, but
+    // the token did — a naive string-keyed effect would never re-fire here
+    // and the form would stay dead on every repeat click (review IMPORTANT #2).
+    rerender(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[schema]}
+        initialTestType={{ testType: "MODULE_METROLOGY", token: 2 }}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Test type")).toHaveValue("1"));
+  });
+
+  it("does not reopen a manually closed form or scroll again when only the schemas array changes for an already-applied intent", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const schemaA = {
+      id: 1,
+      component_type: "MODULE",
+      test_code: "MODULE_METROLOGY",
+      name: "Module metrology",
+      schema: {},
+      synced_at: "2026-08-26T10:00:00Z",
+    };
+    const { rerender } = render(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[schemaA]}
+        initialTestType={{ testType: "MODULE_METROLOGY", token: 1 }}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Test type")).toHaveValue("1"));
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Close form" }));
+    expect(screen.queryByLabelText("Test type")).not.toBeInTheDocument();
+
+    // A schema reload (new array reference, e.g. from "Sync schemas" or a
+    // background refetch) with the SAME intent token must not reopen the
+    // form the user just closed, nor scroll again (review IMPORTANT #3).
+    const schemaB = {
+      id: 2,
+      component_type: "MODULE",
+      test_code: "OTHER_TEST",
+      name: "Other",
+      schema: {},
+      synced_at: "2026-08-26T10:00:00Z",
+    };
+    rerender(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[schemaA, schemaB]}
+        initialTestType={{ testType: "MODULE_METROLOGY", token: 1 }}
+      />,
+    );
+
+    expect(screen.queryByLabelText("Test type")).not.toBeInTheDocument();
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
 });

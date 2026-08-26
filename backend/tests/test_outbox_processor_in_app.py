@@ -6,6 +6,8 @@ sits there forever — the PDB write silently never happens (docs/11).
 """
 
 
+from sqlalchemy.exc import OperationalError
+
 from app import desktop_server
 from app.config import Settings
 from app.main import create_app
@@ -64,6 +66,48 @@ def test_one_tick_processes_the_outbox_and_survives_a_failing_cycle(tmp_path):
     # the reminder scheduler, or one outage stops every later push.
     processor.tick()
     assert calls == ["tick"]
+
+
+def test_a_busy_database_is_a_quiet_skip_not_a_failure(tmp_path, capsys):
+    """A SQLite `database is locked` under concurrent load is expected, not a
+    real failure — it must not be logged as a "cycle failed" (docs/09)."""
+    settings = make_settings(
+        database_url=f"sqlite:///{(tmp_path / 'app.db').as_posix()}",
+        outbox_processor="app",
+    )
+    app = create_app(settings)
+    processor: OutboxProcessor = app.state.outbox_processor
+
+    def busy_run_once(*args, **kwargs):
+        raise OperationalError("SELECT 1", {}, Exception("database is locked"))
+
+    processor._run_once = busy_run_once  # noqa: SLF001 — exercising the guard
+    processor.tick()
+
+    out = capsys.readouterr().out
+    assert "database busy" in out
+    assert "cycle failed" not in out
+
+
+def test_a_non_busy_operational_error_is_still_reported_as_a_failure(tmp_path, capsys):
+    """Only the specific SQLite-busy message is downgraded; other
+    `OperationalError`s (a real schema/query bug) stay a visible failure."""
+    settings = make_settings(
+        database_url=f"sqlite:///{(tmp_path / 'app.db').as_posix()}",
+        outbox_processor="app",
+    )
+    app = create_app(settings)
+    processor: OutboxProcessor = app.state.outbox_processor
+
+    def failing_run_once(*args, **kwargs):
+        raise OperationalError("SELECT 1", {}, Exception("no such table: outbox_action"))
+
+    processor._run_once = failing_run_once  # noqa: SLF001 — exercising the guard
+    processor.tick()
+
+    out = capsys.readouterr().out
+    assert "cycle failed: OperationalError" in out
+    assert "database busy" not in out
 
 
 def test_the_processor_never_uses_deployment_wide_service_credentials(tmp_path, monkeypatch):

@@ -422,3 +422,43 @@ def test_upsert_compares_timestamps_timezone_insensitively(client, session_facto
         )
         session.commit()
     assert stats.unchanged == 1 and stats.updated == 0
+
+
+def test_evidence_endpoints_commit_before_the_attachment_download(
+    client: TestClient, session_factory, tudo, as_operator, tmp_path, monkeypatch
+):
+    """The two sync-evidence endpoints must not hold a write transaction open
+    across the network download phase (review C1): evidence commits first,
+    downloads run on a clean session, per-component for the institute sweep.
+    """
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    with session_factory() as session:
+        session.add(_module("20USEM00000001"))
+        session.add(_module("20USEM00000002"))
+        session.commit()
+    client.app.state.pdb_gateway = _FakeGateway(component=COMPONENT)
+
+    import app.attachment_store as store
+
+    real_download = store.download_attachments
+    observed: list[tuple[bool, bool, bool]] = []
+
+    def observing_download(session, *args, **kwargs):
+        observed.append((session.in_transaction(), bool(session.dirty), bool(session.new)))
+        return real_download(session, *args, **kwargs)
+
+    monkeypatch.setattr(store, "download_attachments", observing_download)
+
+    single = client.post("/api/components/20USEM00000001/sync-evidence")
+    assert single.status_code == 200, single.text
+
+    institute = client.post("/api/sync/evidence/TUDO")
+    assert institute.status_code == 200, institute.text
+
+    assert observed, "download_attachments was never reached"
+    for in_transaction, dirty, new in observed:
+        # `flush()` clears dirty/new while still holding the write lock, so
+        # the sharp check is the transaction itself: the endpoint must have
+        # committed immediately before entering the network phase.
+        assert not in_transaction, observed
+        assert not dirty and not new, observed

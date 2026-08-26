@@ -146,6 +146,43 @@ def test_operator_may_upload_and_propose(client: TestClient, tudo, as_operator):
 
 
 # --------------------------------------------------------------------------
+# Sensitive reads: any signed-in role suffices (2026-08-26 security review)
+# --------------------------------------------------------------------------
+#
+# `GET /api/audit` returns actor emails and `GET /api/outbox`/`GET
+# /api/outbox/{id}` return staged action payloads to anyone who could reach
+# them before this change. Unlike GATED_WRITES these stay open to every
+# signed-in role on purpose — the broader read rollout to fully anonymous
+# callers remains deliberately open elsewhere and is out of scope here.
+
+GATED_READS = ["/api/audit", "/api/outbox", "/api/outbox/1"]
+
+
+@pytest.mark.parametrize("path", GATED_READS)
+def test_gated_read_requires_authentication(client: TestClient, path):
+    assert client.get(path).status_code == 401
+
+
+def test_gated_reads_allowed_for_a_signed_in_viewer(
+    client: TestClient, session_factory, tudo, as_operator
+):
+    action = client.post(
+        "/api/outbox", json={"institute_code": "TUDO", "kind": "stage_move"}
+    ).json()
+
+    # Swap the operator session for a plain viewer on the same client: a
+    # viewer has no write rights, but these reads must not need more than
+    # "signed in".
+    authenticate(client, session_factory, role="viewer", email="read-only@auth.example")
+
+    assert client.get("/api/audit").status_code == 200
+    assert client.get("/api/outbox").status_code == 200
+    detail = client.get(f"/api/outbox/{action['id']}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["id"] == action["id"]
+
+
+# --------------------------------------------------------------------------
 # Server-side attribution: user_id + denormalised string come from the session
 # --------------------------------------------------------------------------
 

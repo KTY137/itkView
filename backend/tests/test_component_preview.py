@@ -287,3 +287,48 @@ def test_preview_endpoint_returns_404_for_unknown_component(
     authenticate(client, session_factory, role="viewer")
     response = client.get("/api/components/20USEM29999999/preview")
     assert response.status_code == 404
+
+
+def test_a_slots_only_assembly_action_is_not_marked_validation_failed(
+    session_factory, client, tudo, as_operator
+):
+    """A staged action whose tools live only in slot combinations (no legacy
+    default tool) must be evaluated, not dismissed as validation_failed just
+    because `tool_id` is absent (follow-up to the multi-slot contract)."""
+    from tests.test_assembly import seed_multi_slot_assembly
+
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    jig_id = seed["hybrid_glue_jig_tool_id"]
+
+    staged = client.post(
+        "/api/assembly/actions",
+        json={
+            "parent_sn": seed["parent_sn"],
+            "child_sn": seed["child_sn"],
+            "slot": "H0",
+            "glue_batch_id": seed["glue_batch_id"],
+            "tools": {
+                "tool": [seed["tool_id"]],
+                "hybrid_glue_jig": [jig_id, jig_id],
+            },
+        },
+    )
+    assert staged.status_code == 201, staged.text
+    # The canonical payload keeps tool_id for the single default tool; strip it
+    # to model an action recorded purely through slots.
+    action_id = staged.json()["action"]["id"]
+    from app.models import OutboxAction
+
+    with session_factory() as session:
+        action = session.get(OutboxAction, action_id)
+        payload = dict(action.payload)
+        payload.pop("tool_id", None)
+        payload.pop("expected_tool_code", None)
+        action.payload = payload
+        session.commit()
+
+    preview = client.get(f"/api/components/{seed['parent_sn']}/preview")
+    assert preview.status_code == 200, preview.text
+    actions = preview.json()["staged_actions"]
+    target = next(entry for entry in actions if entry["id"] == action_id)
+    assert target["submittable_reason"] != "validation_failed"

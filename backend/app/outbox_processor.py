@@ -18,6 +18,7 @@ writes to itkFlow-registered DUMMY components (ADR 003).
 import asyncio
 
 from app.config import Settings
+from app.db import is_sqlite_busy
 from app.pdb_submit import make_pdb_submitter
 from app.run_worker import run_once
 
@@ -51,6 +52,13 @@ class OutboxProcessor:
         try:
             stats = self._run_once()
         except Exception as exc:  # noqa: BLE001 — a background drain must not die
+            if is_sqlite_busy(exc):
+                # Expected under concurrent load (the worker/API/reminder
+                # scheduler share one SQLite file outside Compose) rather than
+                # a real failure — stay quiet and let the next poll pick the
+                # cycle back up instead of logging it as broken.
+                print("[outbox-processor] database busy — skipped this cycle", flush=True)
+                return
             # Print the type only: an itkdb error can carry the request, and the
             # request can carry access codes.
             print(f"[outbox-processor] cycle failed: {type(exc).__name__}", flush=True)

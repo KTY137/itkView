@@ -20,6 +20,41 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 
 - Monorepo steht mit `backend/`, `frontend/`, `agent/`, `deploy/`, CI- und
   Docker-Grundstruktur.
+- **0.2.1-Reviews (2026-08-26, zwei Opus-Reviewer):** Beide Review-Blocker
+  sind gefixt: (C1) die zwei synchronen Evidence-Endpunkte committen jetzt vor
+  der Download-Phase (pro Komponente beim Institutssweep) statt die
+  Schreibsperre uebers Netz zu halten; (I1) Slot-Payloads sind am Wire
+  begrenzt (max 16 Slots, 4 Tools/Slot) und eine Kardinalitaetsverletzung
+  bricht ab, statt jede Id einzeln aufzuloesen; (I2) JEDER Slot prueft
+  Typ-Kompatibilitaet (Zusatz-Slots gegen Parent ODER Child); (I3) die
+  Tool-Dedup-Migration behaelt die von tool_sync gepflegte hoechste id und
+  loggt die geloeschte Zeilenzahl; dazu Pragma-Reihenfolge (busy_timeout vor
+  WAL-Konversion), lazy Dummy-Hash, Dummy-Pfad auch fuer passwortlose
+  Accounts, eindeutige property_keys je Slot-Layout, und ein 500er bei
+  ungueltiger Tool-Id im Slot wurde zum regulaeren Preview-Issue.
+  **Offen fuer die naechste Runde:** .part-Dedupe unter force bei geteilten
+  Attachment-Codes; Auth auf `GET /api/institutes` (liefert
+  Settings-Projektion inkl. SMTP-Host/Usernamen anonym — der Wizard braucht
+  dann einen scoped Slot-Endpunkt); Kartenlimit 4 als geteilte Konstante bis
+  ins Frontend; .part-Aufraeumen fuer aus der PDB verschwundene Attachments;
+  `:memory:`-URI-Varianten in make_engine; dl/div-Markup im Wizard-Review.
+- **0.2.1-Runde (2026-08-26, sechs parallele Implementierungs-Agenten):**
+  (1) SQLite-Kontention behoben: WAL + busy_timeout 30 s an der Engine,
+  Attachment-Downloads laufen nicht mehr innerhalb offener
+  Schreibtransaktionen (Bytes → .part-Datei → kurzer Commit), Busy-Fehler in
+  Outbox-Drain/Reminder-Tick sind ruhige Skips statt Fehler; dazu die
+  nachgeholte `uq_tool_institute_code`-Migration. Details docs/09.
+  (2) Edit-Ghost an jeder `missing`/`failed`-Zeile der Pflicht-Tests-Tabelle
+  oeffnet die Testerfassung mit vorbelegtem Typ (docs/05).
+  (3) Kombinierte Tool-Slots fuer den Assembly-Wizard: Slots aus dem
+  Institutsprofil (`assembly_tool_slots`), Kombis als Komma-Liste in die
+  PDB-Property, Wizard mit Chips + Scan-Zuordnung, HTTP/Preview verdrahtet
+  (docs/07).
+- **Security-Härtung Login/Reads (2026-08-26):** Audit- und Outbox-Reads
+  verlangen jetzt Login, der Login-Pfad ist timing-neutral gegen
+  Konten-Enumeration, und ein Passwortwechsel invalidiert bestehende Sessions.
+  Details docs/06. (Teil der laufenden 0.2.1-Runde: 6 Implementierungs-Agenten,
+  Doku wird je Abschluss konsolidiert.)
 - **Evidence-Umfang erweitert (2026-08-26):** Der Sweep deckt jetzt alle
   Baugruppentypen mit echten Testlaeufen ab (Module, Sensoren, Hybride,
   Flexes, Powerboard-Flex, HV-Tab-Sheets — per PDB-Stichprobe bestimmt) und

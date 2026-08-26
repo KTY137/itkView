@@ -91,6 +91,52 @@ def seed_valid_assembly(session_factory, tudo, *, dummy: bool = True) -> dict[st
         }
 
 
+def seed_multi_slot_assembly(session_factory, tudo) -> dict[str, int | str]:
+    """Extend the single-tool fixture with a ``multiple: true`` extra slot.
+
+    Mirrors the production sheet's combined tool columns: a single default
+    "Module jig used" plus a separate, possibly-repeated "Hybrid glue jigs
+    used, top, bottom" slot.
+    """
+
+    seed = seed_valid_assembly(session_factory, tudo)
+    with session_factory() as session:
+        institute = session.get(InstituteProfile, tudo["id"])
+        institute.settings = {
+            **(institute.settings or {}),
+            "assembly_tool_slots": [
+                {
+                    "key": "hybrid_glue_jig",
+                    "label": "Hybrid glue jig, top/bottom",
+                    "kinds": ["jig"],
+                    "multiple": True,
+                    "property_key": "JIG_HYBRID_ALIGNMENT",
+                },
+            ],
+        }
+        matching_kind = Tool(
+            institute_id=institute.id,
+            kind="jig",
+            code="HGJ-01",
+            label="Hybrid glue jig #1",
+            compatible_types=["R5H0"],
+            status="active",
+        )
+        wrong_kind = Tool(
+            institute_id=institute.id,
+            kind="pickup_tool",
+            code="HGJ-02",
+            label="Hybrid pickup tool (wrong kind for hybrid_glue_jig)",
+            compatible_types=["R5H0"],
+            status="active",
+        )
+        session.add_all([matching_kind, wrong_kind])
+        session.commit()
+        seed["hybrid_glue_jig_tool_id"] = matching_kind.id
+        seed["wrong_kind_tool_id"] = wrong_kind.id
+    return seed
+
+
 def _body(seed: dict[str, int | str]) -> dict:
     return {
         "parent_sn": seed["parent_sn"],
@@ -344,3 +390,414 @@ def test_real_submitter_gates_both_participants_before_client_and_uses_canonical
     assert blocked.is_confirmed is False
     assert "sensors and ASICs" in (blocked.rejected_reason or "")
     assert len(calls) == 1
+
+
+# --- Combined-tool slots (assembly_tool_slots / `tools` payload) -----------
+#
+# The production sheets this replaces track several tools used together in
+# one assembly step ("Hybrid glue jigs used, top, bottom", "Hybrid pickups
+# used, top, bottom" next to a single "Module jig used"). `tool_id` remains
+# valid on its own and is always shorthand for the default "tool" slot.
+
+
+def test_legacy_tool_id_only_still_produces_the_original_payload_shape(
+    session_factory, tudo
+):
+    seed = seed_valid_assembly(session_factory, tudo)
+    with session_factory() as session:
+        evaluation = evaluate_assembly(session, Settings(_env_file=None), **_body(seed))
+        assert evaluation.valid, evaluation.issues
+        assert set(evaluation.tools_by_slot) == {"tool"}
+        assert evaluation.tool is not None and evaluation.tool.id == seed["tool_id"]
+        payload = canonical_action_payload(evaluation)
+    assert "tools" not in payload
+    assert "expected_tools" not in payload
+    assert payload["tool_id"] == seed["tool_id"]
+    assert payload["expected_tool_code"] == "JIG-R5-01"
+
+
+def test_multi_slot_tools_validate_and_snapshot_as_a_tools_map(session_factory, tudo):
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    with session_factory() as session:
+        evaluation = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+            tool_id=seed["tool_id"],
+            tools={
+                # Same physical jig scanned for both positions, exactly like
+                # the sheet's observed "4, 4" (references/zeuthenflow,
+                # read-only) for JIG_HYBRID_ALIGNMENT.
+                "hybrid_glue_jig": [
+                    seed["hybrid_glue_jig_tool_id"],
+                    seed["hybrid_glue_jig_tool_id"],
+                ]
+            },
+            glue_batch_id=seed["glue_batch_id"],
+        )
+        assert evaluation.valid, evaluation.issues
+        assert evaluation.pdb_properties["JIG_HYBRID_ALIGNMENT"] == "HGJ-01, HGJ-01"
+        assert evaluation.pdb_properties["MODULE_ASSEMBLY_JIG"] == "JIG-R5-01"
+        payload = canonical_action_payload(evaluation)
+
+    assert payload["tool_id"] == seed["tool_id"]
+    assert payload["tools"] == {
+        "tool": [seed["tool_id"]],
+        "hybrid_glue_jig": [seed["hybrid_glue_jig_tool_id"], seed["hybrid_glue_jig_tool_id"]],
+    }
+    assert payload["expected_tools"] == {
+        "tool": ["JIG-R5-01"],
+        "hybrid_glue_jig": ["HGJ-01", "HGJ-01"],
+    }
+    with session_factory() as session:
+        assert revalidate_assembly_action(session, payload) == []
+
+
+def test_conflicting_tool_id_and_tools_default_slot_is_a_validation_error(
+    session_factory, tudo
+):
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    with session_factory() as session:
+        evaluation = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+            tool_id=seed["tool_id"],
+            tools={"tool": [seed["wrong_kind_tool_id"]]},
+        )
+    assert not evaluation.valid
+    assert "tool_slot_conflict" in {issue.code for issue in evaluation.issues}
+    # A genuine conflict is a blocking issue, but the tools-supplied value
+    # still wins the resolved slot rather than being silently overridden.
+    assert evaluation.tools_by_slot["tool"][0].id == seed["wrong_kind_tool_id"]
+
+
+def test_agreeing_tool_id_and_tools_default_slot_is_not_a_conflict(session_factory, tudo):
+    seed = seed_valid_assembly(session_factory, tudo)
+    with session_factory() as session:
+        evaluation = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+            tool_id=seed["tool_id"],
+            tools={"tool": [seed["tool_id"]]},
+            glue_batch_id=seed["glue_batch_id"],
+        )
+    assert evaluation.valid, evaluation.issues
+    assert "tool_slot_conflict" not in {issue.code for issue in evaluation.issues}
+
+
+def test_slot_kinds_violation_is_blocked(session_factory, tudo):
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    with session_factory() as session:
+        evaluation = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+            tool_id=seed["tool_id"],
+            tools={"hybrid_glue_jig": [seed["wrong_kind_tool_id"]]},
+        )
+    assert not evaluation.valid
+    assert "hybrid_glue_jig_tool_kind_not_allowed" in {
+        issue.code for issue in evaluation.issues
+    }
+
+
+@pytest.mark.parametrize("count", [1, 4])
+def test_slot_multiple_accepts_one_to_four_tools(session_factory, tudo, count):
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    with session_factory() as session:
+        evaluation = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+            tool_id=seed["tool_id"],
+            tools={"hybrid_glue_jig": [seed["hybrid_glue_jig_tool_id"]] * count},
+        )
+    assert evaluation.valid, evaluation.issues
+
+
+def test_slot_multiple_rejects_more_than_four_tools(session_factory, tudo):
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    with session_factory() as session:
+        evaluation = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+            tool_id=seed["tool_id"],
+            tools={"hybrid_glue_jig": [seed["hybrid_glue_jig_tool_id"]] * 5},
+        )
+    assert not evaluation.valid
+    assert "hybrid_glue_jig_tool_count_invalid" in {issue.code for issue in evaluation.issues}
+
+
+def test_default_slot_without_multiple_configured_rejects_two_tools(session_factory, tudo):
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    with session_factory() as session:
+        evaluation = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+            # tools-only: no legacy tool_id at all for the default slot.
+            tools={"tool": [seed["tool_id"], seed["hybrid_glue_jig_tool_id"]]},
+        )
+    assert not evaluation.valid
+    assert "tool_count_invalid" in {issue.code for issue in evaluation.issues}
+
+
+def test_unknown_tool_slot_key_is_rejected(session_factory, tudo):
+    seed = seed_valid_assembly(session_factory, tudo)
+    with session_factory() as session:
+        evaluation = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+            tool_id=seed["tool_id"],
+            tools={"not_a_configured_slot": [seed["tool_id"]]},
+        )
+    assert not evaluation.valid
+    assert "unknown_tool_slot" in {issue.code for issue in evaluation.issues}
+
+
+def test_missing_and_malformed_tools_selection_are_validation_errors(session_factory, tudo):
+    seed = seed_valid_assembly(session_factory, tudo)
+    with session_factory() as session:
+        no_tool = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+        )
+    assert "tools_required" in {issue.code for issue in no_tool.issues}
+
+    with session_factory() as session:
+        malformed = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+            tools={"tool": []},
+        )
+    assert "tools_invalid" in {issue.code for issue in malformed.issues}
+
+
+def test_revalidate_accepts_a_hand_built_pre_slots_snapshot(session_factory, tudo):
+    """A real action staged before this module supported tool slots has no
+    ``tools`` key at all; it must keep revalidating exactly as before."""
+
+    seed = seed_valid_assembly(session_factory, tudo)
+    old_shape_payload = {
+        "parent_sn": seed["parent_sn"],
+        "child_sn": seed["child_sn"],
+        "slot": "H0",
+        "tool_id": seed["tool_id"],
+        "glue_batch_id": seed["glue_batch_id"],
+        "expected_parent_component_type": "MODULE",
+        "expected_parent_type_code": "R5M0",
+        "expected_parent_stage": "GLUED",
+        "expected_parent_location": "TUDO",
+        "expected_parent_institute_code": "TUDO",
+        "expected_child_component_type": "HYBRID",
+        "expected_child_type_code": "R5H0",
+        "expected_child_parent_sn": None,
+        "expected_child_location": "TUDO",
+        "expected_child_institute_code": "TUDO",
+        "expected_tool_code": "JIG-R5-01",
+        "expected_glue_batch_no": "EPOXY-42",
+        "pdb_properties": {
+            "MODULE_ASSEMBLY_JIG": "JIG-R5-01",
+            "HYBRID_GLUE_SAMPLE": "20USEGT0000042",
+            "HYBRID_POSITION": "H0",
+        },
+        "dry_run_required": True,
+    }
+    with session_factory() as session:
+        assert revalidate_assembly_action(session, old_shape_payload) == []
+
+        tool = session.get(Tool, seed["tool_id"])
+        tool.status = "blacklisted"
+        session.commit()
+        issues = revalidate_assembly_action(session, old_shape_payload)
+    assert any("only active tools" in issue for issue in issues)
+
+
+def test_revalidate_flags_inactive_extra_slot_tool_without_a_false_drift_signal(
+    session_factory, tudo
+):
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    with session_factory() as session:
+        evaluation = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+            tool_id=seed["tool_id"],
+            tools={"hybrid_glue_jig": [seed["hybrid_glue_jig_tool_id"]]},
+            glue_batch_id=seed["glue_batch_id"],
+        )
+        payload = canonical_action_payload(evaluation)
+        extra_tool = session.get(Tool, seed["hybrid_glue_jig_tool_id"])
+        extra_tool.status = "flagged"
+        session.commit()
+        issues = revalidate_assembly_action(session, payload)
+    assert any("only active tools" in issue for issue in issues)
+    assert not any("tools changed" in issue for issue in issues)
+
+
+def test_revalidate_detects_tools_snapshot_drift_when_a_slot_is_removed(session_factory, tudo):
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    with session_factory() as session:
+        evaluation = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+            tool_id=seed["tool_id"],
+            tools={"hybrid_glue_jig": [seed["hybrid_glue_jig_tool_id"]]},
+            glue_batch_id=seed["glue_batch_id"],
+        )
+        payload = canonical_action_payload(evaluation)
+        assert revalidate_assembly_action(session, payload) == []
+
+        institute = session.get(InstituteProfile, tudo["id"])
+        institute.settings = {**institute.settings, "assembly_tool_slots": []}
+        session.commit()
+        issues = revalidate_assembly_action(session, payload)
+    assert any("not a configured assembly tool slot" in issue for issue in issues)
+    assert any("tools changed" in issue for issue in issues)
+
+
+def test_the_api_accepts_tool_slot_combinations(client, session_factory, tudo, as_operator):
+    """`tools` must travel through POST /api/assembly/preview and /actions.
+
+    The domain layer supports slot combinations; without the HTTP wiring the
+    wizard cannot send them (orchestrator follow-up to the domain change).
+    """
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    jig_id = seed["hybrid_glue_jig_tool_id"]
+
+    body = {
+        **_body(seed),
+        # The sheet's "top, bottom" case: the same physical jig scanned twice.
+        "tools": {"hybrid_glue_jig": [jig_id, jig_id]},
+    }
+
+    preview = client.post("/api/assembly/preview", json=body)
+    assert preview.status_code == 200, preview.text
+    snapshot = preview.json()
+    assert [tool["id"] for tool in snapshot["tools"]["hybrid_glue_jig"]] == [jig_id, jig_id]
+
+    staged = client.post("/api/assembly/actions", json=body)
+    assert staged.status_code == 201, staged.text
+    payload = staged.json()["action"]["payload"]
+    assert payload["tools"]["hybrid_glue_jig"] == [jig_id, jig_id]
+
+
+def test_the_api_still_accepts_a_plain_tool_id(client, session_factory, tudo, as_operator):
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    preview = client.post("/api/assembly/preview", json=_body(seed))
+    assert preview.status_code == 200, preview.text
+
+
+def test_a_slot_count_violation_stops_the_per_id_loop(client, session_factory, tudo, as_operator):
+    """Review I1: an oversized id list must be recorded once and NOT resolve
+    every id individually (unbounded SELECT/issue amplification)."""
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    body = {
+        **_body(seed),
+        "tools": {"hybrid_glue_jig": [seed["hybrid_glue_jig_tool_id"]] * 4 + [999_999]},
+    }
+    preview = client.post("/api/assembly/preview", json=body)
+    # Rejected at the schema boundary: per-slot lists are capped at the domain
+    # maximum, so the request never reaches the resolver at all.
+    assert preview.status_code == 422, preview.text
+
+
+def test_the_tools_mapping_size_is_bounded(client, session_factory, tudo, as_operator):
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    body = {
+        **_body(seed),
+        "tools": {f"slot_{i}": [1] for i in range(64)},
+    }
+    assert client.post("/api/assembly/preview", json=body).status_code == 422
+
+
+def test_domain_count_violation_short_circuits_without_resolving_ids(session_factory, tudo):
+    """Direct domain call (bypasses the schema cap): the resolver itself must
+    short-circuit a cardinality violation."""
+    from app.assembly import evaluate_assembly
+    from app.config import Settings
+
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    with session_factory() as session:
+        evaluation = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+            tool_id=seed["tool_id"],
+            tools={"hybrid_glue_jig": [seed["hybrid_glue_jig_tool_id"]] * 9},
+            glue_batch_id=seed["glue_batch_id"],
+        )
+    codes = [issue.code for issue in evaluation.issues]
+    assert "hybrid_glue_jig_tool_count_invalid" in codes
+    # One count issue, no per-id follow-up issues for the oversized list.
+    assert len([c for c in codes if c.startswith("hybrid_glue_jig_")]) == 1
+
+
+def test_every_slot_enforces_parent_type_compatibility(session_factory, tudo):
+    """Review I2: `compatible_types` must gate every slot, not only the
+    default one — otherwise a slots-only layout ships with weaker server
+    validation than the client's own quick-select filter."""
+    from app.assembly import evaluate_assembly
+    from app.config import Settings
+    from app.models import Tool
+
+    seed = seed_multi_slot_assembly(session_factory, tudo)
+    with session_factory() as session:
+        incompatible = Tool(
+            institute_id=tudo["id"],
+            kind="jig",
+            code="HGJ-WRONGTYPE",
+            label="Jig for a different module type",
+            compatible_types=["R2"],
+            status="active",
+        )
+        session.add(incompatible)
+        session.commit()
+        wrong_type_id = incompatible.id
+
+    with session_factory() as session:
+        evaluation = evaluate_assembly(
+            session,
+            Settings(_env_file=None),
+            parent_sn=seed["parent_sn"],
+            child_sn=seed["child_sn"],
+            slot="H0",
+            tool_id=seed["tool_id"],
+            tools={"hybrid_glue_jig": [wrong_type_id]},
+            glue_batch_id=seed["glue_batch_id"],
+        )
+    codes = [issue.code for issue in evaluation.issues]
+    assert "hybrid_glue_jig_tool_incompatible" in codes

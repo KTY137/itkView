@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from app.db import is_sqlite_busy
 from app.models import AuditEvent, InstituteProfile, Reminder, ReminderOccurrence
 from app.notifications import NotificationError, Notifier, channel_configs
 from app.ops_health import REMINDER_SCHEDULER, record_service_heartbeat
@@ -385,6 +386,32 @@ class ReminderScheduler:
             )
             session.commit()
 
+    def _handle_tick_failure(self, exc: Exception) -> None:
+        """Classify and report one failed tick. Called off the event loop
+        (blocking DB I/O); never raises, so the poll loop keeps running.
+        """
+        if is_sqlite_busy(exc):
+            # Expected under concurrent load (the worker/API/outbox processor
+            # share one SQLite file outside Compose) rather than a real
+            # failure. Stay quiet and skip the failure heartbeat entirely — a
+            # transient blip must not flip the ops health screen to "error".
+            print("[reminder-scheduler] database busy — skipped this cycle", flush=True)
+            return
+        # One bad tick (unreachable endpoint, real bug) must not end the loop,
+        # or reminders stop for the rest of the session.
+        print(f"[reminder-scheduler] tick failed: {type(exc).__name__}", flush=True)
+        try:
+            self.record_failure(exc)
+        except Exception as heartbeat_exc:  # noqa: BLE001 — keep ticking
+            # A locked/unavailable database may reject the failure heartbeat
+            # too. Persist no message (it may contain a URL), and most
+            # importantly do not let telemetry kill the ticker.
+            print(
+                "[reminder-scheduler] failure heartbeat failed: "
+                f"{type(heartbeat_exc).__name__}",
+                flush=True,
+            )
+
     async def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._run())
@@ -407,20 +434,7 @@ class ReminderScheduler:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — a scheduler must not die
-                # One bad tick (locked database, unreachable endpoint) must not
-                # end the loop, or reminders stop for the rest of the session.
-                print(f"[reminder-scheduler] tick failed: {type(exc).__name__}", flush=True)
-                try:
-                    await asyncio.to_thread(self.record_failure, exc)
-                except Exception as heartbeat_exc:  # noqa: BLE001 — keep ticking
-                    # A locked/unavailable database may reject the failure
-                    # heartbeat too. Persist no message (it may contain a URL),
-                    # and most importantly do not let telemetry kill the ticker.
-                    print(
-                        "[reminder-scheduler] failure heartbeat failed: "
-                        f"{type(heartbeat_exc).__name__}",
-                        flush=True,
-                    )
+                await asyncio.to_thread(self._handle_tick_failure, exc)
                 continue
             if stats.total:
                 print(

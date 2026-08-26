@@ -39,6 +39,14 @@ _COMPONENT_TYPE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,31}\Z")
 _CHAT_ID_RE = re.compile(r"-?[0-9]{1,32}\Z|@[A-Za-z0-9_]{1,64}\Z")
 _EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+\Z")
 _TEST_TYPE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
+# Slot keys are the dict keys an assembly payload's ``tools`` map and the
+# per-slot PDB property mapping key off — "snake/kebab tolerant" so either
+# house style works, but not free text (they double as JSON object keys).
+_ASSEMBLY_TOOL_SLOT_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}\Z")
+# Mirrors app.assembly._PROPERTY_KEY: a slot's own PDB property code, e.g.
+# JIG_HYBRID_ALIGNMENT.
+_ASSEMBLY_PROPERTY_KEY_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
+_ASSEMBLY_TOOL_SLOT_FIELDS = frozenset({"key", "label", "kinds", "multiple", "property_key"})
 
 
 class InstituteSettingsValidationError(ValueError):
@@ -411,6 +419,79 @@ def _shipment_reception_tests(value: Any) -> dict[str, list[str]]:
     return normalised
 
 
+def _assembly_tool_slots(value: Any) -> list[dict[str, Any]]:
+    """Normalize the combined-tool assembly slots an institute exposes.
+
+    A single assembly step can use several tools in combination — the
+    production sheets this replaces track e.g. "Hybrid glue jigs used, top,
+    bottom" and "Hybrid pickups used, top, bottom" next to a single "Module
+    jig used" column. Each entry here names one such scannable role; the
+    assembly payload's ``tools`` map and the PDB property mapping both key off
+    ``key``, never off ``label``. ``property_key`` is only meaningful for
+    slots other than the implicit default ("tool") slot, which keeps using
+    the existing ``assembly_property_keys["tool"]`` mapping.
+    """
+
+    if not isinstance(value, list):
+        raise InstituteSettingsValidationError("assembly_tool_slots must be a list.")
+    normalised: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    seen_property_keys: set[str] = set()
+    for raw_slot in value:
+        if not isinstance(raw_slot, dict):
+            raise InstituteSettingsValidationError("Every assembly tool slot must be an object.")
+        if set(raw_slot) - _ASSEMBLY_TOOL_SLOT_FIELDS:
+            raise InstituteSettingsValidationError(
+                "Assembly tool slot contains unsupported fields."
+            )
+        key = _clean_string(raw_slot.get("key"), label="Assembly tool slot key", max_length=32)
+        if _ASSEMBLY_TOOL_SLOT_KEY_RE.fullmatch(key) is None:
+            raise InstituteSettingsValidationError(
+                "Assembly tool slot keys may contain letters, digits, underscores, and hyphens."
+            )
+        if key in seen_keys:
+            raise InstituteSettingsValidationError("Assembly tool slot keys must be unique.")
+        seen_keys.add(key)
+        label = _clean_string(
+            raw_slot.get("label"), label="Assembly tool slot label", max_length=60
+        )
+        slot: dict[str, Any] = {"key": key, "label": label}
+        if "kinds" in raw_slot:
+            slot["kinds"] = _clean_string_list(
+                raw_slot["kinds"],
+                setting_name="Assembly tool slot kinds",
+                item_label="tool kind",
+                max_length=24,
+            )
+        if "multiple" in raw_slot:
+            multiple = raw_slot["multiple"]
+            if not isinstance(multiple, bool):
+                raise InstituteSettingsValidationError(
+                    "Assembly tool slot 'multiple' must be true or false."
+                )
+            slot["multiple"] = multiple
+        if raw_slot.get("property_key") is not None:
+            property_key = _clean_string(
+                raw_slot["property_key"],
+                label="Assembly tool slot property key",
+                max_length=64,
+            ).upper()
+            if _ASSEMBLY_PROPERTY_KEY_RE.fullmatch(property_key) is None:
+                raise InstituteSettingsValidationError(
+                    "Assembly tool slot property keys must look like PDB property codes."
+                )
+            if property_key in seen_property_keys:
+                # Two slots writing the same PDB property would silently
+                # last-writer-win into the staged payload.
+                raise InstituteSettingsValidationError(
+                    "Assembly tool slot property_key values must be unique."
+                )
+            seen_property_keys.add(property_key)
+            slot["property_key"] = property_key
+        normalised.append(slot)
+    return normalised
+
+
 def normalize_institute_settings_update(
     existing_settings: Any,
     settings_patch: dict[str, Any],
@@ -455,5 +536,9 @@ def normalize_institute_settings_update(
     if "reminder_escalation" in settings_patch:
         normalised["reminder_escalation"] = _reminder_escalation(
             settings_patch["reminder_escalation"]
+        )
+    if "assembly_tool_slots" in settings_patch:
+        normalised["assembly_tool_slots"] = _assembly_tool_slots(
+            settings_patch["assembly_tool_slots"]
         )
     return normalised
