@@ -13,6 +13,25 @@ to itkFlow-registered DUMMY test components. See `CLAUDE.md` for the hard rules.
 For current implementation priorities, agents and humans should start with
 `docs/04-roadmap.md`; `docs/02-revamp-plan.md` remains the product vision.
 
+## Install (Windows)
+
+The fastest way to try itkFlow is the desktop app — one installer, no Python
+or Node.js setup; the backend ships inside and the UI opens in its own window:
+
+**[Download the latest installer from the Releases page.](https://github.com/KTY137/itkflow/releases)**
+
+The build is not code-signed yet, so Windows SmartScreen will warn on first
+run — choose "More info → Run anyway". On first start, create the admin
+account the app asks for, then connect your personal ITk PDB access codes
+under **Account**. Without the deliberate production opt-in the app stays
+fully offline; PDB writes remain restricted to DUMMY test components either
+way.
+
+Your data — database, credential key, mirrored attachments — lives in
+`%LOCALAPPDATA%\itkflow` and survives updates. Back up `pdb-credential.key`:
+losing it makes saved PDB connections unreadable. Building the installer
+yourself is covered in *Desktop build* below.
+
 ## Repository layout
 
 | Path | Contents |
