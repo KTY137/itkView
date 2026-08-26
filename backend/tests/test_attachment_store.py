@@ -686,17 +686,13 @@ def test_share_link_server_error_is_retried_and_client_error_is_not(
 
     url = "https://cernbox.cern.ch/s/public/photo.jpg"
     opens: list[str] = []
-    answers = [
-        HTTPError(url, 503, "Service Unavailable", None, None),
-        _PublicResponse(url, JPEG),
-    ]
+    outage_opens = 2  # both candidate URLs answer 503 on the first attempt
 
     def open_url(requested, timeout):
         opens.append(requested)
-        answer = answers[min(len(opens), len(answers)) - 1]
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
+        if len(opens) <= outage_opens:
+            raise HTTPError(requested, 503, "Service Unavailable", None, None)
+        return _PublicResponse(requested, JPEG)
 
     monkeypatch.setattr(attachment_store, "_open_public_url", open_url)
     _set_attachment_descriptor(
@@ -707,22 +703,156 @@ def test_share_link_server_error_is_retried_and_client_error_is_not(
     stats = download_attachments(session, _FakeGateway(configured=False), settings, "20USEM20000041")
     session.commit()
     assert stats.downloaded == 1
-    assert len(opens) == 2
+    assert len(opens) == 3
     assert no_sleep == [0.5]
 
     # A 404 is the share answering "this does not exist" — retrying is noise.
     opens.clear()
     no_sleep.clear()
-    answers[:] = [HTTPError(url, 404, "Not Found", None, None)]
+    outage_opens = 99
+
+    def open_404(requested, timeout):
+        opens.append(requested)
+        raise HTTPError(requested, 404, "Not Found", None, None)
+
+    monkeypatch.setattr(attachment_store, "_open_public_url", open_404)
     _set_attachment_descriptor(
         session,
         evidence,
         {"code": "f" * 64, "type": "share_link", "source": "share_link", "url": url},
     )
     stats = download_attachments(session, _FakeGateway(configured=False), settings, "20USEM20000041")
+    # Both candidate URLs are asked once; neither failure earns a backoff.
     assert stats.failed == 1
-    assert len(opens) == 1
+    assert len(opens) == 2
     assert no_sleep == []
+
+
+def test_share_page_html_falls_back_to_the_download_route(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    """CERNBox/ownCloud share links render an HTML viewer page at the plain
+    URL; the raw bytes live behind its ``/download`` route. Observed live:
+    every VISUAL_INSPECTION share attachment failed because only the page was
+    ever requested and its HTML was (rightly) refused."""
+    url = "https://cernbox.cern.ch/s/6LPpeXmuIBwS5ST"
+    opens: list[str] = []
+
+    def open_url(requested, timeout):
+        opens.append(requested)
+        if requested.endswith("/download"):
+            return _PublicResponse(requested, JPEG, "application/octet-stream")
+        return _PublicResponse(requested, HTML_ERROR_PAGE, "text/html")
+
+    monkeypatch.setattr(attachment_store, "_open_public_url", open_url)
+    _set_attachment_descriptor(
+        session,
+        evidence,
+        {
+            "code": "a1" * 32,
+            "filename": "6LPpeXmuIBwS5ST",
+            "content_type": None,
+            "type": "share_link",
+            "source": "share_link",
+            "url": url,
+        },
+    )
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.downloaded == 1 and stats.failed == 0
+    assert opens == [url, url + "/download"]
+    assert no_sleep == []
+    row = session.scalar(
+        select(TestRunAttachment).where(TestRunAttachment.pdb_code == "a1" * 32)
+    )
+    assert resolve_path(settings, row).read_bytes() == JPEG
+
+
+def test_share_link_candidates_never_double_the_download_suffix():
+    candidates = attachment_store._share_link_candidates
+    plain = "https://cernbox.cern.ch/s/6LPpeXmuIBwS5ST"
+    assert candidates(plain) == [plain, plain + "/download"]
+    direct = "https://cernbox.cern.ch/s/6LPpeXmuIBwS5ST/download"
+    assert candidates(direct) == [direct]
+    named = "https://syncandshare.example.org/index.php/s/tok/download/metro_current.txt"
+    assert candidates(named) == [named]
+
+
+def test_same_filename_across_runs_all_land_on_disk(session, settings):
+    """Observed live: several runs of one module carry attachments with the
+    identical filename but distinct PDB codes, and one variant stayed
+    unstored. The storage name is the code, so every variant must land —
+    none may shadow or overwrite another."""
+    for index in range(3):
+        session.add(
+            TestRunEvidence(
+                component_sn="20USEM20000042",
+                test_type="MODULE_BOW",
+                passed=True,
+                source="pdb",
+                external_ref=f"BOW-RUN-{index}",
+                payload={
+                    "attachments": [
+                        {
+                            "code": f"bowcode{index}",
+                            "filename": "R5M0_bowmeasure.txt",
+                            "content_type": "text/plain",
+                            "title": None,
+                        }
+                    ]
+                },
+            )
+        )
+    session.commit()
+
+    stats = download_attachments(session, _FakeGateway(), settings, "20USEM20000042")
+    session.commit()
+
+    assert stats.downloaded == 3 and stats.failed == 0
+    rows = session.scalars(
+        select(TestRunAttachment).order_by(TestRunAttachment.pdb_code)
+    ).all()
+    assert len(rows) == 3
+    assert len({row.relative_path for row in rows}) == 3
+    for row in rows:
+        assert resolve_path(settings, row) is not None
+
+
+def test_a_duplicate_code_across_runs_stays_stored(session, settings):
+    """The same PDB code listed by two runs is one file: downloaded once,
+    reused for the second descriptor, and never flipped back to unstored."""
+    for run in ("RUN-A", "RUN-B"):
+        session.add(
+            TestRunEvidence(
+                component_sn="20USEM20000043",
+                test_type="MODULE_BOW",
+                passed=True,
+                source="pdb",
+                external_ref=run,
+                payload={
+                    "attachments": [
+                        {
+                            "code": "sharedcode",
+                            "filename": "R5M0_bowmeasure.txt",
+                            "content_type": "text/plain",
+                            "title": None,
+                        }
+                    ]
+                },
+            )
+        )
+    session.commit()
+
+    stats = download_attachments(session, _FakeGateway(), settings, "20USEM20000043")
+    session.commit()
+
+    assert stats.downloaded == 1 and stats.reused == 1 and stats.failed == 0
+    row = session.scalar(select(TestRunAttachment))
+    assert resolve_path(settings, row) is not None
 
 
 def test_download_heartbeat_fires_per_file_and_per_retry(

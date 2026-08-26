@@ -30,7 +30,7 @@ from pathlib import Path
 from time import sleep
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from sqlalchemy import select
@@ -443,30 +443,57 @@ def _response_content_type(response: Any) -> str | None:
     return value.split(";", 1)[0].strip() if isinstance(value, str) and value else None
 
 
+def _share_link_candidates(url: str) -> list[str]:
+    """URLs to try for one public share link, most direct first.
+
+    CERNBox/ownCloud-family shares render an HTML viewer page at the plain
+    ``/s/<token>`` URL; the raw file lives behind its ``/download`` route.
+    (Observed live: every VISUAL_INSPECTION share attachment failed because
+    only the page was requested and its HTML was — rightly — refused.)
+    """
+    candidates = [url]
+    parsed = urlsplit(url)
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/download") and "/download/" not in path:
+        candidates.append(
+            urlunsplit((parsed.scheme, parsed.netloc, f"{path}/download", parsed.query, ""))
+        )
+    return candidates
+
+
 def _fetch_share_link(
     descriptor: dict[str, Any], *, timeout: int, max_bytes: int
 ) -> tuple[bytes, str | None] | None:
     url = descriptor.get("url")
     if not isinstance(url, str) or not _safe_http_url(url):
         return None
-    try:
-        with closing(_open_public_url(url, timeout)) as response:
-            final_url = getattr(response, "geturl", lambda: url)()
-            if not isinstance(final_url, str) or not _safe_http_url(final_url):
-                return None
-            data = response.read(max_bytes + 1)
-            content_type = _response_content_type(response)
-    except Exception as exc:
-        # Every descriptor is best effort. Do not stringify network failures:
-        # redirect/error objects can contain the complete share URL.
-        _raise_if_transient(exc, "share-link download")
-        return None
-    if not isinstance(data, (bytes, bytearray)):
-        return None
-    payload = bytes(data)
-    if content_type and content_type.lower() in {"text/html", "application/xhtml+xml"}:
-        return None
-    return (payload, content_type) if _valid_payload(payload, max_bytes) else None
+    transient_seen = False
+    for candidate in _share_link_candidates(url):
+        if not _safe_http_url(candidate):
+            continue
+        try:
+            with closing(_open_public_url(candidate, timeout)) as response:
+                final_url = getattr(response, "geturl", lambda: candidate)()
+                if not isinstance(final_url, str) or not _safe_http_url(final_url):
+                    continue
+                data = response.read(max_bytes + 1)
+                content_type = _response_content_type(response)
+        except Exception as exc:
+            # Every candidate is best effort. Do not stringify network
+            # failures: redirect/error objects can contain the complete URL.
+            transient_seen = transient_seen or is_transient_download_error(exc)
+            continue
+        if not isinstance(data, (bytes, bytearray)):
+            continue
+        payload = bytes(data)
+        if content_type and content_type.lower() in {"text/html", "application/xhtml+xml"}:
+            # The share page, not the file — try the download route next.
+            continue
+        if _valid_payload(payload, max_bytes):
+            return payload, content_type
+    if transient_seen:
+        raise _TransientDownloadFailure("share-link download failed with a transient error")
+    return None
 
 
 def _fresh_eos_url(client: Any, descriptor: dict[str, Any]) -> str | None:
