@@ -2,7 +2,9 @@
 
 ## Status
 
-Angenommen am 2026-07-08.
+Angenommen am 2026-07-08. Fortgeschrieben durch
+[ADR 002](002-async-outbox-worker.md) (wer schreibt) und
+[ADR 003](003-pdb-dummy-write-scope.md) (worauf geschrieben werden darf).
 
 ## Kontext
 

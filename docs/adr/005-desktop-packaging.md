@@ -40,10 +40,21 @@ keine reduzierte Zweitfassung, die auseinanderdriftet.
    (`%LOCALAPPDATA%\itkflow`), damit eine bereits verbundene PDB-Identität
    erhalten bleibt. Ein vorhandener Key wird **nie** ersetzt: das würde jede
    gespeicherte Verbindung unlesbar machen.
-6. **Keine Abkürzung an den Sicherheitsregeln vorbei.** Die Desktop-Variante
-   erbt die Defaults: `pdb_instance=test`, `allow_production=false`,
-   `pdb_write_scope=dummy_only`. Produktions-Reads brauchen dieselben zwei
-   Env-Opt-ins wie jede andere Installation (ADR 003, docs/09).
+6. **Keine Abkürzung an den Sicherheitsregeln vorbei.** Der Schreibbereich
+   bleibt `pdb_write_scope=dummy_only`, auch im Desktop-Bundle.
+
+   *Korrektur 2026-08-27:* Dieser Punkt nannte ursprünglich
+   `pdb_instance=test`, `allow_production=false` als geerbte Defaults. Beides
+   ist überholt. Ein `test`-Wert existiert in der Config nicht mehr (der
+   Code-Default ist `offline`), und das Desktop-Bundle schaltet Produktions-
+   **Reads** ab Werk selbst ein (Owner-Entscheidung 2026-08-26,
+   [docs/09](../09-pdb-production-strategy.md)) — sichtbar in
+   `backend/app/desktop_server.py`, das die Overrides nur setzt, wenn die
+   Umgebung sie nicht ohnehin vorgibt. PDB-Verkehr entsteht trotzdem erst,
+   wenn eine Person ihre persönlichen Access-Codes verbindet
+   ([ADR 004](004-personal-pdb-credentials.md)). Schreiboperationen bleiben
+   auf selbst registrierte DUMMY-Komponenten beschränkt
+   ([ADR 003](003-pdb-dummy-write-scope.md)).
 
 ## Konsequenzen
 

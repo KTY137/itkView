@@ -2,17 +2,37 @@
 
 > Planungsdokument (noch nicht umgesetzt). Wie kommt man **von zuhause** sicher
 > an die itkFlow-Instanz, die auf einem Lab-PC/Instituts-VM laeuft.
+>
+> - **Besitzt:** die Optionen fuer Fernzugriff (Mesh-VPN, Zero-Trust-Tunnel,
+>   Instituts-VPN, offener Reverse Proxy), die Empfehlung und die
+>   Betriebshinweise dazu.
+> - **Fuer wen:** alle, die eine Instanz ueber das Labornetz hinaus erreichbar
+>   machen wollen — vorher lesen, nicht nachher.
+> - **Verwandt:** [`06-users-roles-audit.md`](06-users-roles-audit.md)
+>   (Auth-Fundament, harte Vorbedingung),
+>   [`09-pdb-production-strategy.md`](09-pdb-production-strategy.md)
+>   (was eine erreichbare Instanz gegenueber der PDB darf),
+>   [`../deploy/README.md`](../deploy/README.md) (das Deployment davor),
+>   [`04-roadmap.md`](04-roadmap.md) (Einordnung), [`README.md`](README.md)
+>   (Lesepfade).
 
 ## Sicherheits-Vorbedingung (zuerst!)
 
 Remote-Zugriff wird **erst scharf geschaltet, wenn die Authentifizierung steht**
-(`docs/06-users-roles-audit.md`). Eine App, die (Test-)PDB-Writes ausloesen und
-Konfiguration aendern kann, darf nicht ohne Login erreichbar sein.
+([`06-users-roles-audit.md`](06-users-roles-audit.md)). Eine App, die
+PDB-Writes ausloesen und Konfiguration aendern kann, darf nicht ohne
+Login erreichbar sein.
 
 - Transport **immer TLS** (kein Klartext-HTTP nach aussen).
-- Weiterhin **nur PDB-Testinstanz** (harte Regel #2) — Remote aendert daran
-  nichts.
-- Audit-Spur (docs/06) macht Remote-Aktionen nachvollziehbar.
+- Der Schreibbereich bleibt **`pdb_write_scope=dummy_only`** (harte Regel #2,
+  [`09`](09-pdb-production-strategy.md), [ADR 003](adr/003-pdb-dummy-write-scope.md))
+  — Remote aendert daran nichts. Eine PDB-Testinstanz gibt es **nicht mehr**;
+  eine aeltere Fassung dieses Abschnitts behauptete das Gegenteil.
+- PDB-Verkehr entsteht ohnehin erst, wenn eine Person ihre **persoenlichen**
+  Access-Codes verbindet ([ADR 004](adr/004-personal-pdb-credentials.md)) —
+  Fernzugriff verschafft niemandem fremde Codes.
+- Audit-Spur ([docs/06](06-users-roles-audit.md)) macht Remote-Aktionen
+  nachvollziehbar.
 
 ## Optionen (mit Empfehlung)
 
@@ -48,7 +68,8 @@ auf **Cloudflare Tunnel (B)** mit Access-Policy wechseln. `deploy/` (Compose,
 ## Betriebshinweise
 
 - App an `127.0.0.1` binden; nur Tunnel/VPN terminiert extern.
-- TLS erzwingen; sichere Cookies (`Secure`, `httpOnly`) — greift mit docs/06.
+- TLS erzwingen; sichere Cookies (`Secure`, `httpOnly`) — greift mit
+  [docs/06](06-users-roles-audit.md).
 - Rate-Limiting am Proxy/Tunnel.
 - Backups/Monitoring unabhaengig vom Zugriffsweg (Phase 4/6).
 
@@ -62,4 +83,5 @@ auf **Cloudflare Tunnel (B)** mit Access-Policy wechseln. `deploy/` (Compose,
 ## Roadmap-Einordnung
 
 Betriebsthema (Phase 4/6). **Harte Abhaengigkeit:** Auth-Fundament aus
-`docs/06-users-roles-audit.md` muss zuerst stehen. Siehe `docs/04-roadmap.md`.
+[`06-users-roles-audit.md`](06-users-roles-audit.md) muss zuerst stehen. Siehe
+[`04-roadmap.md`](04-roadmap.md).

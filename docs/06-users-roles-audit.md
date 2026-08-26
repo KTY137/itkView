@@ -4,6 +4,19 @@
 > „wer hat was gemacht"-Spur bekommt. **Umgesetzt und End-to-End verdrahtet
 > (Stand 2026-08-24): Attribution, Rollen-Enforcement, CSRF, Frontend-Login und
 > persoenliche PDB-Verbindungen stehen und sind getestet** — siehe Umsetzungsstand.
+>
+> - **Besitzt:** lokale Konten, Rollen (`viewer`/`operator`/`admin`), Sessions
+>   und CSRF, serverseitige Audit-Zuordnung sowie den Produktpfad der
+>   persoenlichen PDB-Verbindung im Account-Screen.
+> - **Fuer wen:** alle, die einen Endpunkt absichern, eine Rolle pruefen oder
+>   verstehen wollen, unter welcher Identitaet eine Aktion in der PDB landet.
+> - **Verwandt:** [`adr/004-personal-pdb-credentials.md`](adr/004-personal-pdb-credentials.md)
+>   (Verschluesselung und Identitaetsbindung),
+>   [`09-pdb-production-strategy.md`](09-pdb-production-strategy.md)
+>   (was eine verbundene Identitaet ueberhaupt darf),
+>   [`08-remote-access.md`](08-remote-access.md) (haengt an diesem Fundament),
+>   [`05-ui-design-reference.md`](05-ui-design-reference.md) (Login-, Account-
+>   und Users-Screens), [`README.md`](README.md) (Lesepfade).
 
 ## Umsetzungsstand (2026-08-24)
 
@@ -51,7 +64,8 @@ gruen).** Was steht:
   verwenden ausschliesslich die Verbindung des Request-Users. Background-Syncs
   verwenden `SyncJob.user_id`; beim Approve bindet `OutboxPdbPrincipal` den
   Worker und alle Retries an User+PDB-Identity des Freigebenden. Es gibt keinen
-  globalen Credential-Fallback. Details: ADR 004.
+  globalen Credential-Fallback. Details:
+  [ADR 004](adr/004-personal-pdb-credentials.md).
 - Tests: `backend/tests/test_auth.py` + `test_auth_enforcement.py` (401/403 je
   Write, Attribution, CSRF, Migration); Erst-Admin per CLI
   `python -m app.create_admin` **oder per First-Run-Setup in der UI**.
@@ -78,7 +92,8 @@ gruen).** Was steht:
   Advisory-Lock (`pg_advisory_xact_lock`) konkurrierende Bootstrap-Calls,
   damit unter READ COMMITTED nicht zwei „erste Admins" entstehen; SQLite
   (Desktop) ist single-writer und braucht das nicht. Bis zum Setup kann
-  jeder, der den Port erreicht, die Instanz beanspruchen — deploy/README
+  jeder, der den Port erreicht, die Instanz beanspruchen —
+  [`../deploy/README.md`](../deploy/README.md)
   weist an, das Setup sofort nach dem ersten Start abzuschliessen und den
   Dienst vorher nicht ueber das vertrauenswuerdige Netz hinaus zu exponieren.
   Tests: `backend/tests/test_setup_bootstrap.py`.
@@ -205,4 +220,4 @@ Institut-Scoping: ein Nutzer agiert in seinem Institut; Reads/Writes werden auf
 
 Fundament fuer echte Nachvollziehbarkeit; zieht Teile der „Auth/Rollen"-Arbeit
 aus Phase 4/6 nach vorne, weil Outbox-Writes und Uploads schon existieren und
-eine echte Zuordnung brauchen. Siehe `docs/04-roadmap.md`.
+eine echte Zuordnung brauchen. Siehe [`04-roadmap.md`](04-roadmap.md).

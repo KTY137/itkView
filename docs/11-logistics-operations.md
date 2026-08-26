@@ -1,5 +1,22 @@
 # Logistics and Operations
 
+> - **Owns:** the Phase 4 contract — glue-batch registry, tool resources and
+>   assembly recording, shipment mirror and reception, reminders and
+>   notification channels, and the operations health view, together with the
+>   institute-profile keys that configure them.
+> - **Read this if:** you work on any of those modules, wire an operational
+>   screen, or need to know which process fires reminders and drains the outbox.
+> - **Links to:** [`09-pdb-production-strategy.md`](09-pdb-production-strategy.md)
+>   (PDB safety for the shipment mirror),
+>   [`07-jig-tool-quickselect.md`](07-jig-tool-quickselect.md) (tool registry and
+>   slots), [`05-ui-design-reference.md`](05-ui-design-reference.md) (how these
+>   screens look), [`06-users-roles-audit.md`](06-users-roles-audit.md) (roles
+>   and audit), [`adr/002-async-outbox-worker.md`](adr/002-async-outbox-worker.md)
+>   (the worker process), [`README.md`](README.md) (reading paths).
+>
+> This file is written in English because it doubles as a user- and
+> developer-facing contract; the other planning documents in `docs/` are German.
+
 This document is the user and developer reference for the Phase 4 backend
 contract covering glue batches, tool resources, assembly recording, shipment
 reception, reminders, and notification channels. The PDB remains the source of
@@ -10,8 +27,8 @@ itkFlow.
 The Glue batches, Shipments, Reminders, and Operations health screens expose
 this contract in the product UI. Admins configure their institute's operational defaults through
 the structured Settings screen. Delivery status and final cross-suite
-acceptance remain tracked in `docs/04-roadmap.md`; API availability alone must
-not be treated as a test result.
+acceptance remain tracked in [`04-roadmap.md`](04-roadmap.md); API availability
+alone must not be treated as a test result.
 
 ## Safety and ownership boundaries
 
@@ -19,7 +36,7 @@ not be treated as a test result.
   to an existing PDB component; itkFlow does not register GLUE components.
 - Shipment sync is read-only. It uses the signed-in operator's personal PDB
   connection and the production-read safeguards described in
-  `docs/09-pdb-production-strategy.md`.
+  [`09-pdb-production-strategy.md`](09-pdb-production-strategy.md).
 - Shipment reception fields are locally leading and are never overwritten by a
   later PDB sync.
 - Reminder delivery runs in the worker process. The web process only manages
@@ -148,7 +165,7 @@ The outbound request timeout is controlled by
 
 The table describes the dependencies enforced directly by the current API
 handlers. Authenticated mutations also use the normal session and CSRF contract
-from `docs/06-users-roles-audit.md`.
+from [`06-users-roles-audit.md`](06-users-roles-audit.md).
 
 | Area | Read routes | Mutation routes |
 |---|---|---|
@@ -216,6 +233,11 @@ The API records `glue_batch.created`, `glue_batch.updated`,
 
 ## Tool resources and assembly recording
 
+Registry data model, PDB `TOOLS` mirror, type compatibility and the combined
+tool slots are owned by
+[`07-jig-tool-quickselect.md`](07-jig-tool-quickselect.md); this section
+describes only how they behave inside the operational contract.
+
 The Tools screen is the structured local registry for jigs, pickup tools,
 panels, and future tool kinds. Operators can create and edit all fields and set
 `active`, `flagged`, or `blacklisted`; admins can explicitly delete an entry.
@@ -242,7 +264,8 @@ property names.
 
 The worker immediately re-evaluates the current component, tool, glue, expiry,
 pot-life and property state and compares it with the immutable preview snapshot.
-The real submitter then applies ADR 003 before constructing an authenticated
+The real submitter then applies
+[ADR 003](adr/003-pdb-dummy-write-scope.md) before constructing an authenticated
 client: **both** participants must be itkFlow-registered DUMMY components and
 both must be in the invariant `MODULE|HYBRID` allowlist as well as the configured
 registrable list. Sensors and ASICs are never eligible. The payload uses

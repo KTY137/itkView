@@ -5,7 +5,18 @@
 > betreiben kann. Die ITk PDB bleibt Source of Truth; itkFlow ist das Cockpit davor.
 
 > Dieses Dokument ist die Produktvision. Der aktive Ausführungsfahrplan für
-> Agenten und Meilensteine steht in `docs/04-roadmap.md`.
+> Agenten und Meilensteine steht in [`04-roadmap.md`](04-roadmap.md).
+>
+> - **Besitzt:** Leitprinzipien, Zielarchitektur, lokales Datenmodell, den
+>   Phasenschnitt 0–6 und den Deployment-Grundschnitt. Hier steht das
+>   **Geplante** — der Ist-Zustand steht in der Roadmap und den Fachdokumenten.
+> - **Für wen:** alle, die eine Architekturentscheidung treffen oder einordnen
+>   wollen, warum itkFlow so geschnitten ist.
+> - **Verwandt:** [`01-ist-analyse-zeuthenflow.md`](01-ist-analyse-zeuthenflow.md)
+>   (das abzulösende System), [`04-roadmap.md`](04-roadmap.md) (Ausführung und
+>   „Aktueller Stand"), [`09-pdb-production-strategy.md`](09-pdb-production-strategy.md)
+>   (PDB-Sicherheitsmodell), [`adr/`](adr) (Einzelentscheidungen),
+>   [`README.md`](README.md) (Lesepfade).
 
 ## 0. Leitprinzipien
 
@@ -108,7 +119,8 @@ Touch-Targets fürs Labor, Tastatur-Navigation, Offline-Puffer der Formulare (PW
 Instituts-Profil-Modell, PDB-Gateway mit fail-closed Produktions-Opt-in und
 persoenlichem Credential-Handling. Es gibt keine PDB-Testinstanz mehr; Dev/CI
 bleiben offline, markierte Integrationslaeufe nutzen Produktion read-only oder
-DUMMY-gescoped (docs/09, ADR 003/004).
+DUMMY-gescoped ([docs/09](09-pdb-production-strategy.md),
+[ADR 003](adr/003-pdb-dummy-write-scope.md)/[004](adr/004-personal-pdb-credentials.md)).
 
 **Phase 1 — Read-Only-Cockpit:** Sync-Service (Komponenten/Tests/Shipments des Instituts),
 Komponenten-Browser + Detailseite + Familienbaum, Dashboards. *Ersetzt: OverviewMaker,

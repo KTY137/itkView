@@ -36,8 +36,8 @@ niemals (keine Dummy-SN-Vergabe).
 - Die Worker-/Outbox-Architektur aus ADR 002 bleibt unverändert; nur die
   Submitter-Vorbedingungen wurden verschärft (Scope-Check vor Client-Aufbau,
   Ablehnung als fachliche Rejection ohne Retry).
-- Harte Regel #2 in CLAUDE.md wurde neu gefasst; Details in
-  `docs/09-pdb-production-strategy.md`.
+- Harte Regel #2 in [`CLAUDE.md`](../../CLAUDE.md) wurde neu gefasst; Details in
+  [`docs/09-pdb-production-strategy.md`](../09-pdb-production-strategy.md).
 - Der Sync darf produktive Daten lesen; damit läuft das komplette lokale
   Cockpit (Board/Detail/Stage-Engine) erstmals mit echten Instituts-Daten.
 - `assemble_component` wird zuerst lokal als servervalidierter Outbox-Draft
@@ -52,5 +52,6 @@ Endnutzer-Artefakte (Desktop-Bundle, Compose) setzen die beiden
 Read-Opt-ins ab Werk — Owner-Entscheidung, damit kein Institut Env-Variablen
 nachkonfigurieren muss. Alle uebrigen Schichten dieses ADRs (persoenliche
 Credentials als Traffic-Gate, `dummy_only`-Write-Scope, keine
-Produktions-Writes) bleiben unveraendert. Details: docs/09, Abschnitt
-„Offline-Default und Reads ab Werk".
+Produktions-Writes) bleiben unveraendert. Details:
+[docs/09](../09-pdb-production-strategy.md), Abschnitt „Offline-Default und
+Reads ab Werk".

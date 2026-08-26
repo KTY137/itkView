@@ -4,6 +4,20 @@
 > Kontext: ATLAS ITk Strip-Modul-Produktion. Die zentrale Wahrheit liegt in der
 > **ITk Production Database (PDB)** am CERN; zeuthenFlow orchestriert lokal die Dateneingabe,
 > Registrierung, Assemblierung, Test-Uploads und Übersichten — über Google Sheets.
+>
+> - **Besitzt:** die Analyse des abzulösenden Alt-Workflows (Sheet, CERNBox,
+>   zFlow-Cron) samt Baustein-Inventar und Kern-Schmerzen. Historisch: der Text
+>   beschreibt den Ausgangszustand, nicht itkFlow.
+> - **Für wen:** alle, die verstehen wollen, welches Problem ein Feature löst,
+>   und alle, die Alt-Verhalten nachbauen oder migrieren.
+> - **Verwandt:** [`02-revamp-plan.md`](02-revamp-plan.md) (die Ablösung),
+>   [`10-itk-domain-reference.md`](10-itk-domain-reference.md) (dieselbe Domäne
+>   ohne Sheet-Perspektive),
+>   [`superpowers/research/2026-08-26-zflow-sheet-transcription.md`](superpowers/research/2026-08-26-zflow-sheet-transcription.md)
+>   (die wörtliche Abschrift der Blätter), [`README.md`](README.md) (Lesepfade).
+>
+> **Achtung:** `references/zeuthenflow` wird nur gelesen, niemals ausgeführt oder
+> importiert (harte Regel 1 in [`../CLAUDE.md`](../CLAUDE.md)).
 
 ## 1. Der heutige Datenfluss (die "Triage")
 
