@@ -20,6 +20,12 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 
 - Monorepo steht mit `backend/`, `frontend/`, `agent/`, `deploy/`, CI- und
   Docker-Grundstruktur.
+- **Evidence-Umfang erweitert (2026-08-26):** Der Sweep deckt jetzt alle
+  Baugruppentypen mit echten Testlaeufen ab (Module, Sensoren, Hybride,
+  Flexes, Powerboard-Flex, HV-Tab-Sheets — per PDB-Stichprobe bestimmt) und
+  beruecksichtigt auch Komponenten, die **hier stehen, aber anderen
+  Instituten gehoeren** (bei TUDO die Mehrheit). Chips (ABC/HCC/AMAC) bleiben
+  optional. Details docs/09.
 - **Messwert-Statistik auf der Statistics-Seite (2026-08-26):** Neue Endpunkte
   `GET /api/stats/measurements/dimensions` und `GET /api/stats/measurements`
   (`app/measurement_stats.py`) aggregieren die gespiegelten Testlauf-Messwerte
@@ -53,6 +59,30 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   App-Fenster verwarf die komplette Arbeit (real: 29/262 Komponenten, danach
   `test_run_evidence` = 0 Zeilen → alle Pflichttests „missing"). Jetzt
   committet jede Komponente einzeln. Details docs/09.
+- **Sync ueberlebt kurze Internet-Ausfaelle (2026-08-26):** Drei Luecken
+  machten aus einer Funkloch-Minute dauerhaften Verlust. (1)
+  Attachment-Downloads hatten gar keinen Retry — ein realer Sweep endete mit
+  `attachments_failed=11` von 363. Transiente Fehler (DNS, Connection Reset,
+  TLS-Handshake-Timeout, 408/425/429, 5xx) werden jetzt mit exponentiellem
+  Backoff bis `ITKFLOW_SYNC_PAGE_MAX_ATTEMPTS` wiederholt, permanente (4xx,
+  HTML-Fehlerseite, zu grosser Body) scheitern sofort; ein Fehlschlag wird nie
+  als gespeichert vermerkt und deshalb im naechsten Sweep automatisch
+  nachgeholt. (2) Ein transient gescheiterter Sync-Job blieb bis zum
+  Menschen-Klick liegen — er plant jetzt **genau einen** automatischen
+  Wiederholungslauf nach 60 s; die Obergrenze steckt im dauerhaften
+  `requested_by`-Marker „automatic retry (…)", sodass die Kette auch ueber
+  Neustarts hinweg bei Original + ein Retry endet. Der Retry laeuft durch die
+  normale Lease-Akquise und konvergiert auf einen bereits vorhandenen Job;
+  nicht-transiente Fehler (Credentials, Bugs) bekommen keinen. (3) Eine
+  Zombie-Lease nach Crash-plus-Sofortneustart blockierte den Single-Flight
+  dauerhaft, weil Startup-Recovery ihren frischen Heartbeat sah; die
+  Lease-Akquise uebernimmt sie jetzt nach derselben Drei-Minuten-Regel.
+  Zusaetzlich schreiben Evidence-Retry und Download-Phase Heartbeats, damit
+  eine lange Retry-Leiter nicht als verwaist gilt. Nebenbefund und mitgefixt:
+  oeffentliche CERNBox-/Sync&Share-Attachments (Visual Inspection) wurden nie
+  gespiegelt, weil der Mirror die HTML-Betrachterseite statt der Datei anfragte
+  — jetzt ueber `remote.php/dav/public-files/<token>` bzw. `/s/<token>/download`.
+  Details docs/09.
 - **Sync: inkrementeller Evidence-Sweep + konfigurierbares Retry-Budget
   (2026-08-26):** Der Institutssweep vergleicht pro Testlauf einen
   Flat-Fingerprint gegen den Mirror und holt `getTestRun`-Detail nur noch fuer

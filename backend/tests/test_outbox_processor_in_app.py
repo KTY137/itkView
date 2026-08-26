@@ -5,7 +5,6 @@ not. Without an in-process drain a reviewed action reaches `submitted` and then
 sits there forever — the PDB write silently never happens (docs/11).
 """
 
-import pytest
 
 from app import desktop_server
 from app.config import Settings

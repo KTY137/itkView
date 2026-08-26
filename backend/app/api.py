@@ -29,7 +29,6 @@ from app.auth import (
     verify_password,
 )
 from app.config import ProductionAccessError, Settings
-from app.measurement_stats import measurement_dimensions, measurement_series
 from app.domain.glue import pot_life_state
 from app.domain.stages import DEFAULT_STAGE_ORDER
 from app.ingestion import ParsedTestRun, missing_required_properties, parse_payload
@@ -37,6 +36,7 @@ from app.institute_settings import (
     InstituteSettingsValidationError,
     normalize_institute_settings_update,
 )
+from app.measurement_stats import measurement_dimensions, measurement_series
 from app.models import (
     AuditEvent,
     Component,

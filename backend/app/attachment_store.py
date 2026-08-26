@@ -21,6 +21,7 @@ never recorded as stored, so the next sweep simply tries it again.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from contextlib import closing
@@ -37,6 +38,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import TestRunAttachment, TestRunEvidence, utcnow
+
+log = logging.getLogger(__name__)
 
 DEFAULT_ATTACHMENT_DIRNAME = "attachments"
 DEFAULT_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024
@@ -446,19 +449,32 @@ def _response_content_type(response: Any) -> str | None:
 def _share_link_candidates(url: str) -> list[str]:
     """URLs to try for one public share link, most direct first.
 
-    CERNBox/ownCloud-family shares render an HTML viewer page at the plain
-    ``/s/<token>`` URL; the raw file lives behind its ``/download`` route.
-    (Observed live: every VISUAL_INSPECTION share attachment failed because
-    only the page was requested and its HTML was — rightly — refused.)
+    ownCloud/Reva-family shares (CERNBox, DESY syncandshare, …) render an
+    HTML viewer page at the plain ``/s/<token>`` URL — verified live: it
+    answers 200 ``text/html`` while the file itself sits behind two stable
+    routes. Preferred is ``remote.php/dav/public-files/<token>`` (it also
+    reports a content length), then ``/s/<token>/download``; the original URL
+    stays as the last resort for providers that do serve bytes directly.
+    ``/index.php/s/<token>/download`` is deliberately never generated — that
+    form failed name resolution during the live validation.
+
+    The pattern is recognised by URL *shape* (a ``/s/<token>`` path), not by
+    host name: this is a share-provider convention, not an institute detail.
     """
-    candidates = [url]
     parsed = urlsplit(url)
     path = parsed.path.rstrip("/")
-    if not path.endswith("/download") and "/download/" not in path:
-        candidates.append(
-            urlunsplit((parsed.scheme, parsed.netloc, f"{path}/download", parsed.query, ""))
-        )
-    return candidates
+    if path.endswith("/download") or "/download/" in path:
+        return [url]
+    segments = [segment for segment in path.split("/") if segment]
+    if len(segments) >= 2 and segments[-2] == "s":
+        token = segments[-1]
+        base = (parsed.scheme, parsed.netloc)
+        return [
+            urlunsplit((*base, f"/remote.php/dav/public-files/{token}", "", "")),
+            urlunsplit((*base, f"/s/{token}/download", "", "")),
+            url,
+        ]
+    return [url]
 
 
 def _fetch_share_link(
@@ -468,12 +484,13 @@ def _fetch_share_link(
     if not isinstance(url, str) or not _safe_http_url(url):
         return None
     transient_seen = False
+    html_seen = False
     for candidate in _share_link_candidates(url):
         if not _safe_http_url(candidate):
             continue
         try:
             with closing(_open_public_url(candidate, timeout)) as response:
-                final_url = getattr(response, "geturl", lambda: candidate)()
+                final_url = getattr(response, "geturl", lambda u=candidate: u)()
                 if not isinstance(final_url, str) or not _safe_http_url(final_url):
                     continue
                 data = response.read(max_bytes + 1)
@@ -487,12 +504,24 @@ def _fetch_share_link(
             continue
         payload = bytes(data)
         if content_type and content_type.lower() in {"text/html", "application/xhtml+xml"}:
-            # The share page, not the file — try the download route next.
+            # The share's viewer page, not the file — try the next route.
+            html_seen = True
+            continue
+        if looks_like_html(payload):
+            html_seen = True
             continue
         if _valid_payload(payload, max_bytes):
             return payload, content_type
     if transient_seen:
         raise _TransientDownloadFailure("share-link download failed with a transient error")
+    if html_seen:
+        # Storing the page would fake a mirrored attachment that renders as a
+        # broken image. Log the code (never the URL) so the miss is visible.
+        log.warning(
+            "Share-link attachment %s only served HTML pages; the share may be "
+            "expired or require sign-in. Nothing was stored.",
+            descriptor.get("code"),
+        )
     return None
 
 
