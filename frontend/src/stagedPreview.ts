@@ -26,5 +26,21 @@ export function writeStagedPreviewPreference(mode: StagedPreviewMode): void {
   } catch {
     // Storage can be unavailable in hardened/private browser contexts.
   }
+  // Same-tab subscribers (the module page) must see the change immediately:
+  // `storage` events only fire in OTHER tabs, so without this the preference
+  // applied only after a full reload.
+  for (const listener of [...listeners]) listener(mode);
+}
+
+type PreferenceListener = (mode: StagedPreviewMode) => void;
+
+const listeners = new Set<PreferenceListener>();
+
+/** Live preference feed for the current tab; returns the unsubscribe. */
+export function subscribeStagedPreviewPreference(listener: PreferenceListener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
 

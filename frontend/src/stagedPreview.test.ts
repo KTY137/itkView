@@ -30,3 +30,21 @@ describe("staged preview preference storage", () => {
     expect(() => writeStagedPreviewPreference("off")).not.toThrow();
   });
 });
+
+describe("live preference propagation", () => {
+  it("notifies same-tab subscribers on write, and stops after unsubscribe", async () => {
+    const { subscribeStagedPreviewPreference, writeStagedPreviewPreference } = await import(
+      "./stagedPreview"
+    );
+    const seen: string[] = [];
+    const unsubscribe = subscribeStagedPreviewPreference((mode) => seen.push(mode));
+
+    writeStagedPreviewPreference("inline");
+    writeStagedPreviewPreference("tabs");
+    expect(seen).toEqual(["inline", "tabs"]);
+
+    unsubscribe();
+    writeStagedPreviewPreference("off");
+    expect(seen).toEqual(["inline", "tabs"]);
+  });
+});

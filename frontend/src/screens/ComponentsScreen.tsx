@@ -48,7 +48,10 @@ import {
   discardStagedAction,
   pushToPdb,
 } from "../stagedActions";
-import { readStagedPreviewPreference } from "../stagedPreview";
+import {
+  readStagedPreviewPreference,
+  subscribeStagedPreviewPreference,
+} from "../stagedPreview";
 import type { StagedPreviewMode } from "../stagedPreview";
 import { describeComponent, roleLabel, stageChipClass, stageLabel } from "../ui";
 import RegisterModuleForm from "./RegisterModuleForm";
@@ -740,7 +743,13 @@ function ComponentDetailPanel({
   const [suggestion, setSuggestion] = useState<StageSuggestion | null>(null);
   const [evidenceSyncing, setEvidenceSyncing] = useState(false);
   const [evidenceNotice, setEvidenceNotice] = useState<string | null>(null);
-  const [previewMode] = useState<StagedPreviewMode>(() => readStagedPreviewPreference());
+  const [previewMode, setPreviewMode] = useState<StagedPreviewMode>(() =>
+    readStagedPreviewPreference(),
+  );
+  // Follow the Account-screen preference live: without this the module page
+  // kept the mode it was mounted with until a full reload, which read as
+  // "the staged tab disappeared".
+  useEffect(() => subscribeStagedPreviewPreference(setPreviewMode), []);
   const [preview, setPreview] = useState<ComponentPreview | null>(null);
   const [previewOutbox, setPreviewOutbox] = useState<OutboxAction[]>([]);
   const [previewLoading, setPreviewLoading] = useState(true);

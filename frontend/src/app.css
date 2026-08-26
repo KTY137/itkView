@@ -3143,3 +3143,69 @@ code {
     flex-direction: column;
   }
 }
+
+/* --- Measurement charts (Statistics) ------------------------------------ */
+/* One recessive hue for the run population; failed runs use the reserved
+   critical hue plus a dashed stroke so identity never rides on colour alone. */
+.curve-wrap {
+  overflow-x: auto;
+}
+.curve-chart {
+  width: 100%;
+  max-width: 760px;
+  height: auto;
+  display: block;
+}
+.curve-grid line,
+.curve-grid rect {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.curve-line {
+  fill: none;
+  stroke: var(--series);
+  stroke-width: 2;
+  stroke-opacity: 0.45;
+  stroke-linejoin: round;
+}
+.curve-line.failed {
+  stroke: var(--crit);
+  stroke-opacity: 0.75;
+  stroke-dasharray: 6 4;
+}
+.curve-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 9;
+}
+g:hover > .curve-line {
+  stroke-opacity: 1;
+  stroke-width: 2.5;
+}
+.curve-legend {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin: 4px 0 8px;
+  color: var(--ink2);
+  font-size: 12px;
+}
+.curve-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.curve-count {
+  margin-left: auto;
+  color: var(--muted);
+}
+.curve-axis text {
+  fill: var(--muted);
+  font-size: 11px;
+  font-family: var(--mono);
+}
+.curve-axis .curve-axis-name {
+  fill: var(--ink2);
+  font-family: var(--sans);
+}

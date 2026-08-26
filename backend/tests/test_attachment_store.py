@@ -480,6 +480,320 @@ def test_share_link_refuses_local_or_credential_bearing_urls(
     assert called is False
 
 
+# --- transient-vs-permanent download failures -------------------------------
+#
+# A real institute sweep finished with attachments_failed=11 of 363 during a
+# short home-connection outage: every network hiccup used to count as a final
+# failure for this sweep. A transient error must now be retried with backoff
+# (bounded by settings.sync_page_max_attempts, the shared budget), while a
+# permanent answer (404, HTML page, oversized) must fail immediately.
+
+
+class _FlakyClient:
+    """Raises for the first N `get` calls, then serves the JPEG."""
+
+    def __init__(self, failures: int, make_error=None):
+        self._failures = failures
+        self._make_error = make_error or (
+            lambda: ConnectionResetError("Connection reset by peer")
+        )
+        self.calls = 0
+
+    def get(self, action, json=None):
+        self.calls += 1
+        if self.calls <= self._failures:
+            raise self._make_error()
+
+        class _BinaryFile:
+            content = JPEG
+            mimetype = "image/jpeg"
+
+        return _BinaryFile()
+
+
+class _HttpStatusError(RuntimeError):
+    """Shape of an itkdb ResponseException: carries a requests-like response."""
+
+    def __init__(self, status: int):
+        super().__init__(f"HTTP {status}")
+
+        class _Response:
+            status_code = status
+
+        self.response = _Response()
+
+
+@pytest.fixture()
+def no_sleep(monkeypatch):
+    naps: list[float] = []
+    monkeypatch.setattr(attachment_store, "sleep", naps.append)
+    return naps
+
+
+def test_transient_network_error_is_retried_then_succeeds(
+    session, settings, evidence, no_sleep
+):
+    client = _FlakyClient(failures=2)
+    stats = download_attachments(session, _FakeGateway(client), settings, "20USEM20000041")
+    session.commit()
+
+    # Attempt 1 tries both routes (2 calls), backs off, attempt 2 succeeds.
+    assert stats.downloaded == 1 and stats.failed == 0
+    assert client.calls == 3
+    assert no_sleep == [0.5]
+    row = session.scalar(select(TestRunAttachment))
+    assert resolve_path(settings, row).read_bytes() == JPEG
+
+
+def test_transient_retry_budget_follows_the_shared_setting(
+    session, evidence, no_sleep, tmp_path
+):
+    settings = Settings(
+        database_url="sqlite:///:memory:",
+        attachment_dir=str(tmp_path / "attachments"),
+        sync_page_max_attempts=2,
+        _env_file=None,
+    )
+    client = _FlakyClient(failures=99, make_error=lambda: TimeoutError("timed out"))
+
+    stats = download_attachments(session, _FakeGateway(client), settings, "20USEM20000041")
+    session.commit()
+
+    assert stats.failed == 1 and stats.downloaded == 0
+    # Two attempts of two routes each, one backoff between them — then honest failure.
+    assert client.calls == 4
+    assert no_sleep == [0.5]
+    assert resolve_path(settings, session.scalar(select(TestRunAttachment))) is None
+
+
+def test_a_permanent_http_answer_is_not_retried(session, settings, evidence, no_sleep):
+    client = _FlakyClient(failures=99, make_error=lambda: _HttpStatusError(404))
+
+    stats = download_attachments(session, _FakeGateway(client), settings, "20USEM20000041")
+    session.commit()
+
+    assert stats.failed == 1
+    # Each route is tried once (the fallback exists for exactly this case);
+    # a 404 will not turn into a file by waiting, so there is no backoff.
+    assert client.calls == 2
+    assert no_sleep == []
+
+
+def test_a_server_error_answer_is_retried(session, settings, evidence, no_sleep):
+    client = _FlakyClient(failures=2, make_error=lambda: _HttpStatusError(503))
+
+    stats = download_attachments(session, _FakeGateway(client), settings, "20USEM20000041")
+    session.commit()
+
+    assert stats.downloaded == 1
+    assert client.calls == 3
+    assert no_sleep == [0.5]
+
+
+def test_an_html_answer_is_permanent_and_not_retried(session, settings, evidence, no_sleep):
+    client = _RoutingClient(
+        {
+            "getTestRunAttachment": (HTML_ERROR_PAGE, "text/html"),
+            "uu-app-binarystore/getBinaryData": (HTML_ERROR_PAGE, "text/html"),
+        }
+    )
+    stats = download_attachments(session, _FakeGateway(client), settings, "20USEM20000041")
+
+    assert stats.failed == 1
+    assert client.calls == ["getTestRunAttachment", "uu-app-binarystore/getBinaryData"]
+    assert no_sleep == []
+
+
+def test_a_failed_attachment_is_retried_on_the_next_sweep(
+    session, settings, evidence, no_sleep
+):
+    """A failure must never be recorded as stored; the next sweep tries again."""
+    outage = _FlakyClient(failures=99)
+    first = download_attachments(session, _FakeGateway(outage), settings, "20USEM20000041")
+    session.commit()
+    assert first.failed == 1
+    row = session.scalar(select(TestRunAttachment))
+    assert row is not None and resolve_path(settings, row) is None
+
+    second = download_attachments(session, _FakeGateway(_FakeClient()), settings, "20USEM20000041")
+    session.commit()
+
+    assert second.downloaded == 1 and second.reused == 0 and second.failed == 0
+    assert resolve_path(settings, session.scalar(select(TestRunAttachment))) is not None
+
+
+def test_transient_client_construction_is_retried(session, settings, evidence, no_sleep):
+    class _FlakyGateway:
+        is_configured = True
+
+        def __init__(self):
+            self.client_calls = 0
+            self._client = _FakeClient()
+
+        def client(self):
+            self.client_calls += 1
+            if self.client_calls == 1:
+                raise ConnectionResetError("Connection reset by peer")
+            return self._client
+
+    gateway = _FlakyGateway()
+    stats = download_attachments(session, gateway, settings, "20USEM20000041")
+    session.commit()
+
+    assert stats.downloaded == 1
+    assert gateway.client_calls == 2
+    assert no_sleep == [0.5]
+
+
+def test_exhausted_client_construction_fails_remaining_files_fast(
+    session, settings, evidence, no_sleep
+):
+    """Without a client every PDB descriptor fails identically; hammering the
+    gateway once per file only stretches the outage. The next sweep retries."""
+    row = session.scalar(select(TestRunEvidence).where(TestRunEvidence.external_ref == "RUN-1"))
+    row.payload = {
+        "attachments": [
+            {"code": "c" * 8, "filename": "a.jpg", "content_type": "image/jpeg", "title": None},
+            {"code": "d" * 8, "filename": "b.jpg", "content_type": "image/jpeg", "title": None},
+        ]
+    }
+    session.commit()
+
+    class _DownGateway:
+        is_configured = True
+
+        def __init__(self):
+            self.client_calls = 0
+
+        def client(self):
+            self.client_calls += 1
+            raise ConnectionResetError("Connection reset by peer")
+
+    gateway = _DownGateway()
+    stats = download_attachments(session, gateway, settings, "20USEM20000041")
+    session.commit()
+
+    assert stats.failed == 2
+    # Bounded by the retry budget once, not once per attachment.
+    assert gateway.client_calls == 3
+    assert no_sleep == [0.5, 1.0]
+
+
+def test_share_link_server_error_is_retried_and_client_error_is_not(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    from urllib.error import HTTPError
+
+    url = "https://cernbox.cern.ch/s/public/photo.jpg"
+    opens: list[str] = []
+    answers = [
+        HTTPError(url, 503, "Service Unavailable", None, None),
+        _PublicResponse(url, JPEG),
+    ]
+
+    def open_url(requested, timeout):
+        opens.append(requested)
+        answer = answers[min(len(opens), len(answers)) - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(attachment_store, "_open_public_url", open_url)
+    _set_attachment_descriptor(
+        session,
+        evidence,
+        {"code": "e" * 64, "type": "share_link", "source": "share_link", "url": url},
+    )
+    stats = download_attachments(session, _FakeGateway(configured=False), settings, "20USEM20000041")
+    session.commit()
+    assert stats.downloaded == 1
+    assert len(opens) == 2
+    assert no_sleep == [0.5]
+
+    # A 404 is the share answering "this does not exist" — retrying is noise.
+    opens.clear()
+    no_sleep.clear()
+    answers[:] = [HTTPError(url, 404, "Not Found", None, None)]
+    _set_attachment_descriptor(
+        session,
+        evidence,
+        {"code": "f" * 64, "type": "share_link", "source": "share_link", "url": url},
+    )
+    stats = download_attachments(session, _FakeGateway(configured=False), settings, "20USEM20000041")
+    assert stats.failed == 1
+    assert len(opens) == 1
+    assert no_sleep == []
+
+
+def test_download_heartbeat_fires_per_file_and_per_retry(
+    session, settings, evidence, no_sleep
+):
+    """A slow attachment phase must keep the durable job heartbeat fresh:
+    three 60s attempts plus backoff exceed the 3-minute startup-recovery grace."""
+    beats: list[int] = []
+    client = _FlakyClient(failures=2)
+
+    download_attachments(
+        session,
+        _FakeGateway(client),
+        settings,
+        "20USEM20000041",
+        heartbeat=lambda: beats.append(1),
+    )
+
+    # Once before the retry backoff, once when the file is done.
+    assert len(beats) == 2
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        # DNS never resolving is an outage, not an answer.
+        (__import__("socket").gaierror(-2, "Name or service not known"), True),
+        (__import__("socket").gaierror(11001, "getaddrinfo failed"), True),
+        (ConnectionResetError(104, "Connection reset by peer"), True),
+        (ConnectionRefusedError(111, "Connection refused"), True),
+        (TimeoutError("timed out"), True),
+        (__import__("ssl").SSLError("The handshake operation timed out"), True),
+        (_HttpStatusError(502), True),
+        (_HttpStatusError(503), True),
+        (_HttpStatusError(504), True),
+        (_HttpStatusError(408), True),
+        (_HttpStatusError(429), True),
+        # 4xx means the request itself is wrong or the file is gone.
+        (_HttpStatusError(400), False),
+        (_HttpStatusError(403), False),
+        (_HttpStatusError(404), False),
+        (RuntimeError("PDB said no"), False),
+        (ValueError("bad descriptor"), False),
+    ],
+)
+def test_transient_download_classification(error, expected):
+    assert attachment_store.is_transient_download_error(error) is expected
+
+
+def test_transient_download_classification_walks_the_cause_chain():
+    try:
+        try:
+            raise TimeoutError("timed out")
+        except TimeoutError as inner:
+            raise RuntimeError("itkdb wrapped it") from inner
+    except RuntimeError as wrapped:
+        assert attachment_store.is_transient_download_error(wrapped) is True
+
+
+def test_urllib_http_errors_classify_by_status():
+    from urllib.error import HTTPError
+
+    url = "https://cernbox.cern.ch/s/public/x"
+    assert attachment_store.is_transient_download_error(
+        HTTPError(url, 503, "Service Unavailable", None, None)
+    )
+    assert not attachment_store.is_transient_download_error(
+        HTTPError(url, 404, "Not Found", None, None)
+    )
+
+
 class _EosClient:
     def __init__(self):
         self.detail_calls = 0

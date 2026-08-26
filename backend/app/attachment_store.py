@@ -12,16 +12,22 @@ plus an extension taken from an allowlist. The original name is kept in the
 database for display only.
 
 Downloading is idempotent: an attachment whose file is already present is not
-fetched again.
+fetched again. A *transient* network failure (DNS outage, connection reset,
+timeout, HTTP 5xx) is retried with exponential backoff up to the shared
+``sync_page_max_attempts`` budget; a *permanent* answer (4xx, an HTML error
+page, an oversized body) fails immediately. Either way a failed attachment is
+never recorded as stored, so the next sweep simply tries it again.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from ipaddress import ip_address
 from pathlib import Path
+from time import sleep
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
@@ -36,6 +42,11 @@ DEFAULT_ATTACHMENT_DIRNAME = "attachments"
 DEFAULT_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024
 DEFAULT_ATTACHMENT_DOWNLOAD_TIMEOUT_SECONDS = 60
 EOS_DOWNLOAD_HOST = "eosatlas.cern.ch"
+# Fallback when the settings object carries no shared page-retry budget.
+DEFAULT_DOWNLOAD_MAX_ATTEMPTS = 3
+# Backoff base between transient download attempts; doubles per attempt.
+# Deliberately the same shape as the evidence fetch retry in app.sync_jobs.
+DOWNLOAD_RETRY_BACKOFF_SECONDS = 0.5
 
 # Extensions itkFlow is willing to write. Anything else is stored without one:
 # the content type in the database still drives how it is served, and an
@@ -274,6 +285,114 @@ def _valid_payload(data: bytes | None, max_bytes: int) -> bool:
     return bool(data) and len(data) <= max_bytes and not looks_like_html(data)
 
 
+class _TransientDownloadFailure(RuntimeError):
+    """Marker: this fetch failed in a way a later attempt may fix.
+
+    Deliberately carries no upstream text. itkdb exceptions can embed a
+    rendered request (credentials) and urllib errors can embed the complete
+    share URL; neither may reach a log or a durable row through this path.
+    """
+
+
+class _PdbClientUnavailable(RuntimeError):
+    """Marker: no authenticated PDB client can be built for this sweep."""
+
+
+# HTTP statuses worth retrying: request timeout, too-early, rate limit, 5xx.
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429})
+
+# Exception type names that mean transport trouble, not a data answer. itkdb
+# wraps requests/urllib3 errors differently between releases, so the chain is
+# matched by name instead of importing every optional dependency.
+_TRANSIENT_ERROR_TYPE_MARKERS = (
+    "timeout",
+    "connectionerror",
+    "proxyerror",
+    "sslerror",
+    "ssleoferror",
+    "chunkedencodingerror",
+    "protocolerror",
+    "nameresolutionerror",
+    "newconnectionerror",
+    "maxretryerror",
+    "gaierror",
+    "herror",
+    "remotedisconnected",
+    "incompleteread",
+)
+
+_TRANSIENT_ERROR_DETAIL_MARKERS = (
+    "timed out",
+    "timeout",
+    "name resolution",
+    "name or service not known",
+    "nodename nor servname",
+    "getaddrinfo",
+    "remote end closed",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "max retries exceeded",
+    "temporary failure",
+    "temporarily unavailable",
+    "incomplete read",
+    "handshake operation timed out",
+)
+
+
+def _http_status_of(error: BaseException) -> int | None:
+    """Best-effort HTTP status from one exception object.
+
+    Covers the shapes seen in this codebase: itkdb ``ResponseException``
+    (``.response.status_code``), plain requests errors (``.status_code``) and
+    urllib ``HTTPError`` (``.code``/``.status``).
+    """
+    response = getattr(error, "response", None)
+    for candidate in (
+        getattr(response, "status_code", None),
+        getattr(error, "status_code", None),
+        getattr(error, "code", None),
+        getattr(error, "status", None),
+    ):
+        if isinstance(candidate, int) and 100 <= candidate < 600:
+            return candidate
+    return None
+
+
+def is_transient_download_error(error: BaseException) -> bool:
+    """Return whether a download failure is safe and useful to retry.
+
+    An HTTP status decides first: 408/425/429 and 5xx are retried, any other
+    4xx (404, 403, …) is a final answer. Without a status, DNS failures,
+    connection resets, TLS handshake timeouts and friends count as transient.
+    The cause/context chain is walked because itkdb and urllib both wrap the
+    underlying socket errors.
+    """
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status = _http_status_of(current)
+        if status is not None:
+            return status in _TRANSIENT_HTTP_STATUSES or 500 <= status < 600
+
+        name = type(current).__name__.lower()
+        detail = str(current).lower()
+        if (
+            isinstance(current, (TimeoutError, ConnectionError))
+            or any(marker in name for marker in _TRANSIENT_ERROR_TYPE_MARKERS)
+            or any(marker in detail for marker in _TRANSIENT_ERROR_DETAIL_MARKERS)
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _raise_if_transient(error: Exception, what: str) -> None:
+    if is_transient_download_error(error):
+        raise _TransientDownloadFailure(f"{what} failed with a transient error") from None
+
+
 def _safe_http_url(url: str, *, eos: bool = False) -> bool:
     """Reject credential-bearing and obviously local URLs before any request."""
 
@@ -337,9 +456,10 @@ def _fetch_share_link(
                 return None
             data = response.read(max_bytes + 1)
             content_type = _response_content_type(response)
-    except Exception:
+    except Exception as exc:
         # Every descriptor is best effort. Do not stringify network failures:
         # redirect/error objects can contain the complete share URL.
+        _raise_if_transient(exc, "share-link download")
         return None
     if not isinstance(data, (bytes, bytearray)):
         return None
@@ -358,7 +478,8 @@ def _fresh_eos_url(client: Any, descriptor: dict[str, Any]) -> str | None:
             "getTestRun",
             json={"testRun": run_ref, "noEosToken": False},
         )
-    except Exception:
+    except Exception as exc:
+        _raise_if_transient(exc, "EOS URL refresh")
         return None
     if not isinstance(detail, dict):
         return None
@@ -386,7 +507,8 @@ def _fetch_eos_bytes(
         return None
     try:
         result = client.get(url)
-    except Exception:
+    except Exception as exc:
+        _raise_if_transient(exc, "EOS download")
         return None
     data = _as_bytes(result)
     if not _valid_payload(data, max_bytes):
@@ -414,15 +536,22 @@ def _fetch_pdb_bytes(
         )
     attempts.append(("uu-app-binarystore/getBinaryData", {"code": descriptor["code"]}))
 
+    transient_seen = False
     for action, request in attempts:
         try:
             result = client.get(action, json=request)
-        except Exception:
+        except Exception as exc:
+            # The fallback route may still answer, so keep going — but remember
+            # that the miss was network-shaped: if no route delivers, the whole
+            # fetch is worth retrying rather than a final "the file is broken".
+            transient_seen = transient_seen or is_transient_download_error(exc)
             continue
         data = _as_bytes(result)
         if not _valid_payload(data, max_bytes):
             continue
         return data, _reported_content_type(result)
+    if transient_seen:
+        raise _TransientDownloadFailure("attachment download failed with a transient error")
     return None
 
 
@@ -442,6 +571,24 @@ def _fetch_bytes(
     return _fetch_pdb_bytes(client, descriptor, max_bytes)
 
 
+def _open_pdb_client(gateway: Any) -> Any:
+    """Build the authenticated client, mapping failures to retryability."""
+    if not getattr(gateway, "is_configured", False):
+        raise _PdbClientUnavailable("no PDB gateway is configured")
+    try:
+        return gateway.client()
+    except Exception as exc:
+        # Authentication/JWKS traffic fails exactly like any other request
+        # during an outage; retrying it is what lets a sweep ride one out.
+        _raise_if_transient(exc, "PDB client construction")
+        raise _PdbClientUnavailable("the PDB client could not be built") from None
+
+
+def _beat(heartbeat: Callable[[], None] | None) -> None:
+    if heartbeat is not None:
+        heartbeat()
+
+
 def download_attachments(
     session: Session,
     gateway: Any,
@@ -449,11 +596,16 @@ def download_attachments(
     component_sn: str,
     *,
     force: bool = False,
+    heartbeat: Callable[[], None] | None = None,
 ) -> AttachmentSyncStats:
     """Mirror this component's attachment bytes to the local folder.
 
     Read-only against the PDB and best effort per attachment: one unavailable
-    file must not cost the others.
+    file must not cost the others. Transient network failures are retried with
+    exponential backoff up to the shared ``sync_page_max_attempts`` budget;
+    permanent answers fail once. ``heartbeat`` (if given) is invoked after
+    every processed file and before every retry backoff, so a durable job can
+    prove it is alive while a slow or flaky download is in progress.
     """
     descriptors = pending_attachments(session, component_sn)
     if not descriptors:
@@ -474,8 +626,17 @@ def download_attachments(
             )
         ),
     )
+    max_attempts = max(
+        1,
+        int(getattr(settings, "sync_page_max_attempts", DEFAULT_DOWNLOAD_MAX_ATTEMPTS)),
+    )
     downloaded = reused = failed = 0
     client = None
+    # Set once client construction has exhausted its own retry budget: every
+    # remaining PDB descriptor would fail identically, so fail them fast this
+    # sweep instead of hammering the gateway once per file. None of them is
+    # recorded as stored, so the next sweep retries them all.
+    client_unavailable = False
 
     for descriptor in descriptors:
         row = _upsert_row(
@@ -493,27 +654,42 @@ def download_attachments(
 
         if not force and resolve_path(settings, row) is not None:
             reused += 1
+            _beat(heartbeat)
             continue
 
         needs_pdb_client = descriptor["source"] != "share_link"
-        if needs_pdb_client and client is None:
-            if not getattr(gateway, "is_configured", False):
-                failed += 1
-                continue
-            try:
-                client = gateway.client()
-            except Exception:
-                failed += 1
-                continue
+        if needs_pdb_client and client is None and client_unavailable:
+            failed += 1
+            _beat(heartbeat)
+            continue
 
-        fetched = _fetch_bytes(
-            client,
-            descriptor,
-            timeout=timeout,
-            max_bytes=max_bytes,
-        )
+        fetched: tuple[bytes, str | None] | None = None
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                if needs_pdb_client and client is None:
+                    client = _open_pdb_client(gateway)
+                fetched = _fetch_bytes(
+                    client,
+                    descriptor,
+                    timeout=timeout,
+                    max_bytes=max_bytes,
+                )
+                break
+            except _PdbClientUnavailable:
+                break
+            except _TransientDownloadFailure:
+                if attempt >= max_attempts:
+                    break
+                _beat(heartbeat)
+                sleep(DOWNLOAD_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+        if needs_pdb_client and client is None:
+            client_unavailable = True
+
         if fetched is None:
             failed += 1
+            _beat(heartbeat)
             continue
         data, reported_type = fetched
 
@@ -531,11 +707,13 @@ def download_attachments(
             size = _write_bytes(root, relative_path, data)
         except (OSError, ValueError):
             failed += 1
+            _beat(heartbeat)
             continue
 
         row.relative_path = relative_path
         row.size_bytes = size
         row.downloaded_at = utcnow()
         downloaded += 1
+        _beat(heartbeat)
 
     return AttachmentSyncStats(downloaded=downloaded, reused=reused, failed=failed)

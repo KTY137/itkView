@@ -315,6 +315,53 @@ export type ProductionStats = {
   yield_: Yield;
 };
 
+export type MeasurementResultDimension = {
+  code: string;
+  name: string | null;
+  kind: "array" | "scalar";
+  runs: number;
+};
+
+export type MeasurementTestType = {
+  test_type: string;
+  results: MeasurementResultDimension[];
+};
+
+export type MeasurementDimensions = { test_types: MeasurementTestType[] };
+
+export type MeasurementCurve = {
+  component_sn: string;
+  local_name: string | null;
+  external_ref: string | null;
+  measured_at: string | null;
+  passed: boolean;
+  /** null when no matching x array exists — plot against the sample index. */
+  x: number[] | null;
+  y: number[];
+};
+
+export type MeasurementValue = {
+  component_sn: string;
+  local_name: string | null;
+  external_ref: string | null;
+  measured_at: string | null;
+  passed: boolean;
+  value: number;
+};
+
+export type MeasurementSeries = {
+  test_type: string;
+  result_code: string;
+  kind: "array" | "scalar";
+  result_name: string | null;
+  x_result: string | null;
+  x_name: string | null;
+  curves: MeasurementCurve[];
+  values: MeasurementValue[];
+  summary: Record<string, number> | null;
+  truncated: boolean;
+};
+
 export type StatsDimensions = {
   component_types: string[];
   type_codes: string[];
@@ -1074,6 +1121,24 @@ export function getProductionStats(
 
 export function getStatsDimensions(signal?: AbortSignal): Promise<StatsDimensions> {
   return request<StatsDimensions>("/api/stats/dimensions", { signal });
+}
+
+export function getMeasurementDimensions(
+  signal?: AbortSignal,
+): Promise<MeasurementDimensions> {
+  return request<MeasurementDimensions>("/api/stats/measurements/dimensions", { signal });
+}
+
+export function getMeasurementSeries(
+  query: { test_type: string; result: string; x_result?: string },
+  signal?: AbortSignal,
+): Promise<MeasurementSeries> {
+  const params = queryString({
+    test_type: query.test_type,
+    result: query.result,
+    x_result: query.x_result,
+  });
+  return request<MeasurementSeries>(`/api/stats/measurements${params}`, { signal });
 }
 
 export function getTools(query: ToolQuery = {}, signal?: AbortSignal): Promise<Tool[]> {

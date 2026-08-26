@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from datetime import timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
@@ -29,6 +29,7 @@ from app.auth import (
     verify_password,
 )
 from app.config import ProductionAccessError, Settings
+from app.measurement_stats import measurement_dimensions, measurement_series
 from app.domain.glue import pot_life_state
 from app.domain.stages import DEFAULT_STAGE_ORDER
 from app.ingestion import ParsedTestRun, missing_required_properties, parse_payload
@@ -119,6 +120,8 @@ from app.schemas import (
     InstituteOut,
     InstituteUpdate,
     LoginIn,
+    MeasurementDimensionsOut,
+    MeasurementSeriesOut,
     MeOut,
     NotificationChannelOut,
     NotificationTestIn,
@@ -2343,6 +2346,61 @@ def dashboard_summary(db: Session = Depends(get_db)) -> DashboardSummaryOut:
 # --------------------------------------------------------------------------
 # Statistics (throughput / cycle time / rework, from the stage-event history)
 # --------------------------------------------------------------------------
+
+
+@router.get(
+    "/api/stats/measurements/dimensions",
+    response_model=MeasurementDimensionsOut,
+    tags=["stats"],
+)
+def stats_measurement_dimensions(
+    institute: str | None = None, db: Session = Depends(get_db)
+) -> MeasurementDimensionsOut:
+    """Test types and result codes present in the mirrored evidence.
+
+    Discovered from the data (hard rule #4: which codes exist is never
+    hardcoded); the UI builds its measurement pickers from this.
+    """
+    return MeasurementDimensionsOut(
+        test_types=measurement_dimensions(db, institute_code=institute)
+    )
+
+
+@router.get("/api/stats/measurements", response_model=MeasurementSeriesOut, tags=["stats"])
+def stats_measurements(
+    test_type: str,
+    result: str,
+    x_result: str | None = None,
+    institute: str | None = None,
+    limit: int = Query(default=300, ge=1, le=1000),
+    db: Session = Depends(get_db),
+) -> MeasurementSeriesOut:
+    """One measurement series across the institute's mirrored runs.
+
+    Array results become overlaid curves (all IV curves in one chart, paired
+    against `x_result` when its array length matches); scalar results become a
+    distribution with summary statistics. Newest runs first, capped by `limit`.
+    """
+    series = measurement_series(
+        db,
+        test_type=test_type,
+        result_code=result,
+        x_result=x_result,
+        institute_code=institute,
+        limit=limit,
+    )
+    return MeasurementSeriesOut(
+        test_type=series.test_type,
+        result_code=series.result_code,
+        kind=series.kind,
+        result_name=series.result_name,
+        x_result=series.x_result,
+        x_name=series.x_name,
+        curves=[vars(curve) for curve in series.curves],
+        values=[vars(value) for value in series.values],
+        summary=series.summary,
+        truncated=series.truncated,
+    )
 
 
 @router.get("/api/stats/dimensions", response_model=StatsDimensionsOut, tags=["stats"])

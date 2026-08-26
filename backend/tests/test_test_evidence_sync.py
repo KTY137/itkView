@@ -348,3 +348,77 @@ def test_a_failed_detail_fetch_is_not_recorded_as_mirrored():
     assert records, "the runs themselves must still be mirrored"
     assert all(not r.payload.get("detail_synced") for r in records)
     assert all(not r.detail_omitted for r in records)
+
+
+def test_a_refless_run_never_clobbers_a_referenced_rows_detail(client, session_factory):
+    """The ref-less fallback matcher must only match ref-less rows.
+
+    A PDB run without an id (defensive-parsing artifact) used to grab an
+    arbitrary referenced row of the same test type and wipe its mirrored
+    detail (audit repro T3).
+    """
+    from datetime import datetime
+
+    from app.models import TestRunEvidence
+    from app.test_run_evidence import TestRunEvidenceRecord, upsert_test_run_evidence
+
+    detailed = TestRunEvidenceRecord(
+        component_sn="20USEM00000001",
+        test_type="MODULE_METROLOGY",
+        passed=True,
+        external_ref="RUN9",
+        measured_at=datetime(2026, 2, 8),
+        payload={"state": "ready", "problems": False, "results": {"BOW": 1}, "detail_synced": True},
+    )
+    refless = TestRunEvidenceRecord(
+        component_sn="20USEM00000001",
+        test_type="MODULE_METROLOGY",
+        passed=False,
+        external_ref=None,
+        measured_at=None,
+        payload={"state": "requestedToDelete", "problems": True},
+    )
+    with session_factory() as session:
+        upsert_test_run_evidence(session, [detailed])
+        session.commit()
+    with session_factory() as session:
+        upsert_test_run_evidence(session, [refless])
+        session.commit()
+
+    with session_factory() as session:
+        ref_row = session.scalar(
+            select(TestRunEvidence).where(TestRunEvidence.external_ref == "RUN9")
+        )
+        assert ref_row.passed is True
+        assert ref_row.payload.get("results") == {"BOW": 1}
+        refless_rows = session.scalars(
+            select(TestRunEvidence).where(TestRunEvidence.external_ref.is_(None))
+        ).all()
+        assert len(refless_rows) == 1 and refless_rows[0].passed is False
+
+
+def test_upsert_compares_timestamps_timezone_insensitively(client, session_factory):
+    """PostgreSQL returns aware datetimes; records carry naive UTC. The change
+    detector must treat them as equal or every sweep reports phantom updates."""
+    from datetime import datetime, timezone
+
+    from app.test_run_evidence import TestRunEvidenceRecord, upsert_test_run_evidence
+
+    naive = datetime(2026, 2, 8, 15, 15, 39)
+    aware = naive.replace(tzinfo=timezone.utc)
+    base = dict(
+        component_sn="20USEM00000001",
+        test_type="MODULE_BOW",
+        passed=True,
+        external_ref="TZ1",
+        payload={"state": "ready", "problems": False},
+    )
+    with session_factory() as session:
+        upsert_test_run_evidence(session, [TestRunEvidenceRecord(measured_at=naive, **base)])
+        session.commit()
+    with session_factory() as session:
+        stats = upsert_test_run_evidence(
+            session, [TestRunEvidenceRecord(measured_at=aware, **base)]
+        )
+        session.commit()
+    assert stats.unchanged == 1 and stats.updated == 0

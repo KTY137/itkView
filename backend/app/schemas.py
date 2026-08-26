@@ -433,6 +433,56 @@ class LoginIn(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class MeasurementResultDimensionOut(BaseModel):
+    code: str
+    name: str | None
+    kind: Literal["array", "scalar"]
+    runs: int
+
+
+class MeasurementTestTypeOut(BaseModel):
+    test_type: str
+    results: list[MeasurementResultDimensionOut]
+
+
+class MeasurementDimensionsOut(BaseModel):
+    test_types: list[MeasurementTestTypeOut]
+
+
+class MeasurementCurveOut(BaseModel):
+    component_sn: str
+    local_name: str | None
+    external_ref: str | None
+    measured_at: datetime | None
+    passed: bool
+    # x is None when no matching x_result array exists; the client plots
+    # against the sample index then.
+    x: list[float] | None
+    y: list[float]
+
+
+class MeasurementValueOut(BaseModel):
+    component_sn: str
+    local_name: str | None
+    external_ref: str | None
+    measured_at: datetime | None
+    passed: bool
+    value: float
+
+
+class MeasurementSeriesOut(BaseModel):
+    test_type: str
+    result_code: str
+    kind: Literal["array", "scalar"]
+    result_name: str | None
+    x_result: str | None
+    x_name: str | None
+    curves: list[MeasurementCurveOut]
+    values: list[MeasurementValueOut]
+    summary: dict[str, float] | None
+    truncated: bool
+
+
 class SetupStatusOut(BaseModel):
     # True while the user table is empty; the frontend then offers the
     # first-run "create the first admin account" form instead of the login.
