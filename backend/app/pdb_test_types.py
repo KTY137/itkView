@@ -60,6 +60,27 @@ def _rows(raw: Any) -> list[dict[str, Any]]:
                 "The PDB returned an unusable test-type catalogue."
             )
         return raw
+    # itkdb returns neither a dict nor a list for a catalogue that carries
+    # `pageItemList` (and for any `itemList` spanning more than one page): it
+    # hands back a `PagedResponse`, whose `.data` holds only the page fetched
+    # last. Iterating walks every page, which is what a complete catalogue
+    # needs — the same shape `pdb_sync._extract_page` already accounts for.
+    if hasattr(raw, "data") and hasattr(raw, "page_info"):
+        rows = list(raw)
+        if any(not isinstance(row, dict) for row in rows):
+            raise PdbTestTypesUnavailable(
+                "The PDB returned an unusable test-type catalogue."
+            )
+        # Refuse a truncated catalogue; presenting a partial form inventory as
+        # complete is exactly what this module is strict about. Only a
+        # shortfall is an error: PDB listings have been observed repeating
+        # rows across pages, and the caller de-duplicates by code anyway.
+        total = getattr(raw, "total", -1)
+        if isinstance(total, int) and total >= 0 and len(rows) < total:
+            raise PdbTestTypesUnavailable(
+                "The PDB returned an incomplete test-type catalogue."
+            )
+        return rows
     raise PdbTestTypesUnavailable(
         "The PDB returned an unusable test-type catalogue."
     )

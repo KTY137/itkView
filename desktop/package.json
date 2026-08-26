@@ -1,7 +1,7 @@
 {
   "name": "itkflow-desktop",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Desktop shell for itkFlow: bundles the backend and the built frontend.",
   "scripts": {
     "icon": "tauri icon icon-source.png",

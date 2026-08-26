@@ -95,6 +95,91 @@ def test_explicit_empty_catalogue_is_a_valid_snapshot(catalogue):
     assert fetch_test_type_schemas(remote, "MODULE", project="S") == []
 
 
+class FakePagedResponse:
+    """What itkdb actually hands back for a `pageItemList` catalogue.
+
+    `client.get` never returns a plain dict in that case (itkdb/client.py):
+    it wraps the response in a `PagedResponse`, which is neither dict nor
+    list, exposes only the LAST fetched page through `.data`, and yields
+    every row across every page when iterated. Modelling the dict shape in a
+    fixture is what hid a live failure — the real sync answered "The PDB
+    returned an unusable test-type catalogue" for every account.
+    """
+
+    def __init__(self, pages, total=None):
+        self._pages = [list(page) for page in pages]
+        self._page = 0
+        self._index = 0
+        self.total = sum(len(page) for page in self._pages) if total is None else total
+
+    @property
+    def data(self):
+        return self._pages[self._page]
+
+    @property
+    def page_info(self):
+        return {"pageIndex": self._page, "pageSize": len(self.data), "total": self.total}
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._index >= len(self._pages[self._page]):
+            if self._page + 1 >= len(self._pages):
+                raise StopIteration
+            self._page += 1
+            self._index = 0
+        self._index += 1
+        return self._pages[self._page][self._index - 1]
+
+
+def test_paged_catalogue_is_read_across_every_page():
+    remote, client = gateway(
+        FakePagedResponse(
+            [
+                [{"code": "MODULE_IV", "name": "Module IV", "state": "ready"}],
+                [{"code": "MODULE_BOW", "name": "Module bow", "state": "ready"}],
+            ]
+        ),
+        {"code": "MODULE_IV", "name": "Module IV", "results": [{"code": "CURRENT"}]},
+        {"code": "MODULE_BOW", "name": "Module bow", "properties": []},
+    )
+
+    records = fetch_test_type_schemas(remote, "MODULE", project="S")
+
+    # The second page must be reached: reading `.data` alone would mirror only
+    # MODULE_BOW and silently drop the rest of the catalogue.
+    assert [record.test_code for record in records] == ["MODULE_IV", "MODULE_BOW"]
+    assert client.calls[0] == ("listTestTypes", {"project": "S", "componentType": "MODULE"})
+
+
+def test_truncated_paged_catalogue_is_refused():
+    remote, _ = gateway(
+        FakePagedResponse([[{"code": "MODULE_IV", "state": "ready"}]], total=7)
+    )
+
+    with pytest.raises(PdbTestTypesUnavailable, match="incomplete"):
+        fetch_test_type_schemas(remote, "MODULE", project="S")
+
+
+def test_paged_catalogue_tolerates_rows_repeated_across_pages():
+    """PDB listings have been observed repeating rows; a surplus is not a gap."""
+    remote, _ = gateway(
+        FakePagedResponse(
+            [
+                [{"code": "MODULE_IV", "state": "ready"}],
+                [{"code": "MODULE_IV", "state": "ready"}],
+            ],
+            total=1,
+        ),
+        {"code": "MODULE_IV", "name": "Module IV", "results": []},
+    )
+
+    records = fetch_test_type_schemas(remote, "MODULE", project="S")
+
+    assert [record.test_code for record in records] == ["MODULE_IV"]
+
+
 def test_unconfigured_gateway_is_distinct_from_an_empty_catalogue():
     remote, _ = gateway(configured=False)
 
