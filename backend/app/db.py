@@ -1,5 +1,6 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.sql import text
@@ -11,14 +12,73 @@ class Base(DeclarativeBase):
 
 def make_engine(database_url: str) -> Engine:
     if database_url.startswith("sqlite"):
+        is_memory = ":memory:" in database_url
         # check_same_thread: FastAPI handles requests on a thread pool.
         # StaticPool keeps in-memory databases alive across connections (tests).
-        return create_engine(
+        engine = create_engine(
             database_url,
             connect_args={"check_same_thread": False},
-            poolclass=StaticPool if ":memory:" in database_url else None,
+            poolclass=StaticPool if is_memory else None,
         )
+        if not is_memory:
+            _enable_file_sqlite_concurrency(engine)
+        return engine
     return create_engine(database_url)
+
+
+def _enable_file_sqlite_concurrency(engine: Engine) -> None:
+    """WAL plus a generous busy timeout for every connection to a file-backed
+    SQLite database.
+
+    Every non-Compose deployment (desktop bundle, dev launcher) shares one
+    SQLite file between the API, the outbox worker/processor and the reminder
+    scheduler. Python's sqlite3 driver otherwise gives up on a locked database
+    after 5s, which surfaced live as a request-time `500` plus repeated
+    "[outbox-processor] cycle failed" / "[reminder-scheduler] tick failed"
+    lines during a single evidence sync. WAL mode is the actual fix: unlike the
+    legacy rollback journal (where a writer's commit and any open reader
+    transaction exclude each other), WAL lets one writer and any number of
+    readers proceed concurrently. `busy_timeout` covers the remaining case —
+    two writers racing — by making SQLite retry for 30s instead of failing
+    after 5s. `synchronous=NORMAL` is the documented safe pairing with WAL
+    (still durable across an application crash; only an OS-level power loss
+    can lose the last commit).
+
+    In-memory engines (":memory:") are skipped: WAL requires a real file, and
+    `StaticPool` already funnels every connection through the same single
+    connection, so there is no cross-connection locking to fix and tests must
+    not be pointed at a mode that does not exist there.
+    """
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, connection_record) -> None:  # noqa: ARG001
+        cursor = dbapi_connection.cursor()
+        try:
+            # busy_timeout FIRST: converting a legacy rollback-journal file to
+            # WAL needs a brief exclusive lock, and without the timeout that
+            # very conversion can raise the "database is locked" error this
+            # listener exists to fix (review M1).
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+        finally:
+            cursor.close()
+
+
+def is_sqlite_busy(error: BaseException) -> bool:
+    """Whether `error` is SQLite's transient "database is locked" contention.
+
+    This is expected under concurrent load (two writers, or a writer and a
+    long-running reader outlasting `busy_timeout`) rather than a real failure.
+    Shared by `sync_jobs` (lease-acquisition retries), `outbox_processor` and
+    `reminders` (quiet-skip classification of an otherwise-broad `except
+    Exception`) so the detection lives in one place. Safe to call with any
+    exception, not just an `OperationalError`.
+    """
+    if not isinstance(error, OperationalError):
+        return False
+    detail = str(error).lower()
+    return "database is locked" in detail or "database table is locked" in detail
 
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:
@@ -92,6 +152,38 @@ def ensure_phase0_sqlite_schema(engine: Engine) -> None:
             }
             if "label" not in tool_columns:
                 connection.execute(text("ALTER TABLE tool ADD COLUMN label VARCHAR(120)"))
+            # `Tool.__table_args__` declares `uq_tool_institute_code` on
+            # (institute_id, code), but `create_all` only applies it to a table
+            # it creates from scratch — SQLite has no `ALTER TABLE ADD
+            # CONSTRAINT`, so an existing dev/desktop DB never gained it. Dedupe
+            # before indexing or `CREATE UNIQUE INDEX` fails outright on real
+            # duplicates. Keep the HIGHEST id: `tool_sync` updates the last row
+            # it iterates (highest rowid), so keeping the oldest would
+            # resurrect stale status/compatibility — e.g. silently re-activate
+            # a blacklisted jig. Scoped to `institute_id IS NOT NULL`: SQLite
+            # treats every NULL as distinct for uniqueness purposes, so rows
+            # without an institute can never collide and must not be touched.
+            deleted = connection.execute(
+                text(
+                    "DELETE FROM tool WHERE institute_id IS NOT NULL AND id NOT IN ("
+                    "SELECT MAX(id) FROM tool WHERE institute_id IS NOT NULL "
+                    "GROUP BY institute_id, code"
+                    ")"
+                )
+            )
+            if deleted.rowcount:
+                # A destructive migration must never run silently.
+                print(
+                    f"[schema] removed {deleted.rowcount} duplicate tool row(s) "
+                    "while retrofitting uq_tool_institute_code",
+                    flush=True,
+                )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_tool_institute_code "
+                    "ON tool (institute_id, code)"
+                )
+            )
         if "reminder" in tables:
             reminder_columns = {
                 row[1] for row in connection.execute(text("PRAGMA table_info(reminder)"))

@@ -106,6 +106,21 @@ im Frontend-i18n-Modul liegt.
    Warnings und abgeleitete PDB-Properties; nur ein gueltiger Preview kann eine
    Staged-Action erzeugen. `submittable=false` bleibt sichtbar erklaert. Der
    Wizard schreibt nie direkt in die PDB.
+   **Kombinierte Tool-Slots (2026-08-26):** Definiert das Institutsprofil
+   `assembly_tool_slots` (die Sheet-Spalten „Hybrid glue jigs top/bottom",
+   „Pickups top/bottom", „Module jig"), ersetzt eine Slot-Karten-Liste das
+   einzelne Tool-Select: je Slot ein nach Typ und `kinds` gefilterter
+   Quick-Select plus entfernbare Chips (`multiple: true` erlaubt bis zu vier
+   Tools, sonst genau eins); Slot-Labels sind Institutsdaten und werden nie
+   uebersetzt. Es bleibt EIN gemeinsames Scan-Feld: der Scan landet im
+   „aktiven" Slot (Scan-Target), der nicht nur ueber Farbe markiert ist;
+   nach dem Fuellen rueckt das Scan-Target automatisch zum naechsten freien
+   Slot weiter, und ein Scan, dessen Tool-Kind eindeutig zu genau einem
+   Slot passt, routet dorthin. Ein abgelehnter Scan leert das Feld immer
+   und meldet den Grund direkt am Scan-Feld. Der Review-Schritt zeigt die
+   vom SERVER aufgeloesten Tools je Slot (`AssemblyPreviewOut.tools`),
+   nie den lokalen Auswahlzustand. Ohne Profil-Setting bleibt alles beim
+   bisherigen Ein-Tool-Verhalten. Details docs/07.
 9. **Operations Health:** Admin-only Cockpit aus ausschliesslich lokal
    gespeicherter Telemetrie. Textuell benannte Heartbeat-Zustaende fuer
    Outbox-Worker und Reminder-Scheduler stehen neben aktiven/letzten Sync-Jobs,
@@ -161,6 +176,17 @@ exakten geforderten Typ. Fehlt dessen lokales Schema, bleibt die Erfassung mit
 einer konkreten Sync-Erklaerung blockiert. Datei- und Formularpfad senden beide
 Pins an den Server; Browserzustand allein gilt nie als Bindung.
 
+**Edit-Ghost in der Pflicht-Tests-Tabelle (2026-08-26):** In beiden Varianten
+von „Required tests per stage" (bestaetigter Mirror und projizierte
+Staged-Ansicht) erhaelt jede Zeile mit Status `missing` oder `failed` eine
+Ghost-Edit-Affordance: gestrichelt/gedaempft in Ruhe, bei Hover/Tastaturfokus
+sichtbar (auf Touch dauerhaft dezent), Stift-Glyphe im Mono-Stil statt
+Farb-allein-Signal. Nur fuer Nutzer mit Schreibrecht auf das Institut sichtbar
+(deckungsgleich mit `Add test result`). Klick oeffnet die bestehende
+Testerfassungskarte und belegt die Testtyp-Auswahl mit dem Typ der Zeile vor —
+die Auswahl bleibt dabei aenderbar; existiert fuer den Typ kein lokal
+gespiegeltes Schema, oeffnet sich das Formular trotzdem mit leerer Auswahl.
+
 ### Shipment-Empfang und Reception-Tests
 
 Die Shipment-Tabelle zeigt neben dem Empfangsstatus eine eigene Spalte
@@ -199,6 +225,10 @@ Pending, Fehler oder Schreibschutz nie als Unterscheidungsmerkmal.
 
 - **Scanner-first:** globale Scan-Leiste oben (SN/RFID/lokaler Name), Enter
   oeffnet die Komponente. Erfassung ist scan-getrieben, nicht maus-getrieben.
+  Wo ein Screen mehrere Scan-Ziele hat (z. B. Tool-Slots im Assembly-Wizard),
+  gibt es trotzdem genau EIN Scan-Feld plus ein sichtbares, nicht nur farblich
+  markiertes „Scan-Target", das nach jedem Treffer automatisch weiterrueckt —
+  eine Scan-Salve von oben nach unten darf nie einen Mausgriff erfordern.
 - **User-Rail als Account-Einstieg:** Avatar/Name/Rolle sind ein klar
   fokussierbarer Button zum Account-Screen. Der danebenliegende Logout-Button
   bleibt separat, damit Kontoeinstellungen nicht versehentlich abmelden.

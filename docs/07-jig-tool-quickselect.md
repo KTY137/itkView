@@ -99,6 +99,33 @@ institutsspezifischem Anwendungscode.
 - Modultyp->Jig-Kompatibilitaet, Zielwerte, Namensschemata: alles Registry/
   Profil, kein Institut-/Typ-Hardcoding im Code.
 
+## Kombinierte Tool-Slots (2026-08-26)
+
+`InstituteProfile.settings['assembly_tool_slots']` benennt neben dem
+Default-Tool („Module jig used") weitere kombiniert genutzte Tool-Rollen —
+exakt die zFlow-Sheet-Spalten „Hybrid glue jigs used, top, bottom" und
+„Hybrid pickups used, top, bottom". Jeder Slot: `key`, `label` (Institutsdaten,
+unuebersetzt), optional `kinds` (Filter auf `Tool.kind`), `multiple`
+(1 oder 1-4 Tools) und `property_key` (eigener PDB-Property-Code; der
+Default-Slot nutzt weiter `assembly_property_keys['tool']`).
+
+- Domaene (`app/assembly.py`): `evaluate_assembly`/`canonical_action_payload`/
+  `revalidate_assembly_action` akzeptieren `tools: {slot_key: [tool_id,...]}`
+  neben dem bisherigen `tool_id`; mehrere/duplizierte Tools werden
+  komma-separiert in die PDB-Property geschrieben (`", ".join(codes)`, z. B.
+  `JIG_HYBRID_ALIGNMENT = "4, 4"` — das Format der zeuthenflow-Referenz).
+  Alt-Aktionen ohne `tools`-Key revalidieren bitgenau wie vorher.
+- HTTP: `AssemblyDraftIn` fuehrt `tools` optional; `tool_id` ist nur noch
+  Pflicht, wenn kein Slot es ersetzt. `AssemblyPreviewOut.tools` liefert die
+  aufgeloesten Tools je Slot. `preview.py` behandelt reine Slot-Aktionen ohne
+  Default-Tool korrekt.
+- Wizard: liest das Setting, rendert je Slot Quick-Select (typ- und
+  `kinds`-gefiltert) plus entfernbare Chips; der gemeinsame Scan ordnet dem
+  zuletzt aktiven Slot zu. Ohne Setting bleibt alles beim alten Verhalten
+  (ein Tool, Legacy-`tool_id`).
+- Offen: strukturierter Editor fuer `assembly_tool_slots` im
+  AdminSettingsScreen (bis dahin via `PATCH /api/institutes/{code}`).
+
 ## Verbleibende Domaenenklaerungen
 
 - Welche Attachment-Properties je Komponententyp kommen aus dem **PDB-Schema**

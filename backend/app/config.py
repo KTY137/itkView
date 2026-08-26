@@ -140,13 +140,6 @@ class Settings(BaseSettings):
             )
         return self
 
-    @property
-    def pdb_ui_url(self) -> str:
-        if self.pdb_instance != "production":
-            raise ProductionAccessError("No PDB is configured for this deployment.")
-        # Intentionally not preconfigured; a production deployment must supply it.
-        raise ProductionAccessError("Production PDB UI URL is not preconfigured.")
-
 
 @lru_cache
 def get_settings() -> Settings:

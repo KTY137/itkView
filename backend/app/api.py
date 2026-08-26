@@ -3,11 +3,12 @@ import hmac
 import json
 from collections.abc import Iterator
 from datetime import timezone
+from functools import lru_cache
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -319,13 +320,36 @@ router = APIRouter(dependencies=[Depends(csrf_protect)])
 # Auth & users (docs/06). Additive: existing endpoints remain open for now.
 # --------------------------------------------------------------------------
 
+@lru_cache(maxsize=1)
+def _dummy_password_hash() -> str:
+    """One process-constant hash so an unknown email still pays for a full
+    PBKDF2 verification instead of returning immediately — otherwise "no such
+    account" would answer measurably faster than "wrong password" and let an
+    attacker enumerate registered emails purely from login latency. Lazy
+    (first login) rather than import-time: 200k PBKDF2 rounds cost ~0.4s,
+    which must not tax every app start and test run (review M3). The password
+    behind it is discarded; it is never compared against anything real.
+    """
+    return hash_password("itkflow-constant-time-login-placeholder")
+
 
 @router.post("/api/auth/login", response_model=MeOut, tags=["auth"])
 def login(
     body: LoginIn, request: Request, response: Response, db: Session = Depends(get_db)
 ) -> MeOut:
     user = db.scalar(select(User).where(User.email == body.email.strip().lower()))
-    if user is None or not user.is_active or not verify_password(body.password, user.password_hash):
+    # Always run exactly one verification, against the real hash when the
+    # account exists (even if inactive) or the dummy hash otherwise, so the
+    # branch taken cannot be inferred from response timing. A password-less
+    # account (future SSO shape) also takes the dummy path: verify_password
+    # short-circuits on a falsy hash, which would answer faster (review M4).
+    stored_hash = (
+        user.password_hash
+        if user is not None and user.password_hash
+        else _dummy_password_hash()
+    )
+    password_ok = verify_password(body.password, stored_hash)
+    if user is None or not user.is_active or not password_ok:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     token = new_session_token()
     csrf_token = new_csrf_token()
@@ -812,6 +836,10 @@ def update_user(
         user.is_active = body.is_active
     if body.password is not None:
         user.password_hash = hash_password(body.password)
+        # A new password invalidates every existing session for this user —
+        # otherwise a stolen/leaked session would survive the very reset meant
+        # to shut it out.
+        db.execute(delete(UserSession).where(UserSession.user_id == user.id))
     db.commit()
     db.refresh(user)
     return user
@@ -1468,6 +1496,7 @@ def preview_assembly(
         child_sn=body.child_sn,
         slot=body.slot,
         tool_id=body.tool_id,
+        tools=body.tools,
         glue_batch_id=body.glue_batch_id,
     )
     if evaluation.institute is not None:
@@ -1494,6 +1523,7 @@ def stage_assembly(
         child_sn=body.child_sn,
         slot=body.slot,
         tool_id=body.tool_id,
+        tools=body.tools,
         glue_batch_id=body.glue_batch_id,
     )
     if evaluation.institute is not None:
@@ -2454,7 +2484,9 @@ def get_outbox_contract() -> OutboxContractOut:
 
 @router.get("/api/outbox", response_model=list[OutboxOut], tags=["outbox"])
 def list_outbox(
-    status: OutboxStatus | None = None, db: Session = Depends(get_db)
+    status: OutboxStatus | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
 ) -> list[OutboxAction]:
     stmt = select(OutboxAction).order_by(OutboxAction.created_at.desc())
     if status is not None:
@@ -2463,7 +2495,11 @@ def list_outbox(
 
 
 @router.get("/api/outbox/{action_id}", response_model=OutboxOut, tags=["outbox"])
-def get_outbox_action(action_id: int, db: Session = Depends(get_db)) -> OutboxAction:
+def get_outbox_action(
+    action_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> OutboxAction:
     action = db.get(OutboxAction, action_id)
     if action is None:
         raise HTTPException(status_code=404, detail=f"Outbox action {action_id} not found.")
@@ -3050,7 +3086,11 @@ def propose_ingest_outbox_action(
 
 
 @router.get("/api/audit", response_model=list[AuditOut], tags=["audit"])
-def list_audit(limit: int = 100, db: Session = Depends(get_db)) -> list[AuditEvent]:
+def list_audit(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> list[AuditEvent]:
     stmt = (
         select(AuditEvent)
         .order_by(AuditEvent.ts.desc(), AuditEvent.id.desc())
@@ -3368,9 +3408,11 @@ def component_sync_evidence(
         # Reporting "0 mirrored" here would be a lie that looks like a fact.
         raise HTTPException(status_code=503, detail=str(exc)) from None
     stats = upsert_test_run_evidence(db, records)
-    # Flush makes newly inserted evidence visible to pending_attachments while
-    # keeping evidence rows and their local attachment index in one commit.
-    db.flush()
+    # Commit the evidence BEFORE the download phase: holding the write
+    # transaction across network I/O blocked every other writer for the whole
+    # fetch — the exact "database is locked" incident. The attachment index is
+    # idempotent and re-derivable, so it does not need to share the commit.
+    db.commit()
     attachment_stats = download_attachments(
         db,
         gateway,
@@ -3433,7 +3475,11 @@ def sync_institute_evidence(
     for component in components:
         records.extend(fetch_test_run_evidence(gateway, component.sn, with_detail=True))
     stats = upsert_test_run_evidence(db, records)
-    db.flush()
+    # Evidence becomes durable before any network download, and each
+    # component's attachment index commits on its own: the write lock is never
+    # held across network I/O (the "database is locked" incident), and an
+    # interrupted sweep keeps everything mirrored so far.
+    db.commit()
     attachment_stats = AttachmentSyncStats()
     for component in components:
         current = download_attachments(
@@ -3442,12 +3488,12 @@ def sync_institute_evidence(
             request.app.state.settings,
             component.sn,
         )
+        db.commit()
         attachment_stats = AttachmentSyncStats(
             downloaded=attachment_stats.downloaded + current.downloaded,
             reused=attachment_stats.reused + current.reused,
             failed=attachment_stats.failed + current.failed,
         )
-    db.commit()
     return InstituteEvidenceSyncOut(
         institute_code=institute_code,
         component_types=[component_type],

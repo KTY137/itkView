@@ -1,9 +1,12 @@
 """Tests for reminder scheduling and the worker tick (app/reminders.py)."""
 
+import asyncio
+import contextlib
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.models import AuditEvent, InstituteProfile, Reminder, ReminderOccurrence
 from app.notifications import NotificationError
@@ -206,6 +209,79 @@ def test_scheduler_tick_fires_through_its_own_session(
     assert sent == ["Clean bench"]
     # Nothing is due any more, so a second tick stays quiet.
     assert scheduler.tick().total == 0
+
+
+def test_scheduler_treats_a_busy_database_as_a_quiet_skip(
+    client: TestClient, session_factory, capsys
+):
+    """A SQLite `database is locked` under concurrent load is expected, not a
+    real failure — it must neither log "tick failed" nor flip the ops health
+    heartbeat to "error" for one transient blip (docs/09)."""
+    scheduler = ReminderScheduler(session_factory, lambda *a: None, poll_seconds=60)
+    busy = OperationalError("SELECT 1", {}, Exception("database is locked"))
+
+    recorded: list[Exception] = []
+    scheduler.record_failure = recorded.append
+
+    scheduler._handle_tick_failure(busy)  # noqa: SLF001 — exercising the classifier directly
+
+    out = capsys.readouterr().out
+    assert "database busy" in out
+    assert "tick failed" not in out
+    assert recorded == []  # no failure heartbeat for an expected, transient skip
+
+
+def test_scheduler_still_reports_a_real_failure(client: TestClient, session_factory, capsys):
+    """Only the SQLite-busy message is downgraded; any other exception (a
+    broken webhook endpoint, a real bug) stays a visible, heartbeat-recorded
+    failure exactly like before."""
+    scheduler = ReminderScheduler(session_factory, lambda *a: None, poll_seconds=60)
+    boom = RuntimeError("webhook endpoint unreachable")
+
+    recorded: list[Exception] = []
+    scheduler.record_failure = recorded.append
+
+    scheduler._handle_tick_failure(boom)  # noqa: SLF001 — exercising the classifier directly
+
+    out = capsys.readouterr().out
+    assert "tick failed: RuntimeError" in out
+    assert "database busy" not in out
+    assert recorded == [boom]
+
+
+def test_run_loop_routes_a_failed_tick_through_the_quiet_skip_classifier(session_factory):
+    """Wiring check for `_run`: a tick exception must reach
+    `_handle_tick_failure` with the original exception, not just get swallowed
+    somewhere else in the loop."""
+
+    async def scenario() -> list[Exception]:
+        scheduler = ReminderScheduler(session_factory, lambda *a: None, poll_seconds=60)
+        scheduler._poll_seconds = 0  # skip the real sleep between polls
+        handled = asyncio.Event()
+        received: list[Exception] = []
+
+        def failing_tick() -> None:
+            raise OperationalError("SELECT 1", {}, Exception("database is locked"))
+
+        def fake_handle(exc: Exception) -> None:
+            received.append(exc)
+            handled.set()
+
+        scheduler.tick = failing_tick
+        scheduler._handle_tick_failure = fake_handle  # noqa: SLF001
+
+        task = asyncio.create_task(scheduler._run())  # noqa: SLF001
+        try:
+            await asyncio.wait_for(handled.wait(), timeout=5)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        return received
+
+    received = asyncio.run(scenario())
+    assert len(received) == 1
+    assert isinstance(received[0], OperationalError)
 
 
 def test_app_starts_a_scheduler_only_when_it_is_the_configured_one():

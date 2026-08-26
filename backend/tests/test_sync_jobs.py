@@ -1344,10 +1344,14 @@ def test_the_automatic_retry_really_queues_a_second_job(
     )
     try:
         manager.start_evidence(job_id)
+        # Generous deadline: under a full-suite run every core is busy and the
+        # timer thread plus the executor round-trip can take several seconds —
+        # 8s flaked once on a loaded machine while passing in isolation.
         jobs = _wait_for(
             lambda: (lambda rows: rows if len(rows) == 2 else None)(
                 _evidence_jobs(session_factory)
-            )
+            ),
+            timeout=30.0,
         )
     finally:
         manager.shutdown()

@@ -1,7 +1,14 @@
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StringConstraints,
+    model_validator,
+)
 
 from app.ingestion import ResultSummary
 from app.outbox import OutboxStatus
@@ -607,7 +614,26 @@ class AssemblyDraftIn(BaseModel):
     parent_sn: str = Field(min_length=1, max_length=20)
     child_sn: str = Field(min_length=1, max_length=20)
     slot: str = Field(min_length=1, max_length=64)
-    tool_id: int = Field(gt=0)
+    # Legacy single default-slot tool. Either this or `tools` must name at
+    # least one tool; the domain layer enforces that and their consistency.
+    tool_id: int | None = Field(default=None, gt=0)
+    # Combined tool slots from the institute profile's `assembly_tool_slots`
+    # (the production sheets' "jigs top, bottom" columns): slot key → tool ids.
+    # Bounded at the wire so an oversized payload never reaches the resolver
+    # (the domain cap is MAX_SLOT_TOOLS; 16 slots is far above any real bench).
+    tools: (
+        dict[
+            Annotated[str, StringConstraints(min_length=1, max_length=32)],
+            Annotated[list[Annotated[int, Field(gt=0)]], Field(max_length=4)],
+        ]
+        | None
+    ) = Field(default=None)
+
+    @model_validator(mode="after")
+    def _bound_tool_slots(self) -> "AssemblyDraftIn":
+        if self.tools is not None and len(self.tools) > 16:
+            raise ValueError("tools names too many slots (maximum 16).")
+        return self
     glue_batch_id: int | None = Field(default=None, gt=0)
 
 
@@ -661,6 +687,10 @@ class AssemblyPreviewOut(BaseModel):
     parent: AssemblyComponentOut | None
     child: AssemblyComponentOut | None
     tool: AssemblyToolOut | None
+    # Combined tool slots (institute profile `assembly_tool_slots`): slot key
+    # → resolved tools, in selection order. Empty when only the legacy single
+    # default tool is in play.
+    tools: dict[str, list[AssemblyToolOut]] = {}
     glue_batch: AssemblyGlueBatchOut | None
     pdb_properties: dict[str, str]
     issues: list[AssemblyIssueOut]

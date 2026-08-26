@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.attachment_store import AttachmentSyncStats, download_attachments, pending_attachments
 from app.config import Settings
+from app.db import is_sqlite_busy as _is_sqlite_busy
 from app.models import Component, InstituteProfile, SyncJob, TestRunEvidence, utcnow
 from app.pdb_credentials import PdbAccessCodes, PdbCredentialError, load_pdb_credentials
 from app.pdb_gateway import PdbGateway
@@ -271,11 +272,6 @@ def acquire_evidence_sync_lease(
             sleep(SYNC_LEASE_RETRY_SECONDS * (attempt + 1))
 
     raise SyncLeaseBusy("The evidence sync coordinator is busy; retry shortly.") from last_busy
-
-
-def _is_sqlite_busy(error: OperationalError) -> bool:
-    detail = str(error).lower()
-    return "database is locked" in detail or "database table is locked" in detail
 
 
 def _job_heartbeat_stale(job: SyncJob, *, now: datetime | None = None) -> bool:

@@ -119,14 +119,20 @@ def _action_submittability(
     child_sn = payload.get("child_sn")
     slot = payload.get("slot")
     tool_id = payload.get("tool_id")
+    tools = payload.get("tools")
     glue_batch_id = payload.get("glue_batch_id")
+    # An action recorded through slot combinations carries `tools` and may have
+    # no legacy default tool at all; the domain evaluation owns the detailed
+    # validation of either shape.
+    tool_reference_ok = (
+        not isinstance(tool_id, bool) and isinstance(tool_id, int)
+    ) or isinstance(tools, dict)
     if (
         parent_sn != component.sn
         or not isinstance(parent_sn, str)
         or not isinstance(child_sn, str)
         or not isinstance(slot, str)
-        or isinstance(tool_id, bool)
-        or not isinstance(tool_id, int)
+        or not tool_reference_ok
         or (
             glue_batch_id is not None
             and (isinstance(glue_batch_id, bool) or not isinstance(glue_batch_id, int))
@@ -139,7 +145,8 @@ def _action_submittability(
         parent_sn=parent_sn,
         child_sn=child_sn,
         slot=slot,
-        tool_id=tool_id,
+        tool_id=tool_id if isinstance(tool_id, int) and not isinstance(tool_id, bool) else None,
+        tools=tools if isinstance(tools, dict) else None,
         glue_batch_id=glue_batch_id,
     )
     return evaluation.submittable, evaluation.submittable_reason

@@ -15,8 +15,6 @@ def test_default_is_offline_and_reaches_no_pdb():
     settings = make_settings()
     assert settings.pdb_instance == "offline"
     assert settings.allow_production is False
-    with pytest.raises(ProductionAccessError, match="[Nn]o PDB"):
-        _ = settings.pdb_ui_url
 
 
 def test_the_retired_test_instance_is_gone():
@@ -34,9 +32,9 @@ def test_production_without_explicit_opt_in_is_refused():
 def test_production_with_double_opt_in_is_possible():
     settings = make_settings(pdb_instance="production", allow_production=True)
     assert settings.pdb_instance == "production"
-    # …but even then, no production UI URL is preconfigured anywhere:
-    with pytest.raises(ProductionAccessError):
-        _ = settings.pdb_ui_url
+    # No production UI URL is preconfigured anywhere in Settings; a deployment
+    # that wants to link out to the PDB UI must supply its own configuration —
+    # there used to be a `pdb_ui_url` property here that only ever raised.
 
 
 def test_gateway_refuses_unconfigured_client():

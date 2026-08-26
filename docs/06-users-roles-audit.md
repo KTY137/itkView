@@ -55,6 +55,16 @@ gruen).** Was steht:
 - Tests: `backend/tests/test_auth.py` + `test_auth_enforcement.py` (401/403 je
   Write, Attribution, CSRF, Migration); Erst-Admin per CLI
   `python -m app.create_admin` **oder per First-Run-Setup in der UI**.
+- **Security-Härtung Login/Reads (2026-08-26):** `GET /api/audit`, `GET /api/outbox`
+  und `GET /api/outbox/{id}` verlangen jetzt `require_user` (jede angemeldete
+  Rolle genügt) — sie lieferten zuvor Akteurs-E-Mails bzw. Staged-Action-Payloads
+  anonym aus; der breitere Read-Rollout für alle übrigen Endpunkte bleibt
+  bewusst unverändert offen. `POST /api/auth/login` verifiziert bei unbekannter
+  E-Mail zusätzlich gegen einen fest erzeugten Dummy-Passworthash (Antwort
+  unverändert `401 Invalid email or password.`), damit die Login-Antwortzeit
+  nicht verrät, ob ein Konto existiert. `PATCH /api/users/{id}` invalidiert bei
+  gesetztem `password`-Feld alle bestehenden `UserSession`-Zeilen des
+  Zielnutzers (Rollen-/Namensänderung ohne Passwort lässt Sessions unberührt).
 - **First-Run-Setup (2026-08-25):** `GET /api/setup` meldet `needs_admin=true`,
   solange die User-Tabelle leer ist; `POST /api/setup/admin` legt genau dann den
   ersten Admin an (Rolle fest `admin`, kein Institut), loggt ihn direkt ein
