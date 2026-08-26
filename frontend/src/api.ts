@@ -129,7 +129,39 @@ export type WorksheetGroup = {
   rows: WorksheetRow[];
 };
 
-export type ComponentPreviewWorksheet = { groups: WorksheetGroup[] };
+/**
+ * A child component's evidence for one test type. Deliberately without a
+ * requirement `status`: a requirement is a statement about the component whose
+ * page this is, and showing a child's evidence does not change what gates its
+ * parent's stage move. `latest.passed` carries the run's own verdict.
+ */
+export type WorksheetChildRow = {
+  test_type: string;
+  latest: WorksheetLatestRun | null;
+  run_count: number;
+  /** Runs the PDB has retracted; excluded from `latest` and `run_count`. */
+  withdrawn_count: number;
+};
+
+/** Evidence that lives on one direct child (sensor, hybrid, powerboard, or —
+ * for an R5 ring module — a half-module). */
+export type WorksheetChildGroup = {
+  sn: string;
+  component_type: string;
+  type_code: string;
+  local_name: string | null;
+  rows: WorksheetChildRow[];
+};
+
+export type ComponentPreviewWorksheet = {
+  groups: WorksheetGroup[];
+  /**
+   * Optional on the wire so an older server (or a fixture written before this
+   * block existed) simply renders no child section instead of crashing the
+   * page. The current backend always sends it.
+   */
+  children?: WorksheetChildGroup[];
+};
 
 export type ComponentPreview = {
   current: ComponentPreviewState;

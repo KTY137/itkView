@@ -6,6 +6,11 @@ one per run, e.g. every IV curve of an institute in a single chart — and
 scalar results become a distribution. Which test types and result codes exist
 is discovered from the data, never hardcoded (hard rule #4); the PDB is not
 contacted here.
+
+Runs the PDB has withdrawn are excluded from every aggregate, both from the
+discovered dimensions and from the series themselves: a retracted measurement
+would otherwise widen a distribution and draw a curve that nobody stands behind
+any more, which reads exactly like a real production problem.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Component, TestRunEvidence
+from app.test_run_evidence import live_runs_only
 
 # One institute sweep holds a few hundred runs; the cap only guards against a
 # pathological payload, not normal use.
@@ -213,7 +219,11 @@ def _evidence_rows(
     test_type: str | None = None,
     institute_code: str | None = None,
 ) -> list[TestRunEvidence]:
-    stmt = select(TestRunEvidence).where(TestRunEvidence.source == "pdb")
+    # Runs the PDB has withdrawn never enter an aggregate: a retracted glue
+    # weight would otherwise still stretch the distribution and draw its curve,
+    # and the resulting "suspicious block of values" is indistinguishable from
+    # a real production problem.
+    stmt = select(TestRunEvidence).where(TestRunEvidence.source == "pdb", live_runs_only())
     if test_type is not None:
         stmt = stmt.where(TestRunEvidence.test_type == test_type)
     if institute_code:

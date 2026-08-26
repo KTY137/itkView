@@ -12,6 +12,7 @@ import json
 from datetime import datetime, timezone
 
 from authutil import authenticate, create_institute_profile
+from sqlalchemy import event
 
 from app.models import Component, OutboxAction, TestRunAttachment, TestRunEvidence
 from app.preview import build_component_preview
@@ -43,7 +44,17 @@ def _component(
     return component
 
 
-def _evidence(session, *, sn=SN, test_type, passed, external_ref, measured_at=None, **payload):
+def _evidence(
+    session,
+    *,
+    sn=SN,
+    test_type,
+    passed,
+    external_ref,
+    measured_at=None,
+    run_state=None,
+    **payload,
+):
     row = TestRunEvidence(
         component_sn=sn,
         test_type=test_type,
@@ -51,6 +62,7 @@ def _evidence(session, *, sn=SN, test_type, passed, external_ref, measured_at=No
         source="pdb",
         external_ref=external_ref,
         measured_at=measured_at,
+        run_state=run_state,
         payload=payload or {"results": {}},
     )
     session.add(row)
@@ -795,6 +807,403 @@ def test_additional_group_shows_a_staged_only_test_type_with_no_mirrored_evidenc
     assert row["latest"] is None
     assert row["run_count"] == 0
     assert row["staged"] == [{"outbox_action_id": action.id, "status": "draft"}]
+
+
+def _child(session, parent, *, sn, component_type="SENSOR", type_code="ATLAS18R5", local_name=None):
+    child = _component(
+        session, sn=sn, component_type=component_type, type_code=type_code, stage="APPROVED"
+    )
+    child.local_name = local_name
+    child.parent_id = parent.id
+    session.flush()
+    return child
+
+
+# --- Withdrawn (PDB state='deleted') runs ------------------------------------
+
+
+def test_a_withdrawn_run_is_never_the_latest_run(session_factory, client, tudo):
+    """The PDB keeps serving a retracted run, so it reaches the mirror like any
+    other. On the owner's data a whole block of implausible glue weights turned
+    out to be exactly this. The newest *live* run must win even when a
+    withdrawn run is strictly newer by every ordering signal."""
+    with session_factory() as session:
+        component = _component(session, stage="GLUED")
+        _evidence(
+            session,
+            test_type="MODULE_BOW",
+            passed=True,
+            external_ref="RUN-LIVE",
+            measured_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+            results={"BOW": 11.0},
+        )
+        _evidence(
+            session,
+            test_type="MODULE_BOW",
+            passed=False,
+            external_ref="RUN-WITHDRAWN",
+            measured_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            run_state="deleted",
+            results={"BOW": 1859.0},
+        )
+        preview = build_component_preview(session, component, client.app.state.settings)
+
+    row = _row(preview, "GLUED", "MODULE_BOW")
+    assert row["latest"]["external_ref"] == "RUN-LIVE"
+    assert row["run_count"] == 1
+    assert row["withdrawn_count"] == 1
+    # ... and the requirement follows the run it presents, not the retracted one.
+    assert row["status"] == "passed"
+    checks = {c["test_type"]: c["status"] for c in preview["current"]["checks"]}
+    assert checks["MODULE_BOW"] == "passed"
+
+
+def test_a_test_type_whose_only_runs_are_withdrawn_reads_missing(
+    session_factory, client, tudo
+):
+    """Judgement call (b): the requirement must fall back to `missing`, never
+    keep the verdict of a measurement nobody stands behind. The row still
+    exists and still says how many runs were retracted — the fact that someone
+    once measured this is not erased."""
+    with session_factory() as session:
+        component = _component(session, stage="GLUED")
+        _evidence(
+            session,
+            test_type="GLUE_WEIGHT",
+            passed=True,
+            external_ref="RUN-GONE-1",
+            measured_at=datetime(2024, 11, 12, 8, 20, tzinfo=timezone.utc),
+            run_state="deleted",
+            results={"GW_GLUE_H1": 1.859},
+        )
+        _evidence(
+            session,
+            test_type="GLUE_WEIGHT",
+            passed=True,
+            external_ref="RUN-GONE-2",
+            measured_at=datetime(2024, 11, 12, 8, 23, tzinfo=timezone.utc),
+            run_state="deleted",
+            results={"GW_GLUE_H1": 1.859},
+        )
+        preview = build_component_preview(session, component, client.app.state.settings)
+
+    row = _row(preview, "GLUED", "GLUE_WEIGHT")
+    assert row["status"] == "missing"
+    assert row["latest"] is None
+    assert row["run_count"] == 0
+    assert row["withdrawn_count"] == 2
+    checks = {c["test_type"]: c["status"] for c in preview["current"]["checks"]}
+    assert checks["GLUE_WEIGHT"] == "missing"
+
+
+def test_a_withdrawn_only_test_type_outside_the_model_still_gets_a_row(
+    session_factory, client, tudo
+):
+    """The Additional group is derived from mirrored evidence, so a test type
+    with nothing but retracted runs would vanish from the sheet entirely if
+    withdrawn runs were filtered in SQL. It stays, reading `missing`."""
+    with session_factory() as session:
+        component = _component(session, stage="GLUED")
+        _evidence(
+            session,
+            test_type="EXTRA_SCAN",
+            passed=True,
+            external_ref="RUN-EXTRA-GONE",
+            run_state="deleted",
+            results={"NOTE": "retracted"},
+        )
+        preview = build_component_preview(session, component, client.app.state.settings)
+
+    row = _row(preview, None, "EXTRA_SCAN")
+    assert row["status"] == "missing"
+    assert row["latest"] is None
+    assert row["run_count"] == 0
+    assert row["withdrawn_count"] == 1
+
+
+def test_an_unknown_or_pending_delete_state_still_counts_as_evidence(
+    session_factory, client, tudo
+):
+    """Only the PDB's terminal `deleted` state withdraws a run. A NULL state
+    (a row mirrored before this column existed, or a non-PDB source) and the
+    PDB's own `requestedToDelete` — a request it has not acted on, present once
+    in the owner's mirror — must both keep counting, or the fix would destroy
+    evidence it has no information about."""
+    with session_factory() as session:
+        component = _component(session, stage="GLUED")
+        _evidence(
+            session,
+            test_type="MODULE_BOW",
+            passed=True,
+            external_ref="RUN-NO-STATE",
+            measured_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            results={"BOW": 12.0},
+        )
+        _evidence(
+            session,
+            test_type="GLUE_WEIGHT",
+            passed=True,
+            external_ref="RUN-PENDING-DELETE",
+            measured_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+            run_state="requestedToDelete",
+            results={"GW_GLUE_H1": 0.15},
+        )
+        preview = build_component_preview(session, component, client.app.state.settings)
+
+    bow = _row(preview, "GLUED", "MODULE_BOW")
+    assert (bow["status"], bow["run_count"], bow["withdrawn_count"]) == ("passed", 1, 0)
+    glue = _row(preview, "GLUED", "GLUE_WEIGHT")
+    assert (glue["status"], glue["run_count"], glue["withdrawn_count"]) == ("passed", 1, 0)
+
+
+# --- Child-component evidence (worksheet.children) ---------------------------
+
+
+def _child_group(preview, sn):
+    for group in preview["worksheet"]["children"]:
+        if group["sn"] == sn:
+            return group
+    raise AssertionError(f"no child evidence group for {sn!r}")
+
+
+def test_children_evidence_appears_in_its_own_group_never_merged_into_the_rows(
+    session_factory, client, tudo
+):
+    """Only 720 of 14 759 mirrored runs hang on MODULE components; the rest sit
+    on the children. The module page must show them — but as the child's
+    evidence, never folded into the component's own rows, because a row there
+    is a statement about this component."""
+    with session_factory() as session:
+        component = _component(session, stage="GLUED")
+        _child(
+            session,
+            component,
+            sn=SENSOR_SN,
+            component_type="SENSOR",
+            local_name="TUDO-S-0042",
+        )
+        _evidence(
+            session,
+            sn=SENSOR_SN,
+            test_type="ATLAS18_IV_TEST_V1",
+            passed=True,
+            external_ref="RUN-SENSOR-IV",
+            measured_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+            results={"VOLTAGE": [0, -50, -100], "TEMPERATURE": 21.5},
+        )
+        preview = build_component_preview(session, component, client.app.state.settings)
+
+    group = _child_group(preview, SENSOR_SN)
+    assert group["component_type"] == "SENSOR"
+    assert group["type_code"] == "ATLAS18R5"
+    assert group["local_name"] == "TUDO-S-0042"
+    assert [row["test_type"] for row in group["rows"]] == ["ATLAS18_IV_TEST_V1"]
+    assert group["rows"][0]["latest"]["passed"] is True
+    assert group["rows"][0]["run_count"] == 1
+
+    # The child's test type must not have leaked into the component's own sheet.
+    own_types = {
+        row["test_type"] for g in preview["worksheet"]["groups"] for row in g["rows"]
+    }
+    assert "ATLAS18_IV_TEST_V1" not in own_types
+
+
+def test_child_evidence_does_not_change_what_gates_a_stage_move(
+    session_factory, client, tudo
+):
+    """Whether a half-module's passing GLUE_WEIGHT satisfies the ring module's
+    requirement is a real domain question (zFlow does aggregate across
+    half-modules) and an owner decision that has not been made. Showing the
+    evidence must not quietly answer it."""
+    with session_factory() as session:
+        component = _component(session, stage="GLUED")
+        half = _child(
+            session,
+            component,
+            sn="20USE5L0000031",
+            component_type="MODULE",
+            type_code="R5M1_HALFMODULE",
+        )
+        _evidence(
+            session,
+            sn=half.sn,
+            test_type="GLUE_WEIGHT",
+            passed=True,
+            external_ref="RUN-HALF-GLUE",
+            measured_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+            results={"GW_GLUE_H1": 0.151},
+        )
+        preview = build_component_preview(session, component, client.app.state.settings)
+
+    assert _child_group(preview, half.sn)["rows"][0]["latest"]["passed"] is True
+    # The parent still has no GLUE_WEIGHT of its own.
+    assert _row(preview, "GLUED", "GLUE_WEIGHT")["status"] == "missing"
+    checks = {c["test_type"]: c["status"] for c in preview["current"]["checks"]}
+    assert checks["GLUE_WEIGHT"] == "missing"
+
+
+def test_child_rows_obey_the_same_compactness_contract(session_factory, client, tudo):
+    """Child runs carry the largest payloads in the mirror (response curves,
+    IV sweeps). They are summarised by exactly the same rule as the component's
+    own rows — scalars inline, arrays and maps as counts, never raw values."""
+    sentinels = [404040, 505050]
+    with session_factory() as session:
+        component = _component(session, stage="GLUED")
+        hybrid = _child(
+            session,
+            component,
+            sn="20USEH30000123",
+            component_type="HYBRID_ASSEMBLY",
+            type_code="R5H1",
+        )
+        _evidence(
+            session,
+            sn=hybrid.sn,
+            test_type="RESPONSE_CURVE_PPA",
+            passed=True,
+            external_ref="RUN-RC",
+            measured_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+            run_number="189-6",
+            results={
+                "GAIN": sentinels,
+                "VT50": {"ABC_0": 1.1, "ABC_1": 1.2},
+                "TEMPERATURE": 20.5,
+            },
+        )
+        session.commit()
+
+    authenticate(client, session_factory, role="viewer")
+    response = client.get(f"/api/components/{SN}/preview")
+    assert response.status_code == 200, response.text
+    for sentinel in sentinels:
+        assert str(sentinel) not in response.text
+
+    group = _child_group(response.json(), "20USEH30000123")
+    latest = group["rows"][0]["latest"]
+    assert latest["scalars"] == [
+        {"code": "TEMPERATURE", "name": "TEMPERATURE", "value": 20.5}
+    ]
+    assert latest["arrays"] == [
+        {"code": "GAIN", "name": "GAIN", "points": 2, "kind": "array"},
+        {"code": "VT50", "name": "VT50", "points": 2, "kind": "map"},
+    ]
+    assert latest["run_number"] == "189-6"
+    # A child row makes no claim about the parent's requirements.
+    assert "status" not in group["rows"][0]
+
+
+def test_child_rows_exclude_withdrawn_runs_too(session_factory, client, tudo):
+    with session_factory() as session:
+        component = _component(session, stage="GLUED")
+        _child(session, component, sn=SENSOR_SN)
+        _evidence(
+            session,
+            sn=SENSOR_SN,
+            test_type="ATLAS18_IV_TEST_V1",
+            passed=False,
+            external_ref="RUN-S-GONE",
+            measured_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            run_state="deleted",
+            results={"I_500V": 99.0},
+        )
+        _evidence(
+            session,
+            sn=SENSOR_SN,
+            test_type="ATLAS18_IV_TEST_V1",
+            passed=True,
+            external_ref="RUN-S-LIVE",
+            measured_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            results={"I_500V": 1.2},
+        )
+        preview = build_component_preview(session, component, client.app.state.settings)
+
+    row = _child_group(preview, SENSOR_SN)["rows"][0]
+    assert row["latest"]["external_ref"] == "RUN-S-LIVE"
+    assert row["run_count"] == 1
+    assert row["withdrawn_count"] == 1
+
+
+def test_every_direct_child_gets_a_group_even_without_mirrored_runs(
+    session_factory, client, tudo
+):
+    """"We looked and there is nothing" is a different statement from "we did
+    not look" — and the family tree on the same page already lists the child."""
+    with session_factory() as session:
+        component = _component(session, stage="GLUED")
+        _child(session, component, sn=SENSOR_SN)
+        _child(session, component, sn="20USEP00000900", component_type="PWB", type_code="PBR5")
+        preview = build_component_preview(session, component, client.app.state.settings)
+
+    groups = preview["worksheet"]["children"]
+    # Ordered by serial, deterministically.
+    assert [group["sn"] for group in groups] == ["20USEP00000900", SENSOR_SN]
+    assert all(group["rows"] == [] for group in groups)
+
+
+def _preview_query_counts(session_factory, settings, *, parent_sn, child_prefix, child_count):
+    """Build one preview and report how many statements hit which table."""
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):  # noqa: ARG001
+        statements.append(statement)
+
+    with session_factory() as session:
+        component = _component(session, sn=parent_sn, stage="GLUED")
+        for index in range(child_count):
+            child = _child(session, component, sn=f"{child_prefix}{index:02d}")
+            for test_type in ("ATLAS18_IV_TEST_V1", "ATLAS18_VIS_INSPECTION_V2"):
+                _evidence(
+                    session,
+                    sn=child.sn,
+                    test_type=test_type,
+                    passed=True,
+                    external_ref=f"RUN-{parent_sn}-{index}-{test_type}",
+                    measured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                    results={"VALUE": index},
+                )
+        session.flush()
+
+        engine = session.get_bind()
+        event.listen(engine, "before_cursor_execute", _record)
+        try:
+            preview = build_component_preview(session, component, settings)
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+
+    assert len(preview["worksheet"]["children"]) == child_count
+    return {
+        "evidence": len([s for s in statements if "FROM test_run_evidence" in s]),
+        "attachment": len([s for s in statements if "FROM test_run_attachment" in s]),
+        "component": len([s for s in statements if "FROM component" in s]),
+    }
+
+
+def test_child_evidence_cost_does_not_grow_with_the_number_of_children(
+    session_factory, client, tudo
+):
+    """The invariant that makes this affordable on every module page open: the
+    child pass is a fixed number of statements, not one per child. Asserted by
+    comparing two components rather than by pinning a magic number, so the test
+    keeps meaning what it says if an unrelated query is added elsewhere."""
+    settings = client.app.state.settings
+    one = _preview_query_counts(
+        session_factory,
+        settings,
+        parent_sn="20USEM20000901",
+        child_prefix="20USES400001",
+        child_count=1,
+    )
+    many = _preview_query_counts(
+        session_factory,
+        settings,
+        parent_sn="20USEM20000902",
+        child_prefix="20USES400002",
+        child_count=6,
+    )
+    assert one == many, (one, many)
+    # And the absolute cost stays small: own runs + child metadata + the
+    # payloads of the selected newest runs only.
+    assert many["evidence"] <= 4, many
 
 
 def test_additional_group_shows_a_confirmed_result_before_the_next_mirror_sync(

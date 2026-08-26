@@ -13,23 +13,41 @@ Mirrored runs are summarised in the worksheet and are otherwise served by
 collapsed "All mirrored runs" section is opened. Raw measured values (an IV
 sweep is tens of kilobytes on its own) must therefore never be added back to
 the preview response.
+
+The worksheet also carries the evidence of the component's direct children, in
+one group per child (``worksheet.children``). On real data that is where nearly
+all of a module's history lives — 720 of 14 759 mirrored runs hang on MODULE
+components, the rest on sensors, hybrids, powerboards and, for R5 ring modules,
+on the two half-modules that carry their metrology, glue weight and PS IV.
+Child evidence is shown, never merged into the component's own rows: a
+requirement check is a statement about *this* component, and whether a child's
+passing test may satisfy its parent's requirement is a separate domain decision
+(see docs/10 §7) that this projection deliberately does not take.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import String, cast, select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.orm import Session
 
 from app.assembly import ASSEMBLY_ACTION_KIND, evaluate_assembly
 from app.attachment_store import known_attachments
 from app.domain.stages import StageModel, stage_model_from_settings
-from app.models import Component, IngestFile, InstituteProfile, OutboxAction, TestRunEvidence
+from app.models import (
+    Component,
+    IngestFile,
+    InstituteProfile,
+    OutboxAction,
+    TestRunAttachment,
+    TestRunEvidence,
+)
 from app.outbox import TERMINAL
 from app.stage_service import satisfied_test_results
+from app.test_run_evidence import is_withdrawn
 
 
 def _profile_settings(session: Session, component: Component) -> Mapping[str, Any]:
@@ -330,6 +348,46 @@ def _comparable_time(value: datetime | None) -> datetime:
     return value
 
 
+def _run_rank(run: Any) -> tuple[bool, datetime, datetime, int]:
+    """Ranking key for "which run is current".
+
+    Newest by measured_at with NULLs losing to any dated run; ties break on
+    synced_at then id. The selection happens in Python via an explicit tuple
+    key, so it is engine-independent by construction, and it is deliberately
+    identical to the winner `app.stage_service.satisfied_test_results` picks
+    (its SQL ORDER BY pins NULLS FIRST for measured_at explicitly, so both
+    engines agree with the ranking here) — otherwise a row's status and its
+    `latest` run could disagree about which run is current.
+
+    Accepts anything with `measured_at`/`synced_at`/`id`, so the child-evidence
+    pass can rank lightweight metadata rows by exactly the same rule instead of
+    growing a second, drifting copy of it.
+    """
+    return (
+        run.measured_at is not None,
+        _comparable_time(run.measured_at),
+        _comparable_time(run.synced_at),
+        run.id,
+    )
+
+
+def _partition_withdrawn(runs: Iterable[Any]) -> tuple[list[Any], int]:
+    """Split runs into the ones that still count and a count of the withdrawn.
+
+    The withdrawn ones are counted rather than dropped without trace: hiding
+    data the PDB still holds is its own kind of false statement, so the row
+    keeps saying "and n more that were retracted".
+    """
+    live: list[Any] = []
+    withdrawn = 0
+    for run in runs:
+        if is_withdrawn(run.run_state):
+            withdrawn += 1
+        else:
+            live.append(run)
+    return live, withdrawn
+
+
 def _worksheet_row(
     test_type: str,
     *,
@@ -339,33 +397,15 @@ def _worksheet_row(
     evidence_by_type: Mapping[str, list[TestRunEvidence]],
     attachment_counts: Mapping[str | None, int],
 ) -> dict[str, Any]:
-    runs = evidence_by_type.get(test_type, [])
-    latest = None
-    if runs:
-        # Newest by measured_at with NULLs losing to any dated run; ties break
-        # on synced_at then id. This selection happens in Python via an
-        # explicit tuple key, so it is engine-independent by construction; it
-        # is deliberately kept identical to the winner
-        # `app.stage_service.satisfied_test_results` picks (its SQL ORDER BY
-        # pins NULLS FIRST for measured_at explicitly, so both engines agree
-        # with the ranking here), so the row's status and its `latest` run
-        # never disagree about which run is current.
-        newest = max(
-            runs,
-            key=lambda run: (
-                run.measured_at is not None,
-                _comparable_time(run.measured_at),
-                _comparable_time(run.synced_at),
-                run.id,
-            ),
-        )
-        latest = _worksheet_latest_run(newest, attachment_counts)
+    live, withdrawn = _partition_withdrawn(evidence_by_type.get(test_type, ()))
+    latest = _worksheet_latest_run(max(live, key=_run_rank), attachment_counts) if live else None
     return {
         "test_type": test_type,
         "status": _status_for(test_type, results, pending),
         "latest": latest,
         "staged": list(staged_by_test.get(test_type, ())),
-        "run_count": len(runs),
+        "run_count": len(live),
+        "withdrawn_count": withdrawn,
     }
 
 
@@ -446,6 +486,126 @@ def _build_worksheet(
         )
 
     return {"groups": groups}
+
+
+class _RunMeta:
+    """One mirrored run without its payload.
+
+    Child evidence is planned on this shape first because the payload column is
+    the expensive part: on the owner's mirror the child runs of a single module
+    reach 31 MB of JSON (response curves and IV sweeps), while only the newest
+    run per (child, test type) is ever summarised. Loading the whole thing to
+    then discard 99% of it would make opening a module page cost more than the
+    entire feature saves.
+    """
+
+    __slots__ = ("id", "component_sn", "test_type", "measured_at", "synced_at", "run_state")
+
+    def __init__(self, id, component_sn, test_type, measured_at, synced_at, run_state) -> None:
+        self.id = id
+        self.component_sn = component_sn
+        self.test_type = test_type
+        self.measured_at = measured_at
+        self.synced_at = synced_at
+        self.run_state = run_state
+
+
+def _child_evidence_groups(
+    session: Session, children: Sequence[Component]
+) -> list[dict[str, Any]]:
+    """One evidence group per direct child, in the same compact row shape.
+
+    Cost is independent of how many children there are: one query for the
+    children's run metadata, one for the payloads of the selected newest runs
+    only, one for their attachment counts. Never one query per child.
+
+    Child rows carry no requirement `status` on purpose — a requirement is a
+    statement about the component whose page this is, and the parent's stage
+    gate is unchanged by anything shown here. What a child row does carry is
+    the run's own pass/fail, which is the fact the operator came for.
+    """
+    if not children:
+        return []
+    child_sns = [child.sn for child in children]
+
+    meta_rows = [
+        _RunMeta(*row)
+        for row in session.execute(
+            select(
+                TestRunEvidence.id,
+                TestRunEvidence.component_sn,
+                TestRunEvidence.test_type,
+                TestRunEvidence.measured_at,
+                TestRunEvidence.synced_at,
+                TestRunEvidence.run_state,
+            ).where(TestRunEvidence.component_sn.in_(child_sns))
+        )
+    ]
+
+    grouped: dict[str, dict[str, list[_RunMeta]]] = {}
+    for meta in meta_rows:
+        if not meta.test_type:
+            continue
+        grouped.setdefault(meta.component_sn, {}).setdefault(meta.test_type, []).append(meta)
+
+    winners: dict[tuple[str, str], _RunMeta] = {}
+    counts: dict[tuple[str, str], tuple[int, int]] = {}
+    for child_sn, by_type in grouped.items():
+        for test_type, runs in by_type.items():
+            live, withdrawn = _partition_withdrawn(runs)
+            counts[(child_sn, test_type)] = (len(live), withdrawn)
+            if live:
+                winners[(child_sn, test_type)] = max(live, key=_run_rank)
+
+    payloads: dict[int, TestRunEvidence] = {}
+    if winners:
+        payloads = {
+            row.id: row
+            for row in session.scalars(
+                select(TestRunEvidence).where(
+                    TestRunEvidence.id.in_([meta.id for meta in winners.values()])
+                )
+            )
+        }
+
+    attachment_counts: dict[str | None, int] = {}
+    if winners:
+        for test_run_ref, count in session.execute(
+            select(TestRunAttachment.test_run_ref, func.count())
+            .where(TestRunAttachment.component_sn.in_(child_sns))
+            .group_by(TestRunAttachment.test_run_ref)
+        ):
+            attachment_counts[test_run_ref] = count
+
+    groups: list[dict[str, Any]] = []
+    for child in children:
+        rows: list[dict[str, Any]] = []
+        for test_type in sorted(grouped.get(child.sn, {})):
+            run_count, withdrawn = counts[(child.sn, test_type)]
+            winner = winners.get((child.sn, test_type))
+            latest = (
+                _worksheet_latest_run(payloads[winner.id], attachment_counts)
+                if winner is not None and winner.id in payloads
+                else None
+            )
+            rows.append(
+                {
+                    "test_type": test_type,
+                    "latest": latest,
+                    "run_count": run_count,
+                    "withdrawn_count": withdrawn,
+                }
+            )
+        groups.append(
+            {
+                "sn": child.sn,
+                "component_type": child.component_type,
+                "type_code": child.type_code,
+                "local_name": child.local_name,
+                "rows": rows,
+            }
+        )
+    return groups
 
 
 def build_component_preview(
@@ -529,6 +689,11 @@ def build_component_preview(
     # here and never leave in full: the raw values live behind
     # ``GET /api/components/{sn}/tests``, which the module page requests only
     # when the operator opens "All mirrored runs".
+    #
+    # Withdrawn runs are fetched too, not filtered out in SQL: the row reports
+    # how many of its runs the PDB has retracted, and a test type whose runs
+    # are *all* retracted must still appear (reading `missing`) instead of
+    # disappearing from the sheet as if it had never been attempted.
     evidence_rows = list(
         session.scalars(
             select(TestRunEvidence)
@@ -559,6 +724,14 @@ def build_component_preview(
         evidence_rows=evidence_rows,
         attachment_counts=attachment_counts,
     )
+    children = list(
+        session.scalars(
+            select(Component)
+            .where(Component.parent_id == component.id)
+            .order_by(Component.sn)
+        )
+    )
+    worksheet["children"] = _child_evidence_groups(session, children)
 
     return {
         "current": {

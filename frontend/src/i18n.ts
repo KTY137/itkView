@@ -668,6 +668,16 @@ const en = {
     prefillBlockedRequired: (fields: string) =>
       `${fields} cannot be reproduced in this form and are required by the schema, so recording here is disabled to avoid silently dropping them. Use the file-drop upload above instead.`,
     editIntentMissing: (testType: string) => `No worksheet row for ${testType} yet.`,
+    // Child evidence: most of a module's history is measured on its sensor,
+    // hybrid and powerboard (and for an R5 ring module on its half-modules),
+    // so the page shows it — as the child's evidence, never as the module's.
+    childrenTitle: "Evidence on child components",
+    childrenIntro:
+      "Measured on the children, not on this component. Shown for context — it does not satisfy this component's required tests.",
+    childrenEmpty: "No mirrored runs for this child yet.",
+    colResult: "Result",
+    childRunCount: (n: number) => (n === 1 ? "1 run" : `${n} runs`),
+    childWithdrawn: (n: number) => `${n} withdrawn in PDB`,
     testForm: {
       ...testFormLabels,
       submit: "Stage test result",

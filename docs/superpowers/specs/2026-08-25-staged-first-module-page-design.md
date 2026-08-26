@@ -1,7 +1,12 @@
 # Spec: Staged-First-Modulseite + Auto-Mirror
 
-Datum: 2026-08-25 · Status: vom Nutzer freigegeben (Chat) · Owner: docs/00-doc-map.md
-Betroffene Roadmap-Punkte: Phase-2-Ingestion, Phase-3-Stage-Flow (docs/04).
+Datum: 2026-08-25 · Status: vom Nutzer freigegeben (Chat) · Owner:
+[docs/00-doc-map.md](../../00-doc-map.md)
+Betroffene Roadmap-Punkte: Phase-2-Ingestion, Phase-3-Stage-Flow
+([docs/04](../../04-roadmap.md)).
+Umgesetzt als [ADR 006](../../adr/006-staged-first-ui-auto-mirror.md); die
+laufende UI-Referenz dazu ist
+[docs/05](../../05-ui-design-reference.md).
 
 ## Ziel
 
@@ -188,11 +193,13 @@ pytest: Job-Verlauf mit Fakes (Fortschritt, Auto-Kette, Lease), EOS-Branch
 - Neues ADR 006 „Staged-first UI + Auto-Mirror" (Entscheidung, Ehrlichkeits-
   regel fürs Staged-Fenster, drei Attachment-Quellen inkl. Sicherheits-
   begründung der Pfad-/HTML-Checks).
-- `docs/05` (UI-Referenz): Modulseiten-Tabs, Staged-Fenster, Ingest-Log,
-  Preferences-Panel.
-- `docs/10`: CATEGORY_A/X/BOND_PULLING-Erklärung für ASIC-Bestände.
-- `docs/04` „Aktueller Stand" + `docs/00-doc-map.md` (preview.py,
-  test_type_schema, Job-Kind evidence).
+- [`docs/05`](../../05-ui-design-reference.md) (UI-Referenz): Modulseiten-Tabs,
+  Staged-Fenster, Ingest-Log, Preferences-Panel.
+- [`docs/10`](../../10-itk-domain-reference.md):
+  CATEGORY_A/X/BOND_PULLING-Erklärung für ASIC-Bestände.
+- [`docs/04`](../../04-roadmap.md) „Aktueller Stand" +
+  [`docs/00-doc-map.md`](../../00-doc-map.md) (preview.py, test_type_schema,
+  Job-Kind evidence).
 
 ## Etappen
 

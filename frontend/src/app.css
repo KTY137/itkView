@@ -3371,6 +3371,18 @@ g:hover > .curve-line {
 .ws-group-future {
   opacity: 0.6;
 }
+/* Evidence measured on the children, kept visually distinct from the
+   component's own stage groups so the two are never read as one sheet. */
+.ws-children {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+.ws-children .state-note {
+  margin: 0;
+}
 .ws-group-label {
   font: 700 12px var(--sans);
   text-transform: uppercase;

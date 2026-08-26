@@ -258,11 +258,21 @@ class WorksheetStagedRefOut(BaseModel):
 
 
 class WorksheetRowOut(BaseModel):
+    """``run_count`` counts only runs the PDB still stands behind.
+
+    ``withdrawn_count`` reports the runs it has retracted (`state='deleted'`).
+    They are excluded from ``latest``, from ``run_count`` and from the
+    requirement ``status`` — a retracted measurement is not evidence — but they
+    are counted rather than erased, because silently hiding data the PDB still
+    holds is its own kind of false statement.
+    """
+
     test_type: str
     status: Literal["passed", "failed", "missing", "pending"]
     latest: WorksheetLatestRunOut | None
     staged: list[WorksheetStagedRefOut]
     run_count: int
+    withdrawn_count: int
 
 
 class WorksheetGroupOut(BaseModel):
@@ -273,8 +283,40 @@ class WorksheetGroupOut(BaseModel):
     rows: list[WorksheetRowOut]
 
 
+class WorksheetChildRowOut(BaseModel):
+    """A child component's evidence for one test type.
+
+    Deliberately without a requirement ``status``: a requirement check is a
+    statement about the component whose page this is, and showing a child's
+    evidence must not change what gates that component's stage move.
+    ``latest.passed`` carries the run's own verdict instead.
+    """
+
+    test_type: str
+    latest: WorksheetLatestRunOut | None
+    run_count: int
+    withdrawn_count: int
+
+
+class WorksheetChildGroupOut(BaseModel):
+    """Evidence that lives on one direct child of the component.
+
+    Identity is the child's serial plus its type and local name, because that
+    is what an operator recognises on the bench. Groups are emitted for every
+    direct child, including one with no mirrored runs at all — "we looked and
+    there is nothing" is a different statement from "we did not look".
+    """
+
+    sn: str
+    component_type: str
+    type_code: str
+    local_name: str | None
+    rows: list[WorksheetChildRowOut]
+
+
 class ComponentPreviewWorksheetOut(BaseModel):
     groups: list[WorksheetGroupOut]
+    children: list[WorksheetChildGroupOut]
 
 
 class ComponentPreviewOut(BaseModel):
@@ -871,6 +913,12 @@ class TestRunDetailOut(BaseModel):
 
     `results` and `properties` are keyed by PDB code; `result_meta` carries the
     human name, which is where the unit lives ("Weight of glue ... [g]").
+
+    `run_state` is the PDB's own state for the run. Withdrawn runs
+    (`state='deleted'`) are still listed here — the PDB still holds them and
+    hiding them would be its own kind of lie — but they no longer count as
+    evidence anywhere a requirement or a statistic is decided, so a reader of
+    this list must consult `run_state` before treating a run as valid.
     """
 
     test_type: str
@@ -878,6 +926,7 @@ class TestRunDetailOut(BaseModel):
     external_ref: str | None
     measured_at: datetime | None
     run_number: str | None
+    run_state: str | None = None
     results: dict[str, Any]
     result_meta: dict[str, Any]
     properties: dict[str, Any]
