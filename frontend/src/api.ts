@@ -68,6 +68,13 @@ export type ComponentPreviewAction = {
   submittable_reason: string | null;
 };
 
+/**
+ * A staged, not-yet-pushed test upload ("ghost run").
+ *
+ * Shaped like a mirrored run so both render through the same components;
+ * `ghost` is always true and `attachments` always empty, because the run does
+ * not exist in the PDB yet.
+ */
 export type ComponentPreviewTest = {
   test_type: string;
   passed: boolean | null;
@@ -84,10 +91,61 @@ export type ComponentPreviewTest = {
   outbox_action_id: number | null;
 };
 
+export type WorksheetScalar = { code: string; name: string; value: unknown };
+
+export type WorksheetArraySummary = {
+  code: string;
+  name: string;
+  /** Sample count for arrays, key count for map-valued results. */
+  points: number;
+  /** Absent on older payloads; treat as "array". */
+  kind?: "array" | "map";
+};
+
+export type WorksheetLatestRun = {
+  external_ref: string | null;
+  measured_at: string | null;
+  run_number: string | number | null;
+  passed: boolean | null;
+  scalars: WorksheetScalar[];
+  arrays: WorksheetArraySummary[];
+  attachment_count: number;
+};
+
+export type WorksheetStagedRef = { outbox_action_id: number; status: OutboxStatus };
+
+export type WorksheetRow = {
+  test_type: string;
+  status: "passed" | "failed" | "missing" | "pending";
+  latest: WorksheetLatestRun | null;
+  staged: WorksheetStagedRef[];
+  run_count: number;
+};
+
+export type WorksheetGroup = {
+  /** null = "Additional" group: mirrored test types outside the stage model. */
+  stage: string | null;
+  reached: boolean;
+  rows: WorksheetRow[];
+};
+
+export type ComponentPreviewWorksheet = { groups: WorksheetGroup[] };
+
 export type ComponentPreview = {
   current: ComponentPreviewState;
   staged_actions: ComponentPreviewAction[];
-  projected: ComponentPreviewState & { tests: ComponentPreviewTest[] };
+  projected: ComponentPreviewState & {
+    /**
+     * Staged uploads only — never the mirrored runs.
+     *
+     * Those carry raw measured values (one IV sweep outweighs everything else
+     * on this page) and are fetched on demand via `getComponentTests` when the
+     * collapsed run list is opened.
+     *
+     */
+    ghost_tests: ComponentPreviewTest[];
+  };
+  worksheet: ComponentPreviewWorksheet;
 };
 
 export type ComponentSyncResult = {

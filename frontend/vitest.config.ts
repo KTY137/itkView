@@ -11,6 +11,11 @@ export default defineConfig({
     pool: "threads",
     maxWorkers: 1,
     fileParallelism: false,
+    // jsdom + userEvent interaction tests finish in ~1.5 s idle but have been
+    // measured past 5 s on a busy machine (several agents or a sync sweep in
+    // the background), which turned correct tests red. Raise the ceiling so a
+    // red result means broken, not busy; a genuinely hanging test still fails.
+    testTimeout: 20_000,
     clearMocks: true,
     restoreMocks: true,
   },

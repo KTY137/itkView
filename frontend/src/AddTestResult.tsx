@@ -1,10 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, DragEvent } from "react";
-import {
-  getIngestPreview,
-  postIngestFile,
-  postIngestOutboxProposal,
-} from "./api";
 import type {
   IngestFile,
   IngestPreview,
@@ -16,6 +11,13 @@ import type {
   TestFormLabels,
   TestFormSubmitPayload,
 } from "./TestForm";
+import {
+  fetchDryRun,
+  ingestTestPayload,
+  manualEntryPayload,
+  proposeStagedUpload,
+  stageBlockReason,
+} from "./testStaging";
 
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
 
@@ -127,19 +129,6 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function manualPayload(payload: TestFormSubmitPayload): Record<string, unknown> {
-  return {
-    component: payload.component,
-    testType: payload.testType,
-    runNumber: payload.runNumber,
-    date: payload.date,
-    passed: payload.passed,
-    problems: payload.problems,
-    properties: payload.properties,
-    results: payload.results,
-  };
 }
 
 export default function AddTestResult({
@@ -321,19 +310,18 @@ export default function AddTestResult({
 
     let created: IngestFile | null = null;
     try {
-      const body: Parameters<typeof postIngestFile>[0] = {
+      created = await ingestTestPayload({
         filename,
         payload,
-        component_sn: componentSn,
+        componentSn,
         ...(normalizedPinnedTestType === null
           ? {}
-          : { test_type: normalizedPinnedTestType }),
+          : { testType: normalizedPinnedTestType }),
         ...(parser === undefined ? {} : { parser }),
-      };
-      created = await postIngestFile(body);
+      });
       if (!operationIsCurrent(generation)) return;
       setIngest(created);
-      const nextPreview = await getIngestPreview(created.id);
+      const nextPreview = await fetchDryRun(created.id);
       if (!operationIsCurrent(generation)) return;
       setPreview(nextPreview);
       setStagedActionId(created.outbox_action_id);
@@ -407,7 +395,7 @@ export default function AddTestResult({
   async function handleManualSubmit(payload: TestFormSubmitPayload) {
     await ingestPayload(
       labels.manualFilename(payload.testType),
-      manualPayload(payload),
+      manualEntryPayload(payload),
       "manual-entry",
     );
   }
@@ -435,7 +423,7 @@ export default function AddTestResult({
     setBusy("preview");
     setPreviewError(null);
     try {
-      const nextPreview = await getIngestPreview(currentIngest.id);
+      const nextPreview = await fetchDryRun(currentIngest.id);
       if (!operationIsCurrent(generation)) return;
       setPreview(nextPreview);
       await notifyPreviewReady(currentIngest, nextPreview);
@@ -451,11 +439,8 @@ export default function AddTestResult({
   async function handleStageUpload() {
     if (
       ingest === null ||
-      preview === null ||
-      !preview.upload_ready ||
-      preview.issues.length > 0 ||
-      stagedActionId !== null ||
-      ingest.outbox_action_id !== null
+      stageBlockReason(preview, stagedActionId ?? ingest.outbox_action_id) !== null ||
+      preview === null
     ) {
       return;
     }
@@ -466,10 +451,7 @@ export default function AddTestResult({
     setBusy("stage");
     setStageError(null);
     try {
-      const body: Parameters<typeof postIngestOutboxProposal>[1] = {
-        ...(instituteCode === undefined ? {} : { institute_code: instituteCode }),
-      };
-      const action = await postIngestOutboxProposal(currentIngest.id, body);
+      const action = await proposeStagedUpload(currentIngest.id, instituteCode);
       if (!operationIsCurrent(generation)) return;
       const nextIngest = {
         ...currentIngest,
@@ -506,12 +488,7 @@ export default function AddTestResult({
 
   const existingActionId = stagedActionId ?? ingest?.outbox_action_id ?? null;
   const stageDisabled =
-    disabled ||
-    busy !== null ||
-    preview === null ||
-    !preview.upload_ready ||
-    preview.issues.length > 0 ||
-    existingActionId !== null;
+    disabled || busy !== null || stageBlockReason(preview, existingActionId) !== null;
 
   return (
     <section

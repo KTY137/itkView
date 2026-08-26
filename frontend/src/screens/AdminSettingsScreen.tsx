@@ -1,9 +1,40 @@
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
+import { getMeasurementDimensions, getStatsDimensions, getTestTypeSchemas } from "../api";
 import type { Institute } from "../api";
 
 const MASKED_SECRET = "***";
 const MAX_GLUE_POT_LIFE_MINUTES = 1_440;
+const STAGE_NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/u;
+const TEST_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/u;
+const TEST_TYPE_LIST_ID = "admin-stage-test-types";
+/** Guard against a pathological mirror; a real profile has a handful of types. */
+const MAX_SCHEMA_COMPONENT_TYPES = 8;
+
+// Mirror of the institute-agnostic seed model in
+// `backend/app/domain/stages.py` (DEFAULT_STAGE_ORDER /
+// DEFAULT_STAGE_REQUIREMENTS). It is *not* institute configuration — an
+// institute's own values always live in its profile — but the editor cannot
+// show what a profile without an override currently evaluates against without
+// knowing the seed, and no endpoint exposes the merged model. Keep in sync
+// with the backend seed; anything institute-specific belongs in the profile.
+const SEED_STAGE_ORDER: readonly string[] = [
+  "HV_TAB_ATTACHED",
+  "GLUED",
+  "STITCH_BONDING",
+  "BONDED",
+  "TESTED",
+  "FINISHED",
+];
+
+const SEED_STAGE_REQUIREMENTS: Readonly<Record<string, readonly string[]>> = {
+  HV_TAB_ATTACHED: ["VISUAL_INSPECTION", "MODULE_IV_PS_V1"],
+  GLUED: ["GLUE_WEIGHT", "MODULE_BOW", "MODULE_METROLOGY"],
+  STITCH_BONDING: [],
+  BONDED: ["MODULE_WIRE_BONDING"],
+  TESTED: ["MODULE_IV_AMAC_TC"],
+  FINISHED: [],
+};
 
 let nextRowId = 0;
 
@@ -55,11 +86,22 @@ type ReceptionTestRow = {
   testType: string;
 };
 
+type StageRow = {
+  key: string;
+  name: string;
+  /** The stage exists in the seed model, so the engine always evaluates it. */
+  fromSeed: boolean;
+  /** Loaded from a `stage_requirements` entry the saved order did not list. */
+  appended: boolean;
+  tests: TextRow[];
+};
+
 type SettingsDraft = {
   name: string;
   localNamePrefix: string;
   logoUrl: string;
   pdbProject: string;
+  stages: StageRow[];
   channels: ChannelDraft[];
   receptionChecklist: TextRow[];
   receptionTests: ReceptionTestRow[];
@@ -93,6 +135,10 @@ export type AdminOperationalSettings = {
   glue_pot_life_minutes: Record<string, number>;
   evidence_component_types: string[];
   reminder_escalation: { after_minutes: number; channel: string } | null;
+  /** Complete ordered stage list; written together with `stage_requirements`. */
+  stage_order: string[];
+  /** One entry per listed stage, so the saved profile is fully explicit. */
+  stage_requirements: Record<string, string[]>;
 };
 
 export type AdminSettingsUpdate = {
@@ -164,6 +210,29 @@ export type AdminSettingsLabels = {
   receptionComponentTypePlaceholder: string;
   receptionTestTypeLabel: string;
   receptionTestTypePlaceholder: string;
+  stagesTitle: string;
+  stagesHint: string;
+  stagesImpact: string;
+  stagesDirtyWarning: string;
+  addStage: string;
+  stageRowLabel: (index: number) => string;
+  stageNameLabel: string;
+  stageNamePlaceholder: string;
+  stageOriginSeed: string;
+  stageOriginCustom: string;
+  stageOriginAppended: string;
+  stageSeedLockedHint: string;
+  stageMoveUp: string;
+  stageMoveDown: string;
+  stageRemove: string;
+  stageTestsLabel: string;
+  stageTestsEmpty: string;
+  addStageTest: string;
+  stageTestLabel: (index: number) => string;
+  stageTestPlaceholder: string;
+  stageRemoveTest: (index: number) => string;
+  stageTestUnknown: string;
+  stageTestUnknownHint: string;
   glueTitle: string;
   glueHint: string;
   glueEmpty: string;
@@ -205,8 +274,56 @@ export type AdminSettingsScreenProps = {
     update: AdminSettingsUpdate,
   ) => Promise<Institute | void>;
   onTestChannel: (instituteCode: string, channelName: string) => Promise<void>;
+  /**
+   * Test types the local mirror already knows, offered as suggestions for a
+   * stage requirement. Injectable so tests stay offline; production uses the
+   * mirrored schemas plus the evidence that has actually been recorded.
+   */
+  loadKnownTestTypes?: (signal?: AbortSignal) => Promise<string[]>;
   labels: AdminSettingsLabels;
 };
+
+function normalizedTestType(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const cleaned = value.trim().toUpperCase();
+  return cleaned === "" ? null : cleaned;
+}
+
+/**
+ * Collect the test types the frontend can already reach: the locally mirrored
+ * PDB test-type schemas (per component type present in the stage history) and
+ * every test type that appears in mirrored measurement evidence. Both are
+ * discovery sources, never a whitelist — a stage may require a test nobody has
+ * recorded yet, so a failure here only removes the suggestions.
+ */
+async function loadMirroredTestTypes(signal?: AbortSignal): Promise<string[]> {
+  const found = new Set<string>();
+  const [dimensions, measurements] = await Promise.allSettled([
+    getStatsDimensions(signal),
+    getMeasurementDimensions(signal),
+  ]);
+  if (measurements.status === "fulfilled") {
+    for (const entry of measurements.value.test_types) {
+      const testType = normalizedTestType(entry.test_type);
+      if (testType !== null) found.add(testType);
+    }
+  }
+  const componentTypes =
+    dimensions.status === "fulfilled"
+      ? dimensions.value.component_types.slice(0, MAX_SCHEMA_COMPONENT_TYPES)
+      : [];
+  const schemas = await Promise.allSettled(
+    componentTypes.map((componentType) => getTestTypeSchemas(componentType, signal)),
+  );
+  for (const result of schemas) {
+    if (result.status !== "fulfilled") continue;
+    for (const row of result.value) {
+      const testType = normalizedTestType(row.test_code);
+      if (testType !== null) found.add(testType);
+    }
+  }
+  return [...found].sort((left, right) => left.localeCompare(right));
+}
 
 function asObject(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -314,6 +431,59 @@ function receptionTestRows(value: unknown): ReceptionTestRow[] {
   });
 }
 
+function stringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.every((item) => typeof item === "string" && item !== "")
+    ? (value as string[])
+    : null;
+}
+
+/**
+ * Project the saved profile exactly the way `stage_model_from_settings`
+ * (backend/app/domain/stages.py) does, so the editor shows what the engine
+ * will actually evaluate:
+ *
+ *  - `stage_order` replaces the seed order wholesale; any other shape (absent,
+ *    null, a non-list, a list holding a non-string or an empty string) keeps
+ *    the seed order.
+ *  - `stage_requirements` replaces the seed requirements *per stage*; stages
+ *    the override does not mention keep their seed requirements. Because the
+ *    seed keys therefore always survive the merge, a seed stage that is left
+ *    out of the order is not dropped — it is appended after the ordered
+ *    stages. That is why seed stages cannot be removed or renamed here.
+ */
+function stageRowsFromSettings(settings: Record<string, unknown>): StageRow[] {
+  const order = stringArray(settings.stage_order) ?? [...SEED_STAGE_ORDER];
+  const requirements = new Map<string, string[]>();
+  for (const [stage, tests] of Object.entries(SEED_STAGE_REQUIREMENTS)) {
+    requirements.set(stage, [...tests]);
+  }
+  const override = asObject(settings.stage_requirements);
+  if (override !== null) {
+    for (const [stage, tests] of Object.entries(override)) {
+      if (!Array.isArray(tests)) continue;
+      const list = tests.filter((item): item is string => typeof item === "string");
+      // A single non-string entry makes the backend ignore the whole override
+      // for this stage, which then keeps its seed requirements.
+      if (list.length === tests.length) requirements.set(stage, list);
+    }
+  }
+  const effectiveOrder = [
+    ...order,
+    ...[...requirements.keys()].filter((stage) => !order.includes(stage)),
+  ];
+  return effectiveOrder.map((stage) => ({
+    key: rowId("admin-stage"),
+    name: stage,
+    fromSeed: SEED_STAGE_ORDER.includes(stage) || stage in SEED_STAGE_REQUIREMENTS,
+    appended: !order.includes(stage),
+    tests: (requirements.get(stage) ?? []).map((testType) => ({
+      key: rowId("admin-stage-test"),
+      value: testType,
+    })),
+  }));
+}
+
 function draftFromInstitute(institute: Institute): SettingsDraft {
   const settings = asObject(institute.settings) ?? {};
   const escalation = asObject(settings.reminder_escalation);
@@ -322,6 +492,7 @@ function draftFromInstitute(institute: Institute): SettingsDraft {
     localNamePrefix: institute.local_name_prefix,
     logoUrl: stringSetting(settings, "logo_url"),
     pdbProject: stringSetting(settings, "pdb_project"),
+    stages: stageRowsFromSettings(settings),
     channels: channelRows(settings.notification_channels),
     receptionChecklist: stringList(
       settings.shipment_reception_checklist,
@@ -348,6 +519,7 @@ function emptyDraft(): SettingsDraft {
     localNamePrefix: "",
     logoUrl: "",
     pdbProject: "",
+    stages: [],
     channels: [],
     receptionChecklist: [],
     receptionTests: [],
@@ -361,6 +533,10 @@ function emptyDraft(): SettingsDraft {
 function cloneDraft(draft: SettingsDraft): SettingsDraft {
   return {
     ...draft,
+    stages: draft.stages.map((row) => ({
+      ...row,
+      tests: row.tests.map((test) => ({ ...test })),
+    })),
     channels: draft.channels.map((row) => ({ ...row })),
     receptionChecklist: draft.receptionChecklist.map((row) => ({ ...row })),
     receptionTests: draft.receptionTests.map((row) => ({ ...row })),
@@ -369,12 +545,20 @@ function cloneDraft(draft: SettingsDraft): SettingsDraft {
   };
 }
 
+function comparableStages(draft: SettingsDraft): { stage: string; tests: string[] }[] {
+  return draft.stages.map((row) => ({
+    stage: row.name,
+    tests: row.tests.map((test) => test.value),
+  }));
+}
+
 function comparableDraft(draft: SettingsDraft): string {
   return JSON.stringify({
     name: draft.name,
     localNamePrefix: draft.localNamePrefix,
     logoUrl: draft.logoUrl,
     pdbProject: draft.pdbProject,
+    stages: comparableStages(draft),
     channels: draft.channels.map(({ key: _key, ...row }) => row),
     receptionChecklist: draft.receptionChecklist.map((row) => row.value),
     receptionTests: draft.receptionTests.map((row) => ({
@@ -635,6 +819,43 @@ function validateAndBuildUpdate(
     gluePotLifeMinutes[glueType] = minutes;
   }
 
+  // One entry per listed stage — including empty ones. Writing the map in full
+  // keeps the saved profile self-explanatory: no stage silently keeps a seed
+  // requirement that the editor is no longer showing.
+  const stageOrder: string[] = [];
+  const stageRequirements = Object.create(null) as Record<string, string[]>;
+  for (const row of draft.stages) {
+    const stage = row.name.trim().toUpperCase();
+    if (stage === "") return { error: labels.required(labels.stageNameLabel) };
+    if (stage.length > 64) return { error: labels.tooLong(labels.stageNameLabel, 64) };
+    if (!STAGE_NAME_PATTERN.test(stage)) {
+      return { error: labels.required(labels.stageNameLabel) };
+    }
+    if (stageOrder.includes(stage)) {
+      return { error: labels.duplicate(labels.stageNameLabel, stage) };
+    }
+    const tests: string[] = [];
+    for (const test of row.tests) {
+      const testType = test.value.trim().toUpperCase();
+      if (testType === "") return { error: labels.required(labels.stageTestsLabel) };
+      if (testType.length > 64) {
+        return { error: labels.tooLong(labels.stageTestsLabel, 64) };
+      }
+      if (!TEST_TYPE_PATTERN.test(testType)) {
+        return { error: labels.required(labels.stageTestsLabel) };
+      }
+      if (tests.includes(testType)) {
+        return { error: labels.duplicate(labels.stageTestsLabel, testType) };
+      }
+      tests.push(testType);
+    }
+    stageOrder.push(stage);
+    stageRequirements[stage] = tests;
+  }
+  if (stageOrder.length === 0) {
+    return { error: labels.required(labels.stagesTitle) };
+  }
+
   const evidenceComponentTypes: string[] = [];
   const evidenceTypes = new Set<string>();
   for (const row of draft.evidenceComponentTypes) {
@@ -681,6 +902,8 @@ function validateAndBuildUpdate(
         glue_pot_life_minutes: gluePotLifeMinutes,
         evidence_component_types: evidenceComponentTypes,
         reminder_escalation: reminderEscalation,
+        stage_order: stageOrder,
+        stage_requirements: stageRequirements,
       },
     },
   };
@@ -726,6 +949,7 @@ export default function AdminSettingsScreen({
   onSelectedCodeChange,
   onSave,
   onTestChannel,
+  loadKnownTestTypes = loadMirroredTestTypes,
   labels,
 }: AdminSettingsScreenProps) {
   const selectedInstitute = useMemo(
@@ -739,6 +963,23 @@ export default function AdminSettingsScreen({
   const [testingKey, setTestingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [knownTestTypes, setKnownTestTypes] = useState<readonly string[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    loadKnownTestTypes(controller.signal)
+      .then((types) => {
+        // Suggestions only: a lookup failure must never stop the admin from
+        // entering a test type the mirror has not seen yet.
+        if (active) setKnownTestTypes(types);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [loadKnownTestTypes]);
 
   useEffect(() => {
     const next = selectedInstitute === null ? emptyDraft() : draftFromInstitute(selectedInstitute);
@@ -763,6 +1004,35 @@ export default function AdminSettingsScreen({
     setError(null);
     setNotice(null);
   }
+
+  function changeStages(updater: (rows: StageRow[]) => StageRow[]) {
+    changeDraft((current) => ({ ...current, stages: updater(current.stages) }));
+  }
+
+  function updateStage(key: string, updater: (row: StageRow) => StageRow) {
+    changeStages((rows) => rows.map((row) => (row.key === key ? updater(row) : row)));
+  }
+
+  /** Keyboard-operable reorder: the buttons are the primary control, so this
+   * only has to move one row; React keeps focus on the button that moved. */
+  function moveStage(key: string, offset: number) {
+    changeStages((rows) => {
+      const index = rows.findIndex((row) => row.key === key);
+      const target = index + offset;
+      if (index < 0 || target < 0 || target >= rows.length) return rows;
+      const reordered = [...rows];
+      const [moved] = reordered.splice(index, 1);
+      reordered.splice(target, 0, moved);
+      return reordered;
+    });
+  }
+
+  function isKnownTestType(value: string): boolean {
+    return knownTestTypes.includes(value.trim().toUpperCase());
+  }
+
+  const stageModelDirty =
+    JSON.stringify(comparableStages(draft)) !== JSON.stringify(comparableStages(savedDraft));
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -931,6 +1201,206 @@ export default function AdminSettingsScreen({
                   }
                 />
               </label>
+            </div>
+          </section>
+
+          <section className="panel admin-settings-section" aria-labelledby="admin-stages-title">
+            <div className="admin-settings-section-head">
+              <div>
+                <h2 className="section-title" id="admin-stages-title">
+                  {labels.stagesTitle}
+                </h2>
+                <p className="muted admin-settings-copy">{labels.stagesHint}</p>
+                <p className="muted admin-settings-copy">{labels.stagesImpact}</p>
+                <p className="muted admin-settings-copy" id="admin-stage-seed-hint">
+                  {labels.stageSeedLockedHint}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy}
+                onClick={() =>
+                  changeStages((rows) => [
+                    ...rows,
+                    {
+                      key: rowId("admin-stage"),
+                      name: "",
+                      fromSeed: false,
+                      appended: false,
+                      tests: [],
+                    },
+                  ])
+                }
+              >
+                {labels.addStage}
+              </button>
+            </div>
+            {stageModelDirty && (
+              <div className="info-banner admin-settings-message" role="status">
+                <span>{labels.stagesDirtyWarning}</span>
+              </div>
+            )}
+            <datalist id={TEST_TYPE_LIST_ID}>
+              {knownTestTypes.map((testType) => (
+                <option value={testType} key={testType} />
+              ))}
+            </datalist>
+            <div className="admin-settings-list">
+              {draft.stages.map((row, index) => (
+                <div
+                  className="admin-settings-row"
+                  role="group"
+                  aria-label={labels.stageRowLabel(index + 1)}
+                  key={row.key}
+                >
+                  <div className="admin-settings-channel-row">
+                    <label className="admin-settings-field">
+                      <span className="field-label">{labels.stageNameLabel}</span>
+                      <input
+                        className="text-input mono"
+                        value={row.name}
+                        maxLength={64}
+                        placeholder={labels.stageNamePlaceholder}
+                        disabled={busy}
+                        readOnly={row.fromSeed}
+                        aria-describedby={row.fromSeed ? "admin-stage-seed-hint" : undefined}
+                        onChange={(event) =>
+                          updateStage(row.key, (current) => ({
+                            ...current,
+                            name: event.target.value.toUpperCase(),
+                          }))
+                        }
+                      />
+                    </label>
+                    <div className="chip-row">
+                      <span className="chip neutral mono">{index + 1}</span>
+                      <span className="chip neutral">
+                        {row.fromSeed ? labels.stageOriginSeed : labels.stageOriginCustom}
+                      </span>
+                      {row.appended && (
+                        <span className="chip amber">{labels.stageOriginAppended}</span>
+                      )}
+                    </div>
+                    <div className="admin-settings-row-actions">
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy || index === 0}
+                        onClick={() => moveStage(row.key, -1)}
+                      >
+                        {labels.stageMoveUp}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy || index === draft.stages.length - 1}
+                        onClick={() => moveStage(row.key, 1)}
+                      >
+                        {labels.stageMoveDown}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn danger"
+                        disabled={busy || row.fromSeed}
+                        aria-describedby={row.fromSeed ? "admin-stage-seed-hint" : undefined}
+                        onClick={() =>
+                          changeStages((rows) =>
+                            rows.filter((candidate) => candidate.key !== row.key),
+                          )
+                        }
+                      >
+                        {labels.stageRemove}
+                      </button>
+                    </div>
+                  </div>
+                  <span className="field-label">{labels.stageTestsLabel}</span>
+                  {row.tests.length === 0 ? (
+                    <p className="state-note admin-settings-empty">{labels.stageTestsEmpty}</p>
+                  ) : (
+                    <div className="admin-settings-list">
+                      {row.tests.map((test, testIndex) => {
+                        const value = test.value.trim();
+                        const unrecognized =
+                          knownTestTypes.length > 0 && value !== "" && !isKnownTestType(value);
+                        return (
+                          <div className="admin-settings-simple-row" key={test.key}>
+                            <div className="admin-settings-field admin-settings-field-wide">
+                              <label className="field-label" htmlFor={test.key}>
+                                {labels.stageTestLabel(testIndex + 1)}
+                              </label>
+                              <input
+                                id={test.key}
+                                className="text-input mono"
+                                list={TEST_TYPE_LIST_ID}
+                                value={test.value}
+                                maxLength={64}
+                                placeholder={labels.stageTestPlaceholder}
+                                disabled={busy}
+                                aria-describedby={
+                                  unrecognized ? `${test.key}-unrecognized` : undefined
+                                }
+                                onChange={(event) =>
+                                  updateStage(row.key, (current) => ({
+                                    ...current,
+                                    tests: updateTextRow(
+                                      current.tests,
+                                      test.key,
+                                      event.target.value.toUpperCase(),
+                                    ),
+                                  }))
+                                }
+                              />
+                              {unrecognized && (
+                                <span
+                                  className="muted admin-settings-secret-hint"
+                                  id={`${test.key}-unrecognized`}
+                                >
+                                  <span className="chip amber">{labels.stageTestUnknown}</span>{" "}
+                                  {labels.stageTestUnknownHint}
+                                </span>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              className="btn danger"
+                              disabled={busy}
+                              onClick={() =>
+                                updateStage(row.key, (current) => ({
+                                  ...current,
+                                  tests: current.tests.filter(
+                                    (candidate) => candidate.key !== test.key,
+                                  ),
+                                }))
+                              }
+                            >
+                              {labels.stageRemoveTest(testIndex + 1)}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <div className="admin-settings-row-actions">
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy}
+                      onClick={() =>
+                        updateStage(row.key, (current) => ({
+                          ...current,
+                          tests: [
+                            ...current.tests,
+                            { key: rowId("admin-stage-test"), value: "" },
+                          ],
+                        }))
+                      }
+                    >
+                      {labels.addStageTest}
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           </section>
 

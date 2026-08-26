@@ -2,6 +2,7 @@
  * Small presentational helpers shared across screens: semantic colour-coding
  * for production stages and human-readable roles for the family tree.
  */
+import type { OutboxStatus } from "./api";
 
 /**
  * Colour system for production stages — an *ordered* ramp, not arbitrary
@@ -103,6 +104,16 @@ export function statusTone(status: string): "good" | "crit" | "none" {
   if (status === "confirmed") return "good";
   if (status === "failed") return "crit";
   return "none";
+}
+
+/** Chip class for an outbox action's status. Shared by the Staged-actions
+ * panel and the worksheet's ghost sub-rows (review finding M4) so both read
+ * the same status the same way instead of keeping two copies in sync. */
+export function outboxStatusChipClass(status: OutboxStatus): string {
+  if (status === "confirmed") return "chip green";
+  if (status === "failed") return "chip red";
+  if (status === "cancelled") return "chip muted";
+  return "chip amber"; // draft / validated / approved / submitted are in-flight
 }
 
 /** Family-tree role label from a PDB component type. Institute-agnostic; falls

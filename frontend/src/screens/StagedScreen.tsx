@@ -1,3 +1,23 @@
+/**
+ * Staged work queue (spec §D) — the approval half of the worksheet flow: a
+ * value is entered in the module's own table, staged as a ghost, and judged
+ * here.
+ *
+ * For that judgement to be informed, a staged test upload has to show what it
+ * actually proposes. The outbox action's own payload deliberately carries only
+ * routing metadata (ingest id, SN, test type, run number) — the measured values
+ * live in the ingest file. The honest client-side source for them is the
+ * component preview: `projected.ghost_tests[]` contains one `ghost: true` entry per
+ * open `upload_test_run`, keyed back by `outbox_action_id`, built server-side
+ * from that same ingest payload (`preview._ghost_test`). No new endpoint, no
+ * client-side re-derivation of what will be submitted.
+ *
+ * The ghost carries its results verbatim, so this screen applies the worksheet's
+ * compaction contract (spec §H1) itself: a few scalars inline, arrays and
+ * dict-valued results as a count chip only. A raw curve or per-position map must
+ * never reach the DOM here either — that is the wall of numbers the worksheet
+ * exists to remove, and it would bury exactly the values an approver reads.
+ */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SyntheticEvent } from "react";
 import {
@@ -13,8 +33,11 @@ import type {
   AuditEvent,
   ComponentOut,
   ComponentPreviewAction,
+  ComponentPreviewTest,
   OutboxAction,
   OutboxStatus,
+  WorksheetArraySummary,
+  WorksheetScalar,
 } from "../api";
 import { useAuth } from "../auth";
 import { filterDemoComponents, makeDemoOutbox } from "../demoData";
@@ -25,6 +48,7 @@ import {
   discardStagedAction,
   pushToPdb,
 } from "../stagedActions";
+import { formatScalar } from "../TestResults";
 import { stageChipClass, stageLabel } from "../ui";
 
 type BusyAction = { id: number; kind: "push" | "discard" };
@@ -54,8 +78,81 @@ const STATUS_CHIP: Record<OutboxStatus, string> = {
   cancelled: "chip muted",
 };
 
+const TEST_UPLOAD_KINDS = new Set(["upload_test_run", "uploadTestRun"]);
+
+/** How many scalars are shown inline before the rest collapses into `+n`. */
+const INLINE_SCALARS = 3;
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isTestUpload(action: OutboxAction): boolean {
+  return TEST_UPLOAD_KINDS.has(action.kind);
+}
+
+type CompactValues = {
+  /** Filled scalars first; empty ones keep their relative order at the end. */
+  scalars: WorksheetScalar[];
+  /** Arrays and maps, reduced to their extent. Never the data itself. */
+  arrays: WorksheetArraySummary[];
+};
+
+/**
+ * Client-side application of the worksheet's payload contract (spec §H1) to a
+ * ghost test. Same three rules as the server-side projection: a dict counts
+ * like an array (key count, rendered as "entries"), filled scalars sort first
+ * so a run whose first fields are empty still shows real numbers, and neither
+ * the list nor the dict is ever reproduced.
+ */
+export function compactStagedValues(test: ComponentPreviewTest): CompactValues {
+  const filled: WorksheetScalar[] = [];
+  const empty: WorksheetScalar[] = [];
+  const arrays: WorksheetArraySummary[] = [];
+
+  for (const [code, value] of Object.entries(test.results ?? {})) {
+    const meta = test.result_meta?.[code];
+    const metaName = typeof meta?.name === "string" ? meta.name : "";
+    const name = metaName === "" ? code : metaName;
+    if (Array.isArray(value)) {
+      arrays.push({ code, name, points: value.length, kind: "array" });
+      continue;
+    }
+    if (typeof value === "object" && value !== null) {
+      arrays.push({ code, name, points: Object.keys(value).length, kind: "map" });
+      continue;
+    }
+    const scalar: WorksheetScalar = { code, name, value };
+    if (value === null || value === undefined || value === "") empty.push(scalar);
+    else filled.push(scalar);
+  }
+
+  return { scalars: [...filled, ...empty], arrays };
+}
+
+/** Shared with the worksheet on purpose: "⌁ 59 pts" / "⌁ 20 entries". */
+function arraySummaryLabel(array: WorksheetArraySummary): string {
+  return array.kind === "map"
+    ? t.worksheet.mapEntries(array.points)
+    : t.worksheet.arrayPoints(array.points);
+}
+
+function scalarTitle(scalars: WorksheetScalar[]): string {
+  return scalars.map((scalar) => `${scalar.name} ${formatScalar(scalar.value)}`).join(", ");
+}
+
+function runNumberText(value: string | number | null): string | null {
+  if (value === null) return null;
+  const text = String(value).trim();
+  return text === "" ? null : t.testResults.runNumber(text);
+}
+
+function measuredAtText(value: string | null): string | null {
+  if (value === null) return null;
+  const parsed = new Date(value);
+  return t.staged.valuesMeasured(
+    Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(),
+  );
 }
 
 function payloadString(action: OutboxAction, key: string): string | null {
@@ -180,6 +277,9 @@ export default function StagedScreen({
   const [components, setComponents] = useState<ComponentOut[]>([]);
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
   const [previewActions, setPreviewActions] = useState<Record<number, ComponentPreviewAction>>({});
+  // Ghost tests keyed by the outbox action they belong to: the measured values
+  // this screen approves (see the module docstring for why this is the source).
+  const [stagedTests, setStagedTests] = useState<Record<number, ComponentPreviewTest>>({});
   const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -218,11 +318,21 @@ export default function StagedScreen({
         targetSerials.map((sn) => getComponentPreview(sn)),
       );
       const metadata: Record<number, ComponentPreviewAction> = {};
+      const ghosts: Record<number, ComponentPreviewTest> = {};
       for (const result of previewResults) {
         if (result.status !== "fulfilled") continue;
         for (const action of result.value.staged_actions) metadata[action.id] = action;
+        // A preview built before the ghost projection existed may omit
+        // `projected.ghost_tests`; a missing block means "values unknown",
+        // which the card says out loud instead of guessing.
+        const tests = result.value.projected?.ghost_tests;
+        if (!Array.isArray(tests)) continue;
+        for (const test of tests) {
+          if (test.ghost && test.outbox_action_id !== null) ghosts[test.outbox_action_id] = test;
+        }
       }
       setPreviewActions(metadata);
+      setStagedTests(ghosts);
     } catch (caught) {
       if (caught instanceof ApiError && caught.isNetwork) {
         if (demoStore.current === null) demoStore.current = makeDemoOutbox();
@@ -231,6 +341,7 @@ export default function StagedScreen({
         setComponents(filterDemoComponents("", "", ""));
         setThumbnails({});
         setPreviewActions({});
+        setStagedTests({});
         setAudit(demoAudit(demoActions));
         setDemo(true);
       } else {
@@ -437,6 +548,7 @@ export default function StagedScreen({
               key={group.key}
               group={group}
               thumbnails={thumbnails}
+              stagedTests={stagedTests}
               canWriteAction={canWriteAction}
               busy={busy}
               history={false}
@@ -462,6 +574,7 @@ export default function StagedScreen({
                 key={group.key}
                 group={group}
                 thumbnails={thumbnails}
+                stagedTests={stagedTests}
                 canWriteAction={() => false}
                 busy={busy}
                 history
@@ -483,6 +596,7 @@ export default function StagedScreen({
 function ComponentActionGroup({
   group,
   thumbnails,
+  stagedTests,
   canWriteAction,
   busy,
   history,
@@ -495,6 +609,7 @@ function ComponentActionGroup({
 }: {
   group: ActionGroup;
   thumbnails: Record<string, string>;
+  stagedTests: Record<number, ComponentPreviewTest>;
   canWriteAction: (action: OutboxAction) => boolean;
   busy: BusyAction | null;
   history: boolean;
@@ -553,6 +668,7 @@ function ComponentActionGroup({
             history={history}
             demo={demo}
             initialAudit={demo ? auditFor(action) : undefined}
+            stagedTest={stagedTests[action.id] ?? null}
             scope={submissionScope(action)}
             onPush={onPush}
             onDiscard={onDiscard}
@@ -570,6 +686,7 @@ function StagedActionCard({
   history,
   demo,
   initialAudit,
+  stagedTest,
   scope,
   onPush,
   onDiscard,
@@ -580,6 +697,8 @@ function StagedActionCard({
   history: boolean;
   demo: boolean;
   initialAudit?: AuditEvent[];
+  /** Server-projected ghost run for a staged test upload; null when none. */
+  stagedTest: ComponentPreviewTest | null;
   scope: SubmissionScope;
   onPush: (action: OutboxAction) => Promise<void>;
   onDiscard: (action: OutboxAction) => Promise<void>;
@@ -612,9 +731,21 @@ function StagedActionCard({
   return (
     <article className="staged-action-card">
       <div className="staged-action-summary">
+        {/* The card is a two-column grid whose left column is this stack, so
+            the proposed values live here rather than as a new grid child. */}
         <div>
           <strong>{summarizeAction(action)}</strong>
           <span className="mono muted">#{action.id} · {action.kind}</span>
+          {stagedTest !== null ? (
+            <StagedValues test={stagedTest} />
+          ) : (
+            // Terminal uploads are past judging (their values live in the
+            // mirrored run), so the gap is only worth naming while open.
+            !history &&
+            isTestUpload(action) && (
+              <p className="staged-scope-hint">{t.staged.valuesUnavailable}</p>
+            )
+          )}
         </div>
         <span className={STATUS_CHIP[action.status]}>
           {t.components.previewStatuses[action.status]}
@@ -627,6 +758,7 @@ function StagedActionCard({
             : t.staged.scopeUnavailable}
         </p>
       )}
+      {!history && !canWrite && <p className="staged-scope-hint">{t.staged.readOnlyHint}</p>}
       {!history && canWrite && (canPush(action.status) || canDiscard(action.status)) && (
         <div className="staged-card-actions">
           {scope.submittable && canPush(action.status) && (
@@ -681,6 +813,7 @@ function StagedActionCard({
             </dd>
           </div>
         </dl>
+        {stagedTest !== null && <StagedValueList test={stagedTest} />}
         <div className="staged-audit">
           <div className="field-label">{t.staged.audit}</div>
           {auditLoading ? (
@@ -719,5 +852,89 @@ function StagedActionCard({
         </div>
       </details>
     </article>
+  );
+}
+
+/**
+ * The compact head of a staged measurement: test type, run identity, and the
+ * proposed values under the worksheet's rules (first three scalars inline, the
+ * rest as `+n`, arrays/maps as an extent chip). The `+n` chip is a hover title
+ * only, so every value stays reachable without a pointer through
+ * `StagedValueList` in the action details below.
+ */
+function StagedValues({ test }: { test: ComponentPreviewTest }) {
+  const { scalars, arrays } = compactStagedValues(test);
+  const inline = scalars.slice(0, INLINE_SCALARS);
+  const rest = scalars.slice(INLINE_SCALARS);
+  const propertyCount = Object.keys(test.properties ?? {}).length;
+  const runText = runNumberText(test.run_number);
+  const measuredText = measuredAtText(test.measured_at);
+
+  return (
+    <div className="staged-values" aria-label={t.staged.valuesRegionLabel(test.test_type)}>
+      <div className="ws-values">
+        <span className="chip neutral mono">{test.test_type}</span>
+        {test.passed !== null && (
+          <span className={test.passed ? "chip green" : "chip red"}>
+            {test.passed ? t.testResults.passed : t.testResults.failed}
+          </span>
+        )}
+        {runText !== null && <span className="ws-val">{runText}</span>}
+        {measuredText !== null && <span className="ws-val">{measuredText}</span>}
+        {propertyCount > 0 && (
+          <span className="chip neutral">{t.staged.conditionCount(propertyCount)}</span>
+        )}
+      </div>
+      {scalars.length === 0 && arrays.length === 0 ? (
+        <p className="muted">{t.staged.valuesEmpty}</p>
+      ) : (
+        <div className="ws-values">
+          {inline.map((scalar) => (
+            <span className="ws-val" key={scalar.code} title={scalar.code}>
+              <span className="ws-val-name">{scalar.name}</span>{" "}
+              <span className="mono">{formatScalar(scalar.value)}</span>
+            </span>
+          ))}
+          {rest.length > 0 && (
+            <span className="chip neutral" title={scalarTitle(rest)}>
+              {t.worksheet.moreValues(rest.length)}
+            </span>
+          )}
+          {arrays.map((array) => (
+            <span className="chip neutral mono" key={array.code} title={array.name}>
+              {arraySummaryLabel(array)}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Every staged value, keyboard-reachable inside the action details. Arrays and
+ * maps stay counts here too — completeness must not become the number wall.
+ */
+function StagedValueList({ test }: { test: ComponentPreviewTest }) {
+  const { scalars, arrays } = compactStagedValues(test);
+  if (scalars.length === 0 && arrays.length === 0) return null;
+  return (
+    <div className="staged-audit">
+      <div className="field-label">{t.staged.valuesLabel}</div>
+      <dl className="staged-detail-grid">
+        {scalars.map((scalar) => (
+          <div key={`scalar:${scalar.code}`}>
+            <dt title={scalar.code}>{scalar.name}</dt>
+            <dd className="mono">{formatScalar(scalar.value)}</dd>
+          </div>
+        ))}
+        {arrays.map((array) => (
+          <div key={`array:${array.code}`}>
+            <dt title={array.code}>{array.name}</dt>
+            <dd className="mono">{arraySummaryLabel(array)}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
   );
 }

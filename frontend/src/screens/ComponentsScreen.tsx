@@ -4,6 +4,7 @@ import type { NavIntent, ScreenId } from "../App";
 import AddTestResult from "../AddTestResult";
 import type { RecordTestIntent } from "../AddTestResult";
 import ImageLightbox from "../ImageLightbox";
+import ModuleWorksheet from "../ModuleWorksheet";
 import {
   ApiError,
   componentAttachmentUrl,
@@ -26,9 +27,9 @@ import type {
   ComponentOut,
   ComponentPreview,
   ComponentPreviewAction,
+  ComponentPreviewTest,
   Institute,
   OutboxAction,
-  PreviewRequirementCheck,
   RequirementCheck,
   StageSuggestion,
   TestRunAttachment,
@@ -54,7 +55,7 @@ import {
   subscribeStagedPreviewPreference,
 } from "../stagedPreview";
 import type { StagedPreviewMode } from "../stagedPreview";
-import { describeComponent, roleLabel, stageChipClass, stageLabel } from "../ui";
+import { describeComponent, outboxStatusChipClass, roleLabel, stageChipClass, stageLabel } from "../ui";
 import RegisterModuleForm from "./RegisterModuleForm";
 
 function errorMessage(err: unknown): string {
@@ -398,6 +399,7 @@ export default function ComponentsScreen({
         }
         pinnedTestType={detailTestType}
         testIntentToken={detailIntentToken}
+        onNavigate={onNavigate}
       />
     );
   }
@@ -718,7 +720,7 @@ export default function ComponentsScreen({
   );
 }
 
-function ComponentDetailPanel({
+export function ComponentDetailPanel({
   sn,
   backLabel,
   onBack,
@@ -726,6 +728,7 @@ function ComponentDetailPanel({
   evidenceJobId,
   pinnedTestType,
   testIntentToken,
+  onNavigate,
 }: {
   sn: string;
   backLabel: string;
@@ -734,6 +737,9 @@ function ComponentDetailPanel({
   evidenceJobId: number | null;
   pinnedTestType: string | null;
   testIntentToken: number;
+  /** Cross-screen navigation (review finding I3: wires the worksheet's "View
+   * in Staged" to the same routing the rest of the app already uses). */
+  onNavigate?: (screen: ScreenId) => void;
 }) {
   const { canWrite, user, showToast } = useAuth();
   const [detail, setDetail] = useState<ComponentDetail | null>(null);
@@ -770,6 +776,12 @@ function ComponentDetailPanel({
   // that opens the form a second time (review IMPORTANT #2).
   const [initialTestType, setInitialTestType] = useState<RecordTestIntent | null>(null);
   const recordTestTokenRef = useRef(0);
+  // Same intent shape, routed to the worksheet's in-row edit strip instead of
+  // AddTestResult whenever the worksheet is the mounted primary view (any
+  // preview mode, as long as the preview payload carries a worksheet). See
+  // handleRecordTest.
+  const [worksheetEditIntent, setWorksheetEditIntent] = useState<RecordTestIntent | null>(null);
+  const worksheetEditTokenRef = useRef(0);
   const testSchemaSyncRequest = useRef(0);
   const currentTestSchemaComponentType = useRef<string | null>(null);
   const seenEvidenceJob = useRef<number | null>(evidenceJobId);
@@ -961,9 +973,24 @@ function ComponentDetailPanel({
     hasStagedPreview &&
     (previewMode === "inline" || (previewMode === "tabs" && previewTab === "staged"));
   const displayedStage = showingProjection ? preview.projected.stage : detail.stage;
+  // The worksheet is the primary view whenever preview data is available at
+  // all; a stale backend that has not shipped the `worksheet` field yet must
+  // fall back to the pre-worksheet sections instead of crashing on it.
+  const hasWorksheet = preview !== null && preview.worksheet !== undefined && preview.worksheet !== null;
+  // Review finding I7: pass the full mirrored schema rows (test_code/name/id
+  // intact) instead of unwrapping to the bare PDB schema JSON — the raw
+  // detail's own `code`/`testType` is allowed to be null (the mirror
+  // tolerates it), which used to leave the worksheet permanently guessing.
+  const worksheetSchemas = testSchemasLoading ? null : testSchemas;
 
   function refreshPreview() {
     setPreviewReloadKey((key) => key + 1);
+  }
+
+  function handleWorksheetStaged(outboxActionId: number) {
+    showToast(t.addTest.stagedToast(outboxActionId));
+    setReloadKey((key) => key + 1);
+    refreshPreview();
   }
 
   async function handleSyncTestSchemas(componentType: string) {
@@ -986,9 +1013,36 @@ function ComponentDetailPanel({
   }
 
   function handleRecordTest(testType: string) {
-    recordTestTokenRef.current += 1;
-    setInitialTestType({ testType, token: recordTestTokenRef.current });
+    // Legacy view (preview fetch failed, or a stale backend without the
+    // worksheet payload): keep pinning AddTestResult's own test-type dropdown
+    // exactly as before. Whenever the worksheet is the mounted primary view —
+    // in every preview mode, including "off" — its in-row edit strip owns test
+    // entry, so route the intent there instead of scrolling to the form card.
+    if (!hasWorksheet) {
+      recordTestTokenRef.current += 1;
+      setInitialTestType({ testType, token: recordTestTokenRef.current });
+      return;
+    }
+    worksheetEditTokenRef.current += 1;
+    setWorksheetEditIntent({ testType, token: worksheetEditTokenRef.current });
   }
+
+  // Spec §H3: the worksheet is the primary test view in all three preview
+  // modes (tabs, inline, off), so the same element mounts in every branch.
+  const worksheetSection = hasWorksheet ? (
+    <ModuleWorksheet
+      componentSn={detail.sn}
+      componentType={detail.component_type}
+      instituteCode={detail.institute_code}
+      worksheet={preview.worksheet}
+      schemas={worksheetSchemas}
+      canWrite={canWriteComponent && !demo}
+      refreshKey={reloadKey}
+      editIntent={worksheetEditIntent}
+      onStaged={handleWorksheetStaged}
+      onViewStaged={onNavigate === undefined ? undefined : () => onNavigate("staged")}
+    />
+  ) : null;
 
   return (
     <div className="screen">
@@ -1175,7 +1229,10 @@ function ComponentDetailPanel({
               />
             </>
           )}
-          {previewMode === "off" || preview === null ? (
+          {preview === null ? (
+            /* No preview payload (fetch failed / offline demo): the worksheet
+             * cannot mount, so the pre-worksheet sections stay exactly as
+             * they were, full run list included. */
             <>
               <StagedChangesSection sn={detail.sn} refreshKey={previewReloadKey} />
               {suggestion !== null ? (
@@ -1198,20 +1255,32 @@ function ComponentDetailPanel({
                 canWrite={canWriteComponent}
                 onChanged={refreshPreview}
               />
-              <ProjectedChecksSection
-                stage={preview.projected.stage}
-                checks={preview.projected.checks}
-                instituteCode={detail.institute_code}
-                onRecordTest={handleRecordTest}
-              />
-              <TestResultsSection
-                sn={detail.sn}
-                refreshKey={reloadKey}
-                projectedRuns={preview.projected.tests}
-              />
+              {worksheetSection}
+              {hasWorksheet ? (
+                <>
+                  <div className="callout preview-callout">{t.components.previewProjectionHint}</div>
+                  <MirroredRunsSection
+                    sn={detail.sn}
+                    refreshKey={reloadKey}
+                    ghostRuns={preview.projected.ghost_tests}
+                  />
+                </>
+              ) : (
+                <TestResultsSection
+                  sn={detail.sn}
+                  refreshKey={reloadKey}
+                  ghostRuns={preview.projected.ghost_tests}
+                />
+              )}
             </>
           ) : (
+            /* Current tab, inline without staged actions, and the "off"
+             * preference all share this branch; "off" additionally keeps the
+             * compact staged-changes list visible (docs/05). */
             <>
+              {previewMode === "off" && (
+                <StagedChangesSection sn={detail.sn} refreshKey={previewReloadKey} />
+              )}
               {suggestion !== null ? (
                 <StageSuggestionSection
                   suggestion={suggestion}
@@ -1222,13 +1291,48 @@ function ComponentDetailPanel({
               ) : (
                 <UnavailableStageSection />
               )}
-              <TestResultsSection sn={detail.sn} refreshKey={reloadKey} />
+              {worksheetSection}
+              {hasWorksheet ? (
+                <MirroredRunsSection sn={detail.sn} refreshKey={reloadKey} />
+              ) : (
+                <TestResultsSection sn={detail.sn} refreshKey={reloadKey} />
+              )}
             </>
           )}
           <ImagesSection sn={detail.sn} refreshKey={reloadKey} />
         </div>
       </div>
     </div>
+  );
+}
+
+/** Spec §H3: the previous full run list is demoted to a collapsed
+ * "All mirrored runs" details element below the worksheet — nothing is
+ * removed, nothing spams by default. The heavy run payload is only fetched
+ * once the element is first opened; after that it stays mounted so closing
+ * and reopening does not refetch or lose scroll state. */
+function MirroredRunsSection({
+  sn,
+  refreshKey,
+  ghostRuns,
+}: {
+  sn: string;
+  refreshKey: number;
+  ghostRuns?: ComponentPreviewTest[];
+}) {
+  const [everOpened, setEverOpened] = useState(false);
+  return (
+    <details
+      className="panel staged-history run-history"
+      onToggle={(event) => {
+        if (event.currentTarget.open) setEverOpened(true);
+      }}
+    >
+      <summary>{t.components.mirroredRunsTitle}</summary>
+      {everOpened && (
+        <TestResultsSection sn={sn} refreshKey={refreshKey} ghostRuns={ghostRuns} />
+      )}
+    </details>
   );
 }
 
@@ -1272,7 +1376,7 @@ function StagedChangesSection({ sn, refreshKey }: { sn: string; refreshKey: numb
               <li className="ghost-row" key={action.id}>
                 <span className="chip stage">{action.kind}</span>
                 <span className="ghost-summary">{summarize(action)}</span>
-                <span className={statusChip(action.status)}>{action.status}</span>
+                <span className={outboxStatusChipClass(action.status)}>{action.status}</span>
               </li>
             ))}
           </ul>
@@ -1356,7 +1460,7 @@ function StagedActionsPanel({
                   <div className="staged-action-main">
                     <span className="chip stage">{metadata.kind}</span>
                     <strong className="ghost-summary">{metadata.summary}</strong>
-                    <span className={statusChip(metadata.status)}>
+                    <span className={outboxStatusChipClass(metadata.status)}>
                       {t.components.previewStatuses[metadata.status]}
                     </span>
                   </div>
@@ -1406,100 +1510,6 @@ function StagedActionsPanel({
   );
 }
 
-const PREVIEW_CHECK_CLASS: Record<PreviewRequirementCheck["status"], string> = {
-  passed: "chip green",
-  failed: "chip red",
-  missing: "chip amber",
-  pending: "chip queued",
-};
-
-function previewCheckLabel(status: PreviewRequirementCheck["status"]): string {
-  if (status === "passed") return t.components.stagePassed;
-  if (status === "failed") return t.components.stageFailed;
-  if (status === "missing") return t.components.stageMissing;
-  return t.components.previewPending;
-}
-
-export function ProjectedChecksSection({
-  stage,
-  checks,
-  instituteCode,
-  onRecordTest,
-}: {
-  stage: string;
-  checks: PreviewRequirementCheck[];
-  instituteCode: string;
-  onRecordTest?: (testType: string) => void;
-}) {
-  const { canWrite, user } = useAuth();
-  const canWriteInstitute =
-    canWrite &&
-    (user?.institute_code === null || user?.institute_code === instituteCode);
-  return (
-    <>
-      <h3 className="section-title">{t.components.previewProjectedChecks}</h3>
-      <div className="panel projected-panel">
-        <div className="projected-stage-line">
-          <span>{t.components.previewProjectedStage}</span>
-          <span className="chip stage ghost-stage" title={stage}>{stageLabel(stage)}</span>
-        </div>
-        {checks.length === 0 ? (
-          <p className="state-note">{t.components.stageNoRequirements}</p>
-        ) : (
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th scope="col">{t.components.stageColTest}</th>
-                <th scope="col">{t.components.stageColStage}</th>
-                <th scope="col">{t.components.stageColStatus}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {checks.map((check) => {
-                const editable =
-                  canWriteInstitute &&
-                  onRecordTest !== undefined &&
-                  (check.status === "missing" || check.status === "failed");
-                return (
-                  <tr
-                    className={
-                      check.status === "pending"
-                        ? "ghost-check-row"
-                        : editable
-                          ? "req-row-editable"
-                          : undefined
-                    }
-                    key={`${check.stage}:${check.test_type}`}
-                  >
-                    <td className="mono">{check.test_type}</td>
-                    <td><span className={stageChipClass(check.stage)} title={check.stage}>{stageLabel(check.stage)}</span></td>
-                    <td>
-                      <span className="req-status-cell">
-                        <span className={PREVIEW_CHECK_CLASS[check.status]}>{previewCheckLabel(check.status)}</span>
-                        {editable && (
-                          <button
-                            type="button"
-                            className="req-edit-ghost"
-                            title={t.components.recordTestFor(check.test_type)}
-                            aria-label={t.components.recordTestFor(check.test_type)}
-                            onClick={() => onRecordTest?.(check.test_type)}
-                          >
-                            <span aria-hidden="true" className="req-edit-ghost-glyph">✎</span>
-                          </button>
-                        )}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-        <div className="callout preview-callout">{t.components.previewProjectionHint}</div>
-      </div>
-    </>
-  );
-}
 
 function UnavailableStageSection() {
   return (
@@ -1508,13 +1518,6 @@ function UnavailableStageSection() {
       <div className="panel"><p className="state-note">{t.components.stageUnavailable}</p></div>
     </>
   );
-}
-
-function statusChip(status: string): string {
-  if (status === "confirmed") return "chip green";
-  if (status === "failed") return "chip red";
-  if (status === "cancelled") return "chip muted";
-  return "chip amber"; // draft / validated / approved / submitted are in-flight
 }
 
 /** Locally mirrored metrology / visual-inspection images for a component.

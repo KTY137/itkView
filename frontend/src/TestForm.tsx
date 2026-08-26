@@ -104,7 +104,15 @@ function fieldKind(rawDataType: string): FieldKind {
   }
 }
 
-function requiredCodes(definition: TestSchemaDefinition, section: FieldSection): Set<string> {
+/**
+ * Which field codes in one section (`properties`/`results`) are required by
+ * the schema's `required` block. Exported so the worksheet's edit strip
+ * (ModuleWorksheet.tsx) can determine, ahead of rendering `TestForm`, whether
+ * a value it cannot prefill would otherwise become a silent dead end (review
+ * finding C1) — using the exact same required-ness rules `TestForm` itself
+ * applies, rather than a second, divergence-prone copy of them.
+ */
+export function requiredCodes(definition: TestSchemaDefinition, section: FieldSection): Set<string> {
   const required = definition.required;
   if (Array.isArray(required)) {
     return new Set(required.filter((code): code is string => typeof code === "string"));

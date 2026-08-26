@@ -3345,3 +3345,115 @@ g:hover > .curve-line {
 .assembly-tool-slot-hint.serious-text {
   color: var(--serious);
 }
+
+/* ---- Module worksheet (spec H2) -------------------------------------------
+   Spreadsheet-model primary view: one compact table per stage group, row =
+   test type. Compact row height on purpose (Values/Status/Date stay on one
+   line); ghost sub-rows reuse the existing dashed .ghost-row look; the edit
+   strip reads as visually inset within the table. Tokens only, no hardcoded
+   colours, so light/dark both follow the existing theme. */
+.module-worksheet {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.ws-group-panel {
+  padding: 0;
+}
+.ws-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.ws-group-future {
+  opacity: 0.6;
+}
+.ws-group-label {
+  font: 700 12px var(--sans);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink2);
+}
+.ws-table td {
+  padding: 6px 14px;
+}
+.ws-row td {
+  vertical-align: middle;
+}
+.ws-values {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+.ws-val {
+  font-size: 12px;
+  color: var(--ink2);
+  white-space: nowrap;
+}
+.ws-val-name {
+  color: var(--muted);
+}
+.ws-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+.ws-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--ink2);
+  background: none;
+}
+.ws-toggle:hover {
+  background: var(--surface2);
+}
+.ws-ghost-row td {
+  padding: 0 14px 8px;
+  border-bottom: none;
+}
+.ws-ghost-row .ghost-row {
+  margin: 0;
+}
+.ws-edit-row td,
+.ws-detail-row td {
+  padding: 0 14px 12px;
+  background: var(--surface2);
+}
+.ws-edit-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-top: 4px;
+  border: 1px solid var(--accent);
+  border-left-width: 3px;
+  border-radius: 9px;
+  background: var(--surface);
+}
+/* Review finding I4: the worksheet row's pencil reused `.req-edit-ghost`
+   verbatim, but that class's hover/focus reveal is scoped to
+   `.req-row-editable` — a class the worksheet's `<tr>` never carries — so the
+   pencil sat at its 0.35 resting opacity permanently (about 1.3:1 contrast,
+   effectively invisible) with no way to brighten it. `.req-edit-ghost:focus-
+   visible` above is unscoped and already covers keyboard focus; this adds the
+   matching hover/focus-within reveal for `.ws-row`, using the exact same
+   tokens so both call sites keep reading as the same affordance in light and
+   dark themes alike. */
+.ws-row:hover .req-edit-ghost,
+.ws-row:focus-within .req-edit-ghost {
+  opacity: 1;
+  border-color: var(--accent);
+  color: var(--accent-hi);
+  background: var(--accent-soft);
+}

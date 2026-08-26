@@ -97,6 +97,16 @@ im Frontend-i18n-Modul liegt.
    maskiertes Secret; unveraendertes Speichern bewahrt das Secret, Entfernen
    eines Kanals entfernt es bewusst. Kanaltests verwenden nur den gespeicherten
    Kanalnamen.
+   **Production stages (2026-08-26):** Eigener Abschnitt mit GUI-Editor fuer
+   `stage_order` und `stage_requirements` je Institut, tastaturbedienbar;
+   Testtyp-Vorschlaege stammen aus gespiegelten Schemata und aus in
+   gespiegelter Evidence vorkommenden Testtypen, ein unbekannter Wert wird als
+   `Not mirrored` markiert statt abgelehnt. Seed-Stages lassen sich
+   umsortieren, aber nicht entfernen (der Merge haengt sie beim Speichern
+   immer wieder an; neutralisieren geht nur ueber leere Pflicht-Tests fuer die
+   betroffene Stage). Der Screen dupliziert noch die Seed-Stage-Konstanten,
+   weil kein Endpunkt das effektive (gemergte) Stage-Modell liefert — ein
+   Read-Endpunkt dafuer ist der empfohlene naechste Schritt.
 8. **Assembly-Wizard:** Eigener, vom Board-CTA erreichbarer scanner-first
    Arbeitsbereich mit vier sichtbaren Schritten: Parent, Child, Resources,
    Review. Komponenten werden exakt per SN/lokalem Namen aufgeloest. Das
@@ -145,6 +155,12 @@ im Frontend-i18n-Modul liegt.
   kompakte Liste `Staged changes` bleibt sichtbar, damit die Praeferenz offene
   Arbeit nie versteckt oder verwirft.
 
+Die Praeferenz steuert ausschliesslich die **Ghost-/Projektionsebene**, nicht
+den Bestand der Datenansicht: das Modul-Worksheet (siehe unten) ist in allen
+drei Modi vorhanden, auch in `Off`. Es ist die normale Modulansicht, kein
+Vorschau-Feature; Mehrverkehr entsteht dadurch nicht, weil der
+Preview-Endpunkt ohnehin in jedem Modus geladen wird.
+
 Die Einstellung wird best effort in `localStorage` unter
 `itkflow.stagedPreview` gespeichert. Jeder Zugriff ist mit Fallback auf `tabs`
 abgesichert; blockierter Storage darf den Screen nicht brechen. Die
@@ -187,6 +203,52 @@ Testerfassungskarte und belegt die Testtyp-Auswahl mit dem Typ der Zeile vor —
 die Auswahl bleibt dabei aenderbar; existiert fuer den Typ kein lokal
 gespiegeltes Schema, oeffnet sich das Formular trotzdem mit leerer Auswahl.
 
+**Modul-Worksheet als Primaeransicht (2026-08-26):** Die Detailseite rendert
+Testlaeufe nicht mehr einzeln und voll ausgeklappt — bei >100 gespiegelten
+Laeufen war das eine unlesbare Wand aus ueberlappenden Zahlen. Primaeransicht
+ist jetzt das Spreadsheet-Modell (Spec `docs/superpowers/specs/`
+`2026-08-25-staged-first-module-page-design.md` §H): pro Stage-Gruppe **eine**
+kompakte Tabelle, Zeile = Testtyp, Spalten `Test | Values | Status | Date | ✎`.
+Die Preview traegt dafuer keine gespiegelten Laeufe mehr mit:
+`projected.tests[]` heisst jetzt `projected.ghost_tests[]` und enthaelt
+ausschliesslich offene, noch nicht gepushte Staged-Uploads. Rohe Messwerte
+liefert ausschliesslich `GET /api/components/{sn}/tests`, abgerufen erst beim
+ersten Oeffnen von „All mirrored runs".
+
+- **Values-Zelle:** die ersten drei Skalare als `Label Wert`, der Rest als
+  `+n`-Chip; Array-/Map-Ergebnisse nur als Umfangs-Chip (`⌁ 40 pts` bzw.
+  `⌁ 20 entries`; ein Dict zaehlt wie ein Array, Diskriminator `kind:
+  "array"|"map"`). Rohe Messreihen verlassen den Server gar nicht erst — das
+  ist Payload-Vertrag, nicht nur Darstellung. Befuellte Skalare sortieren
+  stabil zuerst. Steht eine Komponente auf einer modellfremden Stage (reale
+  TUDO-Module auf `FAILED`), gilt jede Gruppe als erreicht statt das ganze
+  Sheet abzudunkeln.
+- **Gruppen** folgen der Stage-Order des Komponententyps; noch nicht erreichte
+  Stages stehen gedaempft mit Chip `Not reached yet`, gespiegelte Testtypen
+  ausserhalb des Stage-Modells sowie nur-staged oder bestaetigt-aber-noch-
+  nicht-gespiegelte Testtypen sammelt die Gruppe `Additional`.
+- **Zeile aufklappbar** zum vollen Run-Detail (Kurven, Werte, Conditions,
+  Attachments) ueber dieselben Renderer wie bisher; geladen wird erst beim
+  Oeffnen. Dict-wertige Ergebnisse (Metrologie, Wire Bonding) rendern als
+  Position/Wert-Paare statt als `[object Object]`.
+- **Edit-Strip statt Sprung:** Der Ghost-Stift oeffnet die schema-getriebenen
+  Felder jetzt **innerhalb der Zeile**, vorbelegt aus dem juengsten Lauf, und
+  stageed ueber den unveraenderten Weg manual-entry-Ingest → Dry-Run →
+  Propose-Outbox. Offene Staged-Actions erscheinen als gestrichelte
+  Ghost-Zeilen unter ihrer Testzeile. Vorbelegt wird nur, was nachweislich
+  durchs Schema-Formular hin- und zurueckgeht: Maps, vom Schema nicht als
+  Array deklarierte Arrays und Arrays mit `null` werden nie vorbelegt oder
+  abgeflacht; ein nicht wegklickbarer Hinweis nennt die betroffenen Felder.
+  Ist ein solches Feld REQUIRED, blockt der Strip komplett mit Verweis auf
+  den Datei-Drop-Pfad — sichtbar blockiert statt stillem Datenverlust. Ein
+  blockierter Dry-Run ohne Issues wird angezeigt statt zu verschwinden, ein
+  fehlgeschlagener Fetch des vorherigen Laufs blockt den Strip statt ein
+  leeres Formular zu zeigen, und der Zeilenzustand ist nach Stage+Testtyp
+  geschluesselt.
+- Die frueheren Vollansichten sind nicht entfallen, sondern in ein
+  eingeklapptes, lazy geladenes `All mirrored runs` unter dem Worksheet
+  gewandert; die Datei-Drop-Karte bleibt unveraendert.
+
 ### Shipment-Empfang und Reception-Tests
 
 Die Shipment-Tabelle zeigt neben dem Empfangsstatus eine eigene Spalte
@@ -220,6 +282,15 @@ Server prueft den Status erneut.
 Push-Button. Stattdessen erklaert der Screen sichtbar: `Production writes are
 not enabled — stays staged (dummy-only scope)`. Farbe allein reicht fuer Ghost,
 Pending, Fehler oder Schreibschutz nie als Unterscheidungsmerkmal.
+
+Jede offene Test-Upload-Action zeigt zusaetzlich Komponente, Testtyp und die
+vorgeschlagenen Messwerte im selben kompakten Worksheet-Format (Arrays/Maps
+als Umfangs-Chip, nie Rohdaten); die Werte kommen aus den Preview-Ghost-
+Eintraegen, kein neuer Endpunkt. Terminale (`History`-)Uploads haben keinen
+Ghost und damit keine Werte — der Screen sagt das explizit statt Leere zu
+suggerieren; dieselbe ehrliche Meldung erscheint, wenn die Komponente noch
+nicht gespiegelt ist. Ein Betrachter ohne Schreibrecht sieht den Grund statt
+gar keiner Steuerung.
 
 ## Globale UI-Elemente
 

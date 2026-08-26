@@ -1,8 +1,15 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { PreviewRequirementCheck, RequirementCheck, StageSuggestion } from "../api";
-import { ProjectedChecksSection, StageSuggestionSection } from "./ComponentsScreen";
+import type { RequirementCheck, StageSuggestion } from "../api";
+import { StageSuggestionSection } from "./ComponentsScreen";
+
+// Spec §H3 (2026-08-26): the projected-checks table (ProjectedChecksSection)
+// was replaced by the module worksheet, which owns pending/staged rows and the
+// in-row edit strip; its ghost-pencil coverage moved with it. The current
+// required-tests table below keeps its pencils — routing of a pencil click
+// (worksheet edit strip vs. legacy form card) is covered by
+// ComponentsScreen.worksheet.test.tsx.
 
 // Same mocking pattern as ShipmentsScreen.test.tsx / ToolsScreen.test.tsx:
 // useAuth() throws outside <AuthProvider>, so the module is replaced wholesale
@@ -113,51 +120,6 @@ describe("StageSuggestionSection edit ghosts (current required-tests table)", ()
         suggestion={suggestion([missingCheck])}
         instituteCode="TUDO"
         onStagedChanged={vi.fn()}
-        onRecordTest={vi.fn()}
-      />,
-    );
-    expect(screen.queryByRole("button", { name: /^Record .* result$/ })).not.toBeInTheDocument();
-  });
-});
-
-describe("ProjectedChecksSection edit ghosts (staged/projected required-tests table)", () => {
-  beforeEach(() => operatorAuth());
-
-  it("renders a ghost only for failed/missing rows, never for pending or passed", () => {
-    const onRecordTest = vi.fn();
-    const checks: PreviewRequirementCheck[] = [
-      { stage: "GLUED", test_type: "MODULE_BOW", status: "failed" },
-      { stage: "GLUED", test_type: "MODULE_METROLOGY", status: "pending" },
-      { stage: "HV_TAB_ATTACHED", test_type: "VISUAL_INSPECTION", status: "passed" },
-    ];
-    render(
-      <ProjectedChecksSection
-        stage="GLUED"
-        checks={checks}
-        instituteCode="TUDO"
-        onRecordTest={onRecordTest}
-      />,
-    );
-
-    expect(screen.getByRole("button", { name: "Record MODULE_BOW result" })).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Record MODULE_METROLOGY result" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Record VISUAL_INSPECTION result" }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("hides every edit ghost for a viewer", () => {
-    viewerAuth();
-    const checks: PreviewRequirementCheck[] = [
-      { stage: "GLUED", test_type: "MODULE_BOW", status: "missing" },
-    ];
-    render(
-      <ProjectedChecksSection
-        stage="GLUED"
-        checks={checks}
-        instituteCode="TUDO"
         onRecordTest={vi.fn()}
       />,
     );

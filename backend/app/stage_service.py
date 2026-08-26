@@ -25,7 +25,16 @@ def satisfied_test_results(session: Session, sn: str) -> dict[str, bool]:
     evidence_rows = session.scalars(
         select(TestRunEvidence)
         .where(TestRunEvidence.component_sn == sn)
-        .order_by(TestRunEvidence.measured_at, TestRunEvidence.synced_at, TestRunEvidence.id)
+        .order_by(
+            # SQLite sorts NULLs first in ASC by default; PostgreSQL sorts them
+            # last. Pin NULLS FIRST explicitly so both engines agree that a
+            # dated run always outranks an undated one for the last-wins loop
+            # below (see preview._worksheet_row, which selects the same winner
+            # in Python and must never disagree with this ordering).
+            TestRunEvidence.measured_at.nullsfirst(),
+            TestRunEvidence.synced_at,
+            TestRunEvidence.id,
+        )
     )
     for row in evidence_rows:
         if row.test_type:

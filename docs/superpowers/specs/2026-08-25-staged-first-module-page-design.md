@@ -50,12 +50,16 @@ Formulare rein, JSON wird intern erzeugt).
   `{id, kind, status, summary, to_stage?, test_type?, created_by, created_at,
   submittable}` — `summary` menschenlesbar, `submittable=false` mit Grund
   (`not_dummy`), wenn `dummy_only` den PDB-Push verweigern würde.
-- `projected`: `{stage, checks, tests[]}` — Stage nach Anwendung aller
+- `projected`: `{stage, checks, ghost_tests[]}` — Stage nach Anwendung aller
   Stage-Moves in Erstellungsreihenfolge; `checks` neu berechnet für die
   projizierte Stage, wobei ausstehende `upload_test_run`-Actions als
   `pending` zählen (eigener Status neben passed/failed/missing);
-  `tests[]` = gespiegelte Läufe plus Ghost-Einträge
-  (`ghost: true, outbox_action_id`) für ausstehende Uploads.
+  `ghost_tests[]` enthält **nur** die ausstehenden, noch nicht gepushten
+  Upload-Actions (`ghost: true, outbox_action_id`) — keine gespiegelten
+  Läufe. (Nachtrag §H1: das Feld hieß ursprünglich `tests[]` und trug
+  gespiegelte Läufe zusätzlich zu den Ghost-Einträgen; die Preview verlor
+  die gespiegelten Läufe im Review-Nachzug wieder — rohe Messwerte liefert
+  seither ausschließlich `GET /api/components/{sn}/tests`.)
 
 Implementierung: `backend/app/preview.py` als reine Funktion
 `build_component_preview(session, component, settings) -> dict`, neben
@@ -204,3 +208,114 @@ pytest: Job-Verlauf mit Fakes (Fortschritt, Auto-Kette, Lease), EOS-Branch
 
 Jede Etappe: Tests grün (pytest, tsc, Vite-Build), Verhalten einzeln
 lauffähig, eigener Commit-Satz.
+
+## H — Modul-Worksheet (Nachtrag 2026-08-26, vom Nutzer angefordert)
+
+Befund nach M1–M4: Die Testliste der Detailseite rendert jeden Run voll
+(Inline-Kurvenplots + komplettes Wertegitter) — bei >100 gespiegelten Läufen
+ein unlesbarer Zahlen-Wall. Werte erfassen geht nur über die separate
+Formular-Karte. Nutzerentscheid: **Spreadsheet-Modell** — pro Modul EINE
+kompakte Tabelle (Zeile = Test), Werte inline sichtbar UND editierbar;
+Änderungen werden gestaged (Ghost-Optik) und im Staged-Fenster approved.
+
+### H1 — Worksheet-Payload (preview.py, kein neuer Endpunkt)
+
+`build_component_preview` erhält zusätzlich `worksheet`:
+
+```text
+worksheet: { groups: [ {
+  stage: str | null,        # null = Gruppe „Additional" (gespiegelte Typen
+                            # außerhalb des Stage-Modells)
+  reached: bool,            # Stage-Index <= aktueller Stage-Index
+  rows: [ {
+    test_type: str,
+    status: passed|failed|missing|pending,   # Semantik wie checks
+    latest: {                                # jüngster gespiegelter Run
+      external_ref, measured_at, run_number, passed,
+      scalars: [{code, name, value}],        # NUR Skalare; befüllte zuerst
+      arrays:  [{code, name, points, kind}], # Umfang, NIE die Daten
+      attachment_count: int
+    } | null,
+    staged: [{outbox_action_id, status}],    # offene upload_test_run-Actions
+    run_count: int
+  } ]
+} ] }
+```
+
+Gruppen für JEDE Stage aus `model.order` (auch künftige — Spreadsheet-
+Spaltengruppen), Requirements je Stage aus dem Institutsprofil; Kompaktheit
+ist Payload-Vertrag: Arrays verlassen den Server nie als Rohdaten.
+pytest: Gruppenbildung, latest-Auswahl, pending-Verzahnung, Additional-Gruppe.
+
+**Am Echtbestand nachgeschärft (Probe gegen den TUDO-Spiegel, 2026-08-26,
+Review-Nachzug).** Die ursprüngliche Messung verglich nur das kompakte
+Worksheet gegen das damalige `tests[]` innerhalb derselben Preview
+(Modul 20USEM50000064, 29 Läufe: 3 146 Byte Worksheet gegen 241 906 Byte
+`tests[]`, Faktor 77). Der Review-Nachzug ging weiter, statt den Zahlen-Spam
+nur wegzurechnen: `tests[]` verließ die Preview vollständig — es heißt jetzt
+`projected.ghost_tests[]` und enthält ausschließlich offene, noch nicht
+gepushte Uploads; rohe gespiegelte Läufe liefert nur noch `GET
+/api/components/{sn}/tests`, lazy beim Öffnen von „All mirrored runs".
+Gemessen mit demselben Serializer gegen den echten TUDO-Spiegel, komplette
+Preview vorher/nachher: 20USEM50000064 (29 Läufe) 227 589 → 3 039 Byte
+(−98,7 %); 20USEM50000063 129 916 → 3 916 Byte; 20USE5L0000031 63 307 →
+5 444 Byte. Drei Regeln stammen aus der ursprünglichen Probe und gelten
+unverändert:
+
+- **Maps zählen wie Arrays.** Metrologie liefert Dict-Werte
+  (`Hybrid glue thickness [um] = {'ABC_R5H1_0': …}`). Sie gehören nie in
+  `scalars`, sondern in `arrays` mit `kind: "array"|"map"`; `points` ist bei
+  Maps die Schlüsselzahl (UI: „⌁ 20 entries" statt „⌁ 40 pts"). Ohne diese
+  Regel kippt eine einzige Metrologie-Zeile den Messblock zurück in die Zelle.
+- **Befüllte Skalare zuerst** (stabile Partition, Nulls behalten ihre
+  Reihenfolge am Ende). Sonst zeigt VISUAL_INSPECTION drei Mal „None",
+  während die echten Werte hinter der 3er-Grenze liegen.
+- **Stage außerhalb des Modells ⇒ `reached=True` für alle Gruppen.** Reale
+  TUDO-Module stehen auf `FAILED`, das in keiner Stage-Order vorkommt; die
+  Gegenregel hätte ein Modul mit 29 Läufen komplett als „noch nicht erreicht"
+  ausgegraut. Wir wissen bei einer modellfremden Stage nicht, wie weit sie
+  fortgeschritten ist — ehrlicher ist ein voll lesbares Sheet.
+
+Offen (Domänenfrage an den Owner, kein Code-Bug): Der Pflichttest
+`MODULE_IV_AMAC_TC` steht auf „missing", während `MODULE_IV_AMAC` mit 28
+Läufen in „Additional" landet — das Seed-Stage-Profil verlangt einen Testtyp,
+den TUDO real nicht so aufzeichnet.
+
+### H2 — ModuleWorksheet.tsx (neu)
+
+Eine Tabelle je Stage-Gruppe: Spalten Test | Values | Status | Date | ✎.
+Values-Zelle: erste 3 Skalare (`Label Wert`), Rest als „+n", Arrays als Chip
+(`⌁ 40 pts`). Ghost-Zeilen (offene Staged-Actions) in bestehender
+`.ghost-row`-Optik mit Link ins Staged-Fenster. Zeile aufklappbar:
+Voll-Detail (Kurven, Attachments, Conditions) über die aus `TestResults.tsx`
+exportierten Renderer, Daten via `getComponentTests` (Filter external_ref).
+
+**Edit-Strip**: ✎ (write-gated, ersetzt das Scroll-Ziel des 0.2.1-Ghost-
+Stifts) klappt schema-getriebene Felder (TestForm-Generator) INNERHALB der
+Zeile auf, vorbefüllt aus dem jüngsten Run; „Stage" nutzt exakt den
+bestehenden Weg manual-entry-Ingest → Dry-Run → propose-outbox (409-Regeln
+unverändert). Staging-Plumbing wird aus `AddTestResult.tsx` nach
+`testStaging.ts` extrahiert und von beiden genutzt.
+
+### H3 — Integration (ComponentsScreen)
+
+Worksheet ersetzt Requirements-Tabelle + Run-Liste als Primäransicht in
+allen drei Preview-Modi; die bisherige `TestResultsSection` wandert in ein
+eingeklapptes „All mirrored runs" (Details-Element) darunter — nichts
+entfällt, nichts spammt. Datei-Drop-Karte (`AddTestResult`) bleibt.
+
+Reihenfolge wie gebaut: Aktionspanel (`StagedActionsPanel` bzw.
+`StageSuggestionSection`) → Worksheet → Projektions-Hinweis → „All mirrored
+runs" (eingeklappt, lazy) → `ImagesSection`. `ProjectedChecksSection`
+entfällt; ihre Status inklusive `pending` trägt jetzt das Worksheet.
+
+**Korrektur zur Vorgabe (bewusst übernommen):** Das Worksheet mountet in
+JEDEM Staged-Preview-Modus, auch `off`. Der Schalter aus §B steuert die
+Ghost-/Projektionsebene, nicht die Existenz der Datentabelle — das Worksheet
+ist die normale Modulansicht, kein Vorschau-Feature. Kein Mehrverkehr: der
+Preview-Endpunkt wurde ohnehin schon in jedem Modus geladen. §B bleibt
+ansonsten unverändert gültig (`off` = keine Ghost-Projektion).
+
+Dateibesitz (parallele Agenten): Backend preview.py/schemas.py/Tests ·
+Agent A ModuleWorksheet.tsx, testStaging.ts, AddTestResult.tsx (Extraktion),
+api.ts, i18n.ts, app.css · Agent B ComponentsScreen.tsx, TestResults.tsx.
