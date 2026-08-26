@@ -684,9 +684,10 @@ def test_share_link_server_error_is_retried_and_client_error_is_not(
 ):
     from urllib.error import HTTPError
 
-    url = "https://cernbox.cern.ch/s/public/photo.jpg"
+    # Not a recognisable /s/<token> share form: exactly one candidate URL.
+    url = "https://files.example.org/plots/photo.jpg"
     opens: list[str] = []
-    outage_opens = 2  # both candidate URLs answer 503 on the first attempt
+    outage_opens = 2
 
     def open_url(requested, timeout):
         opens.append(requested)
@@ -700,16 +701,17 @@ def test_share_link_server_error_is_retried_and_client_error_is_not(
         evidence,
         {"code": "e" * 64, "type": "share_link", "source": "share_link", "url": url},
     )
-    stats = download_attachments(session, _FakeGateway(configured=False), settings, "20USEM20000041")
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
     session.commit()
     assert stats.downloaded == 1
     assert len(opens) == 3
-    assert no_sleep == [0.5]
+    assert no_sleep == [0.5, 1.0]
 
     # A 404 is the share answering "this does not exist" — retrying is noise.
     opens.clear()
     no_sleep.clear()
-    outage_opens = 99
 
     def open_404(requested, timeout):
         opens.append(requested)
@@ -721,36 +723,27 @@ def test_share_link_server_error_is_retried_and_client_error_is_not(
         evidence,
         {"code": "f" * 64, "type": "share_link", "source": "share_link", "url": url},
     )
-    stats = download_attachments(session, _FakeGateway(configured=False), settings, "20USEM20000041")
-    # Both candidate URLs are asked once; neither failure earns a backoff.
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
     assert stats.failed == 1
-    assert len(opens) == 2
+    assert len(opens) == 1
     assert no_sleep == []
 
 
-def test_share_page_html_falls_back_to_the_download_route(
-    session, settings, evidence, monkeypatch, no_sleep
-):
-    """CERNBox/ownCloud share links render an HTML viewer page at the plain
-    URL; the raw bytes live behind its ``/download`` route. Observed live:
-    every VISUAL_INSPECTION share attachment failed because only the page was
-    ever requested and its HTML was (rightly) refused."""
-    url = "https://cernbox.cern.ch/s/6LPpeXmuIBwS5ST"
-    opens: list[str] = []
+SHARE_TOKEN = "6LPpeXmuIBwS5ST"
+SHARE_URL = f"https://cernbox.cern.ch/index.php/s/{SHARE_TOKEN}"
+DAV_URL = f"https://cernbox.cern.ch/remote.php/dav/public-files/{SHARE_TOKEN}"
+DOWNLOAD_URL = f"https://cernbox.cern.ch/s/{SHARE_TOKEN}/download"
 
-    def open_url(requested, timeout):
-        opens.append(requested)
-        if requested.endswith("/download"):
-            return _PublicResponse(requested, JPEG, "application/octet-stream")
-        return _PublicResponse(requested, HTML_ERROR_PAGE, "text/html")
 
-    monkeypatch.setattr(attachment_store, "_open_public_url", open_url)
+def _stage_share_descriptor(session, evidence, code: str, url: str = SHARE_URL) -> None:
     _set_attachment_descriptor(
         session,
         evidence,
         {
-            "code": "a1" * 32,
-            "filename": "6LPpeXmuIBwS5ST",
+            "code": code,
+            "filename": SHARE_TOKEN,
             "content_type": None,
             "type": "share_link",
             "source": "share_link",
@@ -758,28 +751,132 @@ def test_share_page_html_falls_back_to_the_download_route(
         },
     )
 
+
+def test_share_token_url_downloads_via_the_dav_route(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    """A CERNBox/ownCloud share link points at an HTML viewer page, not the
+    file (verified live: the plain URL answers `text/html`). The WebDAV
+    public-files route serves the actual bytes and is tried first."""
+    opens: list[str] = []
+
+    def open_url(requested, timeout):
+        opens.append(requested)
+        if "/remote.php/dav/public-files/" in requested:
+            return _PublicResponse(requested, JPEG, "image/jpeg")
+        return _PublicResponse(requested, HTML_ERROR_PAGE, "text/html")
+
+    monkeypatch.setattr(attachment_store, "_open_public_url", open_url)
+    _stage_share_descriptor(session, evidence, "a1" * 32)
+
     stats = download_attachments(
         session, _FakeGateway(configured=False), settings, "20USEM20000041"
     )
     session.commit()
 
     assert stats.downloaded == 1 and stats.failed == 0
-    assert opens == [url, url + "/download"]
+    assert opens == [DAV_URL]
     assert no_sleep == []
     row = session.scalar(
         select(TestRunAttachment).where(TestRunAttachment.pdb_code == "a1" * 32)
     )
     assert resolve_path(settings, row).read_bytes() == JPEG
+    # The descriptor carries no content type for share links; the stored one
+    # must come from the response so `is_image` and the thumbnail work.
+    assert row.content_type == "image/jpeg"
+    assert row.is_image is True
+    assert row.relative_path.endswith(".jpg")
 
 
-def test_share_link_candidates_never_double_the_download_suffix():
+def test_share_page_html_falls_back_to_the_download_route(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    opens: list[str] = []
+
+    def open_url(requested, timeout):
+        opens.append(requested)
+        if requested.endswith("/download"):
+            return _PublicResponse(requested, JPEG, "image/jpeg")
+        return _PublicResponse(requested, HTML_ERROR_PAGE, "text/html")
+
+    monkeypatch.setattr(attachment_store, "_open_public_url", open_url)
+    _stage_share_descriptor(session, evidence, "b2" * 32)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.downloaded == 1 and stats.failed == 0
+    assert opens == [DAV_URL, DOWNLOAD_URL]
+    row = session.scalar(
+        select(TestRunAttachment).where(TestRunAttachment.pdb_code == "b2" * 32)
+    )
+    assert resolve_path(settings, row).read_bytes() == JPEG
+
+
+def test_a_share_that_only_serves_html_fails_and_stays_retryable(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    """A viewer page must never be stored as the attachment — and the failure
+    must not be final: once the share works again, the next sweep mirrors it."""
+    opens: list[str] = []
+
+    def only_html(requested, timeout):
+        opens.append(requested)
+        return _PublicResponse(requested, HTML_ERROR_PAGE, "text/html")
+
+    monkeypatch.setattr(attachment_store, "_open_public_url", only_html)
+    _stage_share_descriptor(session, evidence, "c3" * 32)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.failed == 1 and stats.downloaded == 0
+    # HTML is a final answer for this sweep: all candidates once, no backoff.
+    assert opens == [DAV_URL, DOWNLOAD_URL, SHARE_URL]
+    assert no_sleep == []
+    row = session.scalar(
+        select(TestRunAttachment).where(TestRunAttachment.pdb_code == "c3" * 32)
+    )
+    assert resolve_path(settings, row) is None
+
+    monkeypatch.setattr(
+        attachment_store,
+        "_open_public_url",
+        lambda requested, timeout: _PublicResponse(requested, JPEG, "image/jpeg"),
+    )
+    second = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+    assert second.downloaded == 1
+    assert resolve_path(settings, session.scalar(
+        select(TestRunAttachment).where(TestRunAttachment.pdb_code == "c3" * 32)
+    )) is not None
+
+
+def test_share_link_candidates_cover_both_share_url_forms():
     candidates = attachment_store._share_link_candidates
-    plain = "https://cernbox.cern.ch/s/6LPpeXmuIBwS5ST"
-    assert candidates(plain) == [plain, plain + "/download"]
-    direct = "https://cernbox.cern.ch/s/6LPpeXmuIBwS5ST/download"
+    # Both public-share URL forms yield: DAV public-files, /s/<token>/download,
+    # then the original URL as last resort. Never /index.php/.../download —
+    # that form failed name resolution during live validation.
+    for base in ("https://cernbox.cern.ch/s/tok", "https://cernbox.cern.ch/index.php/s/tok"):
+        assert candidates(base) == [
+            "https://cernbox.cern.ch/remote.php/dav/public-files/tok",
+            "https://cernbox.cern.ch/s/tok/download",
+            base,
+        ]
+    # Already-direct download forms are used as-is.
+    direct = "https://cernbox.cern.ch/s/tok/download"
     assert candidates(direct) == [direct]
     named = "https://syncandshare.example.org/index.php/s/tok/download/metro_current.txt"
     assert candidates(named) == [named]
+    # A URL that is not a recognisable share form is fetched as-is.
+    plain_file = "https://files.example.org/plots/iv_curve.png"
+    assert candidates(plain_file) == [plain_file]
 
 
 def test_same_filename_across_runs_all_land_on_disk(session, settings):

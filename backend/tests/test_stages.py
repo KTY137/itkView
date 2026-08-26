@@ -1,8 +1,8 @@
 """Tests for the stage-move suggestion engine (pure domain + API)."""
 
+from authutil import create_institute_profile
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
-from authutil import create_institute_profile
 
 from app.domain.stages import (
     DEFAULT_STAGE_MODEL,

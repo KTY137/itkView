@@ -7,7 +7,15 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select, text
 
 from app.db import Base, make_engine, make_session_factory
-from app.models import Component, SyncJob, TestRunAttachment, TestRunEvidence, User, utcnow
+from app.models import (
+    Component,
+    InstituteProfile,
+    SyncJob,
+    TestRunAttachment,
+    TestRunEvidence,
+    User,
+    utcnow,
+)
 from app.pdb_credentials import (
     PdbAccessCodes,
     PdbCredentialNotFoundError,
@@ -19,6 +27,7 @@ from app.sync_jobs import (
     SyncJobManager,
     acquire_component_sync_lease,
     acquire_evidence_sync_lease,
+    auto_retry_requested_by,
     recover_interrupted_sync_jobs,
     run_component_sync_job,
     run_evidence_sync_job,
@@ -459,6 +468,16 @@ def test_evidence_job_mirrors_detail_and_attachments_from_profile_scope(
 ):
     client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
     with session_factory() as session:
+        # Pin the sweep scope in the institute profile — that is what this
+        # test is about — so the assertion does not depend on the value of
+        # the collaboration-wide default type list.
+        profile = session.scalar(
+            select(InstituteProfile).where(InstituteProfile.code == "TUDO")
+        )
+        profile.settings = {
+            **(profile.settings or {}),
+            "evidence_component_types": ["MODULE"],
+        }
         session.add(
             Component(
                 sn="20USEM00000101",
@@ -1095,27 +1114,228 @@ def _component_jobs(session_factory):
         )
 
 
-def test_evidence_job_transient_failure_schedules_one_automatic_retry(
+# The decision "does this failure earn an automatic retry?" is tested
+# synchronously, against the runners themselves. No thread, no timer and no
+# sleep is involved, so the cap is proven by construction rather than by
+# waiting a moment and hoping nothing else shows up. Only the wiring test
+# below uses the real timer/executor, and only for a positive outcome.
+
+
+class _RecordingRetry:
+    def __init__(self):
+        self.contexts: list = []
+
+    def __call__(self, context) -> None:
+        self.contexts.append(context)
+
+
+def _queue_evidence_job(session_factory, *, requested_by: str) -> int:
+    with session_factory() as session:
+        user_id = session.scalar(select(User.id))
+        lease = acquire_evidence_sync_lease(
+            session,
+            institute_code="TUDO",
+            requested_by=requested_by,
+            user_id=user_id,
+        )
+        return lease.job.id
+
+
+def _queue_component_job(session_factory, *, requested_by: str) -> int:
+    with session_factory() as session:
+        user_id = session.scalar(select(User.id))
+        lease = acquire_component_sync_lease(
+            session,
+            institute_code="TUDO",
+            requested_by=requested_by,
+            user_id=user_id,
+        )
+        return lease.job.id
+
+
+class _DownClient:
+    def get(self, action, json=None):
+        raise ConnectionResetError("Connection reset by peer")
+
+
+def test_transient_evidence_failure_asks_for_one_automatic_retry(
     client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
 ):
-    """A short outage must not leave the evidence mirror waiting for a human
-    click — and the automatic retry must never loop."""
+    """A short outage must not leave the evidence mirror waiting for a click."""
+    monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    _add_module(session_factory, "20USEM00000601")
+    job_id = _queue_evidence_job(session_factory, requested_by="operator@example.org")
+    on_transient = _RecordingRetry()
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, codes: _EvidenceGateway(_DownClient()),
+        job_id,
+        on_transient,
+    )
+
+    with session_factory() as session:
+        assert session.get(SyncJob, job_id).status == "failed"
+    assert len(on_transient.contexts) == 1
+    context = on_transient.contexts[0]
+    assert context.institute.code == "TUDO"
+    assert context.auto_retry is False
+
+
+def test_an_automatic_retry_never_schedules_another_one(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
+):
+    """The hard cap: a job that *is* the automatic retry fails without asking
+    for a further one, so the chain is at most original + one retry."""
+    monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    _add_module(session_factory, "20USEM00000602")
+    job_id = _queue_evidence_job(
+        session_factory,
+        requested_by=auto_retry_requested_by("operator@example.org"),
+    )
+    on_transient = _RecordingRetry()
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, codes: _EvidenceGateway(_DownClient()),
+        job_id,
+        on_transient,
+    )
+
+    with session_factory() as session:
+        assert session.get(SyncJob, job_id).status == "failed"
+    assert on_transient.contexts == []
+
+
+def test_transient_component_failure_asks_for_one_automatic_retry(
+    client: TestClient, session_factory, tudo: dict, as_operator
+):
+    job_id = _queue_component_job(session_factory, requested_by="operator@example.org")
+    on_transient = _RecordingRetry()
+
+    def outage_fetcher(settings, institute, access_codes, report):
+        raise PdbSyncUnavailable("PDB component page 1 failed (transient network error).")
+
+    run_component_sync_job(
+        session_factory,
+        client.app.state.settings,
+        outage_fetcher,
+        job_id,
+        None,
+        on_transient,
+    )
+
+    with session_factory() as session:
+        assert session.get(SyncJob, job_id).status == "failed"
+    assert len(on_transient.contexts) == 1
+    assert on_transient.contexts[0].auto_retry is False
+
+
+def test_an_automatic_component_retry_never_schedules_another_one(
+    client: TestClient, session_factory, tudo: dict, as_operator
+):
+    job_id = _queue_component_job(
+        session_factory,
+        requested_by=auto_retry_requested_by("operator@example.org"),
+    )
+    on_transient = _RecordingRetry()
+
+    def outage_fetcher(settings, institute, access_codes, report):
+        raise PdbSyncUnavailable("PDB component page 1 failed (transient network error).")
+
+    run_component_sync_job(
+        session_factory,
+        client.app.state.settings,
+        outage_fetcher,
+        job_id,
+        None,
+        on_transient,
+    )
+
+    assert on_transient.contexts == []
+
+
+def test_permanent_component_failure_does_not_schedule_a_retry(
+    client: TestClient, session_factory, tudo: dict, as_operator
+):
+    """A bug or data problem will not fix itself in sixty seconds; only
+    connectivity-shaped (Pdb*Unavailable) failures earn the automatic retry."""
+    job_id = _queue_component_job(session_factory, requested_by="operator@example.org")
+    on_transient = _RecordingRetry()
+
+    def broken_fetcher(settings, institute, access_codes, report):
+        raise RuntimeError("mapping bug")
+
+    run_component_sync_job(
+        session_factory,
+        client.app.state.settings,
+        broken_fetcher,
+        job_id,
+        None,
+        on_transient,
+    )
+
+    with session_factory() as session:
+        assert session.get(SyncJob, job_id).status == "failed"
+    assert on_transient.contexts == []
+
+
+def test_a_missing_credential_failure_does_not_schedule_a_retry(
+    client: TestClient, session_factory, tudo: dict, as_operator, monkeypatch
+):
+    """Nothing about a disconnected account improves by retrying it."""
+
+    def missing_credential(session, *, user_id, encryption_key):
+        raise PdbCredentialNotFoundError("No personal ITKDB credential is connected.")
+
+    monkeypatch.setattr("app.sync_jobs.load_pdb_credentials", missing_credential)
+    job_id = _queue_component_job(session_factory, requested_by="operator@example.org")
+    on_transient = _RecordingRetry()
+
+    run_component_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, institute, access_codes, report: FetchResult(records=[], skipped=0),
+        job_id,
+        None,
+        on_transient,
+    )
+
+    assert on_transient.contexts == []
+
+
+def test_the_retry_timer_uses_the_configured_delay(client, session_factory, monkeypatch):
+    """The delay is real (no busy loop) and configurable, and shutdown cancels
+    a pending timer so nothing fires into a torn-down app."""
+    monkeypatch.setattr("app.sync_jobs.SYNC_AUTO_RETRY_DELAY_SECONDS", 42.0)
+    manager = SyncJobManager(session_factory, client.app.state.settings)
+    try:
+        manager._schedule_retry(lambda: None)
+        timer = manager._retry_timers[-1]
+        assert timer.interval == 42.0
+        assert timer.daemon is True
+    finally:
+        manager.shutdown()
+    assert timer.finished.is_set()  # cancelled by shutdown, never fired
+
+
+def test_the_automatic_retry_really_queues_a_second_job(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
+):
+    """End-to-end wiring through the real timer and executor: a transiently
+    failed evidence job produces a second, durable, credential-owning job
+    without anyone clicking. Only the positive outcome is awaited here; the
+    cap itself is proven synchronously above."""
     monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
     monkeypatch.setattr("app.sync_jobs.SYNC_AUTO_RETRY_DELAY_SECONDS", 0.0)
     client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
-    _add_module(session_factory, "20USEM00000601")
+    _add_module(session_factory, "20USEM00000603")
     client.app.state.sync_job_manager = RecordingManager()
     job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
-
-    class _DownGateway:
-        is_configured = True
-
-        def client(self):
-            raise PdbSyncUnavailable("unused")
-
-    class _DownClient:
-        def get(self, action, json=None):
-            raise ConnectionResetError("Connection reset by peer")
 
     manager = SyncJobManager(
         session_factory,
@@ -1124,81 +1344,40 @@ def test_evidence_job_transient_failure_schedules_one_automatic_retry(
     )
     try:
         manager.start_evidence(job_id)
-
         jobs = _wait_for(
-            lambda: (
-                lambda rows: rows
-                if len(rows) == 2 and all(job.status == "failed" for job in rows)
-                else None
-            )(_evidence_jobs(session_factory))
+            lambda: (lambda rows: rows if len(rows) == 2 else None)(
+                _evidence_jobs(session_factory)
+            )
         )
-        original, retry = jobs
-        assert original.id == job_id
-        assert retry.requested_by.startswith("automatic retry")
-        assert retry.user_id == original.user_id
-        assert retry.institute_code == "TUDO"
-
-        # Bounded: the failed automatic retry must not spawn a third attempt.
-        time.sleep(0.3)
-        assert len(_evidence_jobs(session_factory)) == 2
     finally:
         manager.shutdown()
 
+    original, retry = jobs
+    assert original.id == job_id and original.status == "failed"
+    assert retry.requested_by.startswith("automatic retry")
+    assert retry.user_id == original.user_id
+    assert retry.institute_code == "TUDO"
 
-def test_component_job_transient_failure_schedules_one_automatic_retry(
-    client: TestClient, session_factory, tudo: dict, as_operator, monkeypatch
-):
-    monkeypatch.setattr("app.sync_jobs.SYNC_AUTO_RETRY_DELAY_SECONDS", 0.0)
-    client.app.state.sync_job_manager = RecordingManager()
-    job_id = client.post("/api/sync/jobs/components/TUDO").json()["id"]
 
-    def outage_fetcher(settings, institute, access_codes, report):
-        raise PdbSyncUnavailable("PDB component page 1 failed (transient network error).")
+def test_manager_start_evidence_passes_the_retry_hook(client, session_factory):
+    class _RecordingExecutor:
+        def __init__(self):
+            self.call = None
+
+        def submit(self, function, *args):
+            self.call = (function, args)
 
     manager = SyncJobManager(session_factory, client.app.state.settings)
-    try:
-        manager.start(job_id, outage_fetcher)
+    manager._executor.shutdown(wait=False)
+    executor = _RecordingExecutor()
+    manager._executor = executor
 
-        jobs = _wait_for(
-            lambda: (
-                lambda rows: rows
-                if len(rows) == 2 and all(job.status == "failed" for job in rows)
-                else None
-            )(_component_jobs(session_factory))
-        )
-        original, retry = jobs
-        assert original.id == job_id
-        assert retry.requested_by.startswith("automatic retry")
-        assert retry.user_id == original.user_id
+    manager.start_evidence(77)
 
-        time.sleep(0.3)
-        assert len(_component_jobs(session_factory)) == 2
-    finally:
-        manager.shutdown()
-
-
-def test_permanent_component_failure_does_not_schedule_a_retry(
-    client: TestClient, session_factory, tudo: dict, as_operator, monkeypatch
-):
-    """A bug or data problem will not fix itself in sixty seconds; only
-    connectivity-shaped (Pdb*Unavailable) failures earn the automatic retry."""
-    monkeypatch.setattr("app.sync_jobs.SYNC_AUTO_RETRY_DELAY_SECONDS", 0.0)
-    client.app.state.sync_job_manager = RecordingManager()
-    job_id = client.post("/api/sync/jobs/components/TUDO").json()["id"]
-
-    def broken_fetcher(settings, institute, access_codes, report):
-        raise RuntimeError("mapping bug")
-
-    manager = SyncJobManager(session_factory, client.app.state.settings)
-    try:
-        manager.start(job_id, broken_fetcher)
-        _wait_for(
-            lambda: any(job.status == "failed" for job in _component_jobs(session_factory))
-        )
-        time.sleep(0.3)
-        assert len(_component_jobs(session_factory)) == 1
-    finally:
-        manager.shutdown()
+    function, args = executor.call
+    assert function is run_evidence_sync_job
+    assert args[3] == 77
+    assert args[4] == manager._schedule_evidence_retry
 
 
 def test_automatic_retry_converges_on_an_existing_manual_lease(
@@ -1272,3 +1451,126 @@ def test_evidence_job_still_fails_honestly_when_a_component_never_answers(
     )
 
     assert client.get(f"/api/sync/jobs/{job_id}").json()["status"] == "failed"
+
+
+def test_evidence_scope_covers_assembly_types_and_borrowed_components(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path
+):
+    """The sweep must cover what the institute actually works on.
+
+    Two real gaps found against production TUDO data: the default scope was
+    MODULE-only although sensors, hybrids and flexes carry test runs (and the
+    sensors carry most of the attachments), and the scope filtered on
+    ownership although most components at an assembly site are owned by the
+    sending institute and only located here.
+    """
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    with session_factory() as session:
+        session.add_all(
+            [
+                Component(
+                    sn="20USEM00000401",
+                    component_type="MODULE",
+                    type_code="R5M0",
+                    stage="GLUED",
+                    location="TUDO",
+                    institute_code="TUDO",
+                ),
+                # Owned by another institute, physically here: the common case.
+                Component(
+                    sn="20USES00000402",
+                    component_type="SENSOR",
+                    type_code="S",
+                    stage="READY_FOR_MODULE",
+                    location="TUDO",
+                    institute_code="UCSC_STRIP_SENSORS",
+                ),
+                Component(
+                    sn="20USEH00000403",
+                    component_type="HYBRID_FLEX",
+                    type_code="R5H0",
+                    stage="ON_HYBRID",
+                    location="TUDO",
+                    institute_code="RAL",
+                ),
+                # Owned here but shipped away — not our evidence to mirror.
+                Component(
+                    sn="20USEM00000404",
+                    component_type="MODULE",
+                    type_code="R5M0",
+                    stage="GLUED",
+                    location="UNIFREIBURG",
+                    institute_code="TUDO",
+                ),
+                # A type without test runs stays out of the default scope.
+                Component(
+                    sn="20USEG00000405",
+                    component_type="GLUE",
+                    type_code="G",
+                    stage="IN_USE",
+                    location="TUDO",
+                    institute_code="TUDO",
+                ),
+            ]
+        )
+        session.commit()
+
+    manager = RecordingManager()
+    client.app.state.sync_job_manager = manager
+    job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
+    fake_client = _EvidenceClient()
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, access_codes: _EvidenceGateway(fake_client),
+        job_id,
+    )
+
+    assert sorted(fake_client.component_requests) == [
+        "20USEH00000403",
+        "20USEM00000401",
+        "20USEM00000404",
+        "20USES00000402",
+    ]
+
+
+def test_the_institute_profile_still_narrows_the_evidence_scope(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path
+):
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    with session_factory() as session:
+        session.add_all(
+            [
+                Component(
+                    sn="20USEM00000411",
+                    component_type="MODULE",
+                    type_code="R5M0",
+                    stage="GLUED",
+                    location="TUDO",
+                    institute_code="TUDO",
+                ),
+                Component(
+                    sn="20USES00000412",
+                    component_type="SENSOR",
+                    type_code="S",
+                    stage="READY_FOR_MODULE",
+                    location="TUDO",
+                    institute_code="TUDO",
+                ),
+            ]
+        )
+        institute = session.scalar(select(InstituteProfile).where(InstituteProfile.code == "TUDO"))
+        institute.settings = {**(institute.settings or {}), "evidence_component_types": ["MODULE"]}
+        session.commit()
+
+    client.app.state.sync_job_manager = RecordingManager()
+    job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
+    fake_client = _EvidenceClient()
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, access_codes: _EvidenceGateway(fake_client),
+        job_id,
+    )
+    assert fake_client.component_requests == ["20USEM00000411"]

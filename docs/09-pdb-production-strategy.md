@@ -218,7 +218,99 @@ Der Evidence-Sweep wiederholt zudem einen transienten `getComponent`-Fehler
 pro Komponente bis zum konfigurierten Retry-Budget
 (`ITKFLOW_SYNC_PAGE_MAX_ATTEMPTS`), statt bei einem einzelnen
 Leitungs-Wackler den ganzen Institutslauf bei null abzubrechen; eine dauerhaft
-unerreichbare Komponente laesst den Job weiterhin ehrlich scheitern.
+unerreichbare Komponente laesst den Job weiterhin ehrlich scheitern. Jeder
+dieser Wiederholungsversuche schreibt vor dem Backoff einen Job-Heartbeat:
+die volle Retry-Leiter kann sonst laenger schweigen als die Drei-Minuten-Grenze
+der Startup-Recovery, und eine zweite App-Instanz haette einen lebenden Job als
+verwaist geschlossen.
+
+**Kurze Internet-Ausfaelle ueberleben (2026-08-26).** Drei Luecken liessen eine
+Funkloch-Minute wie dauerhaften Verlust aussehen:
+
+- **Attachment-Downloads hatten keinen Retry.** Ein realer Sweep endete mit
+  `attachments_failed=11` von 363 — jeder Netzwerkfehler zaehlte sofort als
+  endgueltig. `app/attachment_store.py` unterscheidet jetzt transient von
+  permanent (`is_transient_download_error`): DNS-Ausfall, Connection Reset,
+  TLS-Handshake-Timeout, 408/425/429 und 5xx werden mit exponentiellem Backoff
+  bis `ITKFLOW_SYNC_PAGE_MAX_ATTEMPTS` wiederholt (dasselbe geteilte Budget wie
+  Seiten- und Evidence-Retry); 4xx, HTML-Fehlerseiten und uebergrosse Bodies
+  scheitern sofort, weil Warten daran nichts aendert. Auch der Aufbau des
+  authentifizierten Clients faellt darunter — er ist waehrend eines Ausfalls
+  genauso betroffen wie jeder andere Request. Ist das Budget dafuer erschoepft,
+  scheitern die restlichen PDB-Dateien dieses Sweeps schnell, statt das Gateway
+  je Datei erneut zu befragen. Ein Fehlschlag wird **nie** als gespeichert
+  vermerkt (`relative_path` bleibt leer), der naechste Sweep holt ihn also
+  automatisch nach. Waehrend der Download-Phase feuert ein Heartbeat pro Datei
+  und vor jedem Backoff, damit eine Komponente mit vielen langsamen Dateien
+  nicht verwaist wirkt.
+- **Ein transient gescheiterter Job blieb bis zum Klick liegen.** Jobs, die an
+  einem `PdbSyncUnavailable`/`PdbEvidenceUnavailable` scheitern, planen jetzt
+  **genau einen** automatischen Wiederholungslauf nach
+  `SYNC_AUTO_RETRY_DELAY_SECONDS` (60 s; deutlich unter der Heartbeat-Grenze).
+  Die Obergrenze steckt im dauerhaften Marker `requested_by` = „automatic retry
+  (…)": ein so gestarteter Job plant selbst keinen weiteren — die Kette ist
+  damit auch ueber Neustarts hinweg auf Original + ein Retry begrenzt.
+  Waehrend der Wartezeit existiert bewusst **keine** Jobzeile: der
+  fehlgeschlagene Job bleibt sichtbar und lease-frei, ein Mensch kann jederzeit
+  selbst starten. Feuert der Timer, laeuft der Retry durch die normale
+  Lease-Akquise und **konvergiert** auf einen bereits vorhandenen Job, statt
+  einen zweiten zu stapeln; Single-Flight bleibt unangetastet. Nicht-transiente
+  Fehler (fehlende Credentials, verschwundenes Institut, echte Bugs) bekommen
+  keinen Retry — sie wuerden nur denselben Fehler wiederholen.
+- **Zombie-Leases blockierten den Neustart.** Startup-Recovery schliesst nur
+  Jobs mit altem Heartbeat; ein Crash mit sofortigem Neustart hinterlaesst aber
+  eine frisch aussehende Zeile, die die Single-Flight-Lease dauerhaft
+  blockierte. `acquire_*_sync_lease` uebernimmt eine Lease jetzt selbst, sobald
+  deren Heartbeat aelter als die Drei-Minuten-Grenze ist (dieselbe Regel und
+  derselbe Code-Pfad wie die Startup-Recovery); ein Job zwischen zwei
+  Heartbeats bleibt unangetastet.
+
+**Share-Link-Attachments landeten nie auf der Platte (2026-08-26, Bugfix).**
+Visual-Inspection-Ergebnisse tragen oefter eine oeffentliche CERNBox-/
+Sync&Share-URL statt eines PDB-Attachments. Diese Links zeigen auf die
+HTML-Betrachterseite, nicht auf die Datei — der Mirror forderte genau diese
+Seite an, erkannte korrekt HTML und verwarf sie, womit jedes solche Attachment
+als „bekannt, aber nicht gespiegelt" liegen blieb. Der Download probiert jetzt
+in dieser Reihenfolge: `remote.php/dav/public-files/<token>` (liefert die
+Bytes und eine Content-Length), dann `/s/<token>/download`, zuletzt die
+Original-URL. Erkannt wird die Form am URL-Muster `/s/<token>` — eine
+Konvention der Share-Software, kein Institutsdetail (harte Regel 4);
+`/index.php/s/<token>/download` wird bewusst nie erzeugt, weil diese Variante
+in der Live-Pruefung an der Namensaufloesung scheiterte. Liefern alle
+Kandidaten nur HTML, bleibt es bei „nicht gespiegelt" (eine gespeicherte
+Betrachterseite waere ein kaputtes Bild, das wie ein Galerie-Bug aussieht) —
+protokolliert wird dabei nur der Attachment-Code, nie die URL. Der Content-Type
+kommt aus der Antwort, weil Share-Deskriptoren keinen mitbringen; erst dadurch
+werden gespiegelte Fotos als Bild erkannt und bekommen ihre Dateiendung.
+
+Die Transient-/Permanent-Einstufung ist an allen drei Grenzen dieselbe Frage
+und jeweils lokal beantwortet: `app/pdb_sync.py` fuer Listing-Seiten,
+`app/attachment_store.py` fuer Dateien und `app/pdb_submit.py::_call_pdb` fuer
+Writes (4xx = Ablehnung der Daten, 408/425/429 + 5xx + Transportfehler =
+wiederholbar). Der Outbox-Worker erkennt einen wiederholbaren Fehlschlag am
+Prefix `PDB unavailable:`, den ausschliesslich `PdbSubmitUnavailable` erzeugt.
+`backend/tests/test_transient_classification.py` pinnt diese Aufteilung fuer die
+real beobachteten Ausfallformen fest.
+
+**Evidence-Umfang: Baugruppen statt nur Module (2026-08-26).** Der Sweep deckte
+nur `MODULE` ab und filterte zusaetzlich auf *Besitz* (`institute_code`) — an
+einem Assembly-Standort gehoert das meiste aber dem sendenden Institut und
+steht nur hier (bei TUDO: ~2000 von 3044 Komponenten). Beide Grenzen sind
+gefallen:
+
+- Scope ist jetzt „uns gehoerend **oder** hier stehend", analog zum
+  Zwei-Scope-Fetch des Komponenten-Mirrors.
+- `DEFAULT_EVIDENCE_COMPONENT_TYPES` deckt die Typen ab, die real Testlaeufe
+  tragen (per Stichprobe gegen die Produktions-PDB ermittelt): `MODULE`,
+  `SENSOR`, `SENSOR_S_TEST`, `HYBRID`, `HYBRID_ASSEMBLY`, `HYBRID_FLEX`,
+  `HYBRID_TEST_PANEL`, `EC_POWERBOARD_FLEX`, `PWB`, `HV_TAB_SHEET`.
+  Sensoren tragen dabei die meisten Attachments (26 in einer 3er-Stichprobe).
+  Die Chip-Typen `ABC`/`HCC`/`AMAC` bleiben bewusst draussen: sie
+  verfuenffachen den Sweep fuer Wafer-QA, die nicht die Produktionsakte des
+  Standorts ist — ein Standort kann sie ueber `evidence_component_types`
+  jederzeit dazunehmen. Das Profil-Setting ueberschreibt die Liste weiterhin
+  vollstaendig (harte Regel 4: Typcodes sind kollaborationsweit, nicht
+  institutsspezifisch).
 
 **Evidence-Sync committet pro Komponente (2026-08-26):** Der Sweep sammelte
 alle Testlaeufe im Speicher und schrieb sie in einer einzigen Transaktion am

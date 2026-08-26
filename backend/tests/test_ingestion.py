@@ -1,6 +1,6 @@
+from authutil import create_institute_profile
 from fastapi.testclient import TestClient
 from sqlalchemy import text
-from authutil import create_institute_profile
 
 from app.db import ensure_phase0_sqlite_schema, make_engine
 from app.ingestion import parse_payload
