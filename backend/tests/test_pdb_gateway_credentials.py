@@ -48,6 +48,10 @@ def test_gateways_keep_two_users_credentials_isolated(monkeypatch):
     settings = Settings(
         itkdb_access_code1="legacy-global-1",
         itkdb_access_code2="legacy-global-2",
+        # A client only exists for the production instance (offline builds
+        # none); the itkdb module is faked, so nothing is reached.
+        pdb_instance="production",
+        allow_production=True,
         _env_file=None,
     )
     alice = PdbAccessCodes(access_code1="alice-1", access_code2="alice-2")
@@ -72,7 +76,7 @@ def test_gateways_keep_two_users_credentials_isolated(monkeypatch):
 
 def test_missing_itkdb_dependency_is_a_local_client_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "itkdb", None)
-    settings = Settings(_env_file=None)
+    settings = Settings(pdb_instance="production", allow_production=True, _env_file=None)
     codes = PdbAccessCodes(access_code1="personal-one", access_code2="personal-two")
 
     with pytest.raises(PdbClientUnavailable, match="unavailable on this server"):
@@ -89,7 +93,7 @@ def test_built_client_has_a_bounded_request_timeout(monkeypatch):
 
     fake_itkdb = SimpleNamespace(core=SimpleNamespace(User=FakeUser), Client=FakeClient)
     monkeypatch.setitem(sys.modules, "itkdb", fake_itkdb)
-    settings = Settings(_env_file=None)
+    settings = Settings(pdb_instance="production", allow_production=True, _env_file=None)
     codes = PdbAccessCodes(access_code1="one", access_code2="two")
 
     client = PdbGateway(settings, access_codes=codes).client()

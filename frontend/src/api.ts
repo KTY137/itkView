@@ -1323,7 +1323,12 @@ export type GlueUsage = {
   used_at: string;
 };
 
-export type GlueBatchQuery = { status?: string; glue_type?: string; q?: string };
+export type GlueBatchQuery = {
+  status?: string;
+  glue_type?: string;
+  q?: string;
+  institute?: string;
+};
 
 export type GlueBatchCreateBody = {
   glue_type: string;
@@ -1346,8 +1351,14 @@ export function getGlueBatches(
   return request<GlueBatch[]>(`/api/glue-batches${queryString(query)}`, { signal });
 }
 
-export function scanGlueBatch(code: string, signal?: AbortSignal): Promise<GlueBatch> {
-  return request<GlueBatch>(`/api/glue-batches/scan${queryString({ code })}`, { signal });
+export function scanGlueBatch(
+  code: string,
+  institute?: string,
+  signal?: AbortSignal,
+): Promise<GlueBatch> {
+  return request<GlueBatch>(`/api/glue-batches/scan${queryString({ code, institute })}`, {
+    signal,
+  });
 }
 
 export function postGlueBatch(body: GlueBatchCreateBody): Promise<GlueBatch> {

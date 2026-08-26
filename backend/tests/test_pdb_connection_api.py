@@ -56,7 +56,7 @@ def test_connection_status_requires_login_and_starts_empty(client, session_facto
     assert response.json() == {
         "configured": False,
         "state": "not_configured",
-        "instance": "test",
+        "instance": "offline",
         "identity": None,
         "institutions": [],
         "last_checked_at": None,

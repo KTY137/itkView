@@ -230,3 +230,176 @@ def test_fetch_for_institute_requests_ready_state_as_a_string(monkeypatch):
     assert result.records == []
     assert result.skipped == 0
     assert client.calls[0]["json"]["filterMap"]["state"] == "ready"
+
+
+def test_fetch_pages_attempt_budget_is_configurable(monkeypatch):
+    monkeypatch.setattr("app.pdb_sync.sleep", lambda seconds: None)
+    client = FakeClient({0: page(0, 1, [item(1)])}, failures={0: 4})
+
+    assert _fetch_pages(client, {"filterMap": {}}, max_attempts=5) == [item(1)]
+    assert len(client.calls) == 5
+
+    exhausted = FakeClient({}, failures={0: 2})
+    with pytest.raises(PdbSyncUnavailable, match="after 2 attempts"):
+        _fetch_pages(exhausted, {"filterMap": {}}, max_attempts=2)
+    assert len(exhausted.calls) == 2
+
+
+def test_fetch_for_institute_honors_the_configured_attempt_budget(monkeypatch):
+    client = FakeClient({0: page(0, 0, [])}, failures={0: 1})
+    codes = PdbAccessCodes(access_code1="user-code-1", access_code2="user-code-2")
+
+    class FakeGateway:
+        is_configured = True
+
+        def __init__(self, settings, *, access_codes):
+            pass
+
+        def client(self):
+            return client
+
+    monkeypatch.setattr("app.pdb_sync.PdbGateway", FakeGateway)
+    monkeypatch.setattr("app.pdb_sync.sleep", lambda seconds: None)
+    settings = Settings(_env_file=None, sync_page_max_attempts=1)
+    institute = InstituteProfile(
+        code="TUDO", name="TU Dortmund", local_name_prefix="TUDO-", settings={}
+    )
+
+    with pytest.raises(PdbSyncUnavailable):
+        fetch_for_institute(settings, institute, codes)
+    # A budget of one means the single transient failure is already the end.
+    assert len(client.calls) == 1
+
+
+class FilterAwareClient:
+    """Serves different page sets depending on the filterMap it receives."""
+
+    def __init__(self, by_scope: dict[str, dict[int, object]]):
+        self.by_scope = by_scope
+        self.calls: list[dict] = []
+
+    def get(self, action: str, *, json: dict, timeout):
+        assert action == "listComponents"
+        self.calls.append(json)
+        filter_map = json["filterMap"]
+        if "institute" in filter_map and "currentLocation" in filter_map:
+            raise AssertionError(
+                "institute and currentLocation must be requested separately: the "
+                "server-side OR search does not paginate consistently"
+            )
+        scope = "institute" if "institute" in filter_map else "currentLocation"
+        return self.by_scope[scope][json["pageInfo"]["pageIndex"]]
+
+
+def test_fetch_for_institute_merges_owned_and_located_instead_of_or_search(monkeypatch):
+    """The OR search loses components across page boundaries (verified live).
+
+    Asking for "owned by" and "located at" separately and merging the two by
+    serial number is what actually returns every component; the server-side OR
+    search returned duplicate rows instead, which silently hid ~1/3 of a real
+    institute — every tool among them.
+    """
+    def mappable(number: int) -> dict:
+        return {
+            **item(number),
+            "state": "ready",
+            "componentType": {"code": "MODULE"},
+            "type": {"code": "R5M0"},
+            "currentStage": {"code": "GLUED"},
+            "institution": {"code": "TUDO"},
+            "currentLocation": {"code": "TUDO"},
+        }
+
+    owned = [mappable(1), mappable(2)]
+    located = [mappable(2), mappable(3)]  # item 2 is owned by *and* located at us
+    client = FilterAwareClient(
+        {
+            "institute": {0: page(0, 2, owned, size=PDB_PAGE_SIZE)},
+            "currentLocation": {0: page(0, 2, located, size=PDB_PAGE_SIZE)},
+        }
+    )
+    codes = PdbAccessCodes(access_code1="user-code-1", access_code2="user-code-2")
+
+    class FakeGateway:
+        is_configured = True
+
+        def __init__(self, settings, *, access_codes):
+            pass
+
+        def client(self):
+            return client
+
+    monkeypatch.setattr("app.pdb_sync.PdbGateway", FakeGateway)
+    institute = InstituteProfile(
+        code="TUDO", name="TU Dortmund", local_name_prefix="TUDO-", settings={}
+    )
+
+    result = fetch_for_institute(Settings(_env_file=None), institute, codes)
+
+    assert sorted(record.sn for record in result.records) == [
+        "20USEM00000001",
+        "20USEM00000002",
+        "20USEM00000003",
+    ]
+    scopes = [
+        "institute" if "institute" in call["filterMap"] else "currentLocation"
+        for call in client.calls
+    ]
+    assert set(scopes) == {"institute", "currentLocation"}
+    assert all(not call.get("useOrInLocationSearch") for call in client.calls)
+
+
+def test_fetch_pages_rejects_a_page_set_padded_with_duplicates():
+    """Row count matching the total is not proof of completeness.
+
+    A live PDB returned the right number of rows while repeating some
+    components and omitting others; counting rows accepted that silently.
+    """
+    # Four promised, four delivered — but item 2 twice, so item 4 never arrives.
+    client = FakeClient({0: page(0, 4, [item(1), item(2), item(2), item(3)])})
+
+    with pytest.raises(PdbSyncUnavailable, match="duplicate"):
+        _fetch_pages(client, {"filterMap": {}})
+
+
+def test_fetch_progress_does_not_restart_for_the_second_scope(monkeypatch):
+    """Two listings, one progress bar.
+
+    The fetch asks for "owned by us" and "located here" separately. Reporting
+    each listing's own counter would send the UI back to zero halfway through a
+    long sync, which reads as a stalled or restarted job.
+    """
+    client = FilterAwareClient(
+        {
+            "institute": {0: page(0, 2, [item(1), item(2)])},
+            "currentLocation": {0: page(0, 3, [item(3), item(4), item(5)])},
+        }
+    )
+    codes = PdbAccessCodes(access_code1="user-code-1", access_code2="user-code-2")
+
+    class FakeGateway:
+        is_configured = True
+
+        def __init__(self, settings, *, access_codes):
+            pass
+
+        def client(self):
+            return client
+
+    monkeypatch.setattr("app.pdb_sync.PdbGateway", FakeGateway)
+    institute = InstituteProfile(
+        code="TUDO", name="TU Dortmund", local_name_prefix="TUDO-", settings={}
+    )
+
+    seen: list[tuple] = []
+
+    def progress(phase, current, total, message=None):
+        if phase == "fetching":
+            seen.append((current, total))
+
+    fetch_for_institute(Settings(_env_file=None), institute, codes, progress)
+
+    counters = [current for current, _total in seen]
+    assert counters == sorted(counters), f"progress went backwards: {counters}"
+    assert counters[-1] == 5, "the final count covers both listings"
+    assert seen[-1][1] == 5, "the reported total covers both listings"

@@ -141,6 +141,14 @@ const action: OutboxAction = {
   updated_at: "2026-08-26T10:01:00Z",
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 describe("AddTestResult", () => {
   beforeEach(() => {
     vi.mocked(postIngestFile).mockResolvedValue(ingestFile);
@@ -264,5 +272,50 @@ describe("AddTestResult", () => {
         test_type: "MODULE_METROLOGY",
       }),
     );
+  });
+
+  it("drops an old ingest response when the same component receives a new pinned intent", async () => {
+    const user = userEvent.setup();
+    const pendingIngest = deferred<IngestFile>();
+    vi.mocked(postIngestFile).mockReturnValueOnce(pendingIngest.promise);
+    const { container, rerender } = render(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[]}
+        pinnedTestType="MODULE_METROLOGY"
+        intentToken={1}
+      />,
+    );
+    const file = new File(
+      [JSON.stringify({ component: "20USEM00000001", testType: "MODULE_METROLOGY" })],
+      "old-intent.json",
+      { type: "application/json" },
+    );
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]') as HTMLInputElement,
+      file,
+    );
+    await waitFor(() => expect(postIngestFile).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[]}
+        pinnedTestType="RECEPTION_IV"
+        intentToken={2}
+      />,
+    );
+    pendingIngest.resolve(ingestFile);
+
+    await waitFor(() =>
+      expect(screen.getByText("Pinned test: RECEPTION_IV")).toBeInTheDocument(),
+    );
+    expect(getIngestPreview).not.toHaveBeenCalled();
+    expect(screen.queryByText("Ready to stage")).not.toBeInTheDocument();
+    expect(screen.queryByText(/old-intent\.json/)).not.toBeInTheDocument();
   });
 });

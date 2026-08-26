@@ -20,6 +20,40 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 
 - Monorepo steht mit `backend/`, `frontend/`, `agent/`, `deploy/`, CI- und
   Docker-Grundstruktur.
+- **Desktop kann Outbox-Aktionen wirklich pushen (2026-08-26):** Das Bundle
+  laeuft als ein Prozess und startete keinen Outbox-Worker — eine in der UI
+  gepushte Aktion erreichte `submitted` und blieb dort fuer immer liegen, sah
+  aber gepusht aus. Neu: `ITKFLOW_OUTBOX_PROCESSOR` (`worker` Default, Desktop
+  `app`) und `app/outbox_processor.py` draenen die Outbox im API-Prozess.
+  Sicherheitsmodell unveraendert: keine deployment-weiten Credentials,
+  Approval-Identitaet, `dummy_only`. Details docs/11.
+- **Sync-Datenverlust behoben (2026-08-26, gegen echte TUDO-Daten verifiziert):**
+  Zwei unabhaengige Fehler liessen die App unvollstaendig aussehen.
+  (1) `useOrInLocationSearch` blaettert inkonsistent: 3799 gemeldete
+  Komponenten, 3799 Zeilen, aber nur 2539 verschiedene — ~1260 fehlten, darunter
+  **alle 92 Jigs/Tools**, weshalb die Tool-Registry leer blieb. Der Fetch stellt
+  jetzt zwei getrennte Abfragen (owned / located) und fuehrt sie lokal zusammen:
+  3044 Komponenten, 0 Dubletten, 92 Tools. Zusaetzlich bricht eine
+  Dublettenpruefung einen lueckenhaften Sync ab, statt ihn zu verschweigen.
+  (2) Der Evidence-Sweep committete erst ganz am Ende; ein geschlossenes
+  App-Fenster verwarf die komplette Arbeit (real: 29/262 Komponenten, danach
+  `test_run_evidence` = 0 Zeilen → alle Pflichttests „missing"). Jetzt
+  committet jede Komponente einzeln. Details docs/09.
+- **Sync: inkrementeller Evidence-Sweep + konfigurierbares Retry-Budget
+  (2026-08-26):** Der Institutssweep vergleicht pro Testlauf einen
+  Flat-Fingerprint gegen den Mirror und holt `getTestRun`-Detail nur noch fuer
+  neue/veraenderte Laeufe (Marker `detail_synced`; Wiederholungs-Sync ~1
+  Request pro Komponente statt pro Lauf; Einzelkomponenten-Sync bleibt voller
+  Fetch). Seiten-Retries beim Komponenten-Sync sind konfigurierbar
+  (`ITKFLOW_SYNC_PAGE_MAX_ATTEMPTS`, Default 3). Details docs/09.
+- **PDB: Offline-Default statt toter Testinstanz (2026-08-26):**
+  `pdb_instance` kennt nur noch `offline` (Code-Default, erreicht nichts) und
+  `production`; `pdb_test_api_url` und die unicorncollege-URLs sind gestrichen.
+  Desktop-Bundle und Compose aktivieren Produktions-**Reads** ab Werk
+  (Owner-Entscheidung; Env gewinnt weiterhin, Writes bleiben `dummy_only`,
+  Traffic erst mit persoenlichen Codes). Der Account-Screen zeigt fuer eine
+  Offline-Instanz die ehrliche Server-Meldung statt „check your network".
+  Harte Regel 2 in CLAUDE.md neu gefasst; Details docs/09 + ADR-003-Ergänzung.
 - **Logistik & Betrieb (Phase-4-Kickoff, 2026-08-26):** Die drei
   Phase-4-Kernmodule sind implementiert (Vertrag/Details:
   `docs/11-logistics-operations.md`): **Glue-Batch-Registry** (lokale Batches

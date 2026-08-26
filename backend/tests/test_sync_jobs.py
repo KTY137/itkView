@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select, text
 
 from app.db import Base, make_engine, make_session_factory
-from app.models import Component, SyncJob, TestRunAttachment, TestRunEvidence, User
+from app.models import Component, SyncJob, TestRunAttachment, TestRunEvidence, User, utcnow
 from app.pdb_credentials import (
     PdbAccessCodes,
     PdbCredentialNotFoundError,
@@ -561,8 +561,17 @@ def test_evidence_lease_converges_without_stacking(session_factory, tudo: dict, 
 def test_restart_marks_live_jobs_interrupted(
     client: TestClient, session_factory, tudo: dict, as_operator
 ):
+    from datetime import timedelta
+
     client.app.state.sync_job_manager = RecordingManager()
     job_id = client.post("/api/sync/jobs/components/TUDO").json()["id"]
+    # Recovery targets jobs orphaned by a crash: their heartbeat has gone
+    # stale. A job whose heartbeat is fresh is deliberately left alone (see
+    # test_startup_recovery_leaves_a_live_sync_alone).
+    with session_factory() as session:
+        job = session.get(SyncJob, job_id)
+        job.updated_at = utcnow() - timedelta(hours=1)
+        session.commit()
 
     assert recover_interrupted_sync_jobs(session_factory) == 1
     with session_factory() as session:
@@ -643,3 +652,209 @@ def test_file_backed_sqlite_busy_is_retried_instead_of_escaping(tmp_path):
 
     assert created is True
     assert isinstance(job_id, int)
+
+
+class _FailingAfterNClient(_EvidenceClient):
+    """Serves evidence for the first N components, then the PDB dies."""
+
+    def __init__(self, fail_after: int):
+        super().__init__()
+        self._fail_after = fail_after
+
+    def get(self, action, json=None):
+        if action == "getComponent" and len(self.component_requests) >= self._fail_after:
+            raise RuntimeError("PDB connection dropped mid-sweep")
+        return super().get(action, json=json)
+
+
+def test_evidence_job_keeps_what_it_already_mirrored_when_interrupted(
+    client: TestClient,
+    session_factory,
+    tudo: dict,
+    as_operator,
+    tmp_path,
+):
+    """A sweep that dies partway must not throw away the components it finished.
+
+    The whole institute sweep is long; closing the app (or any PDB hiccup)
+    used to discard every fetched run because the job committed once at the
+    very end. The user then sees every required test as "missing".
+    """
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    with session_factory() as session:
+        for index in range(1, 4):
+            session.add(
+                Component(
+                    sn=f"20USEM0000020{index}",
+                    component_type="MODULE",
+                    type_code="R5M0",
+                    stage="GLUED",
+                    location="TUDO",
+                    institute_code="TUDO",
+                )
+            )
+        session.commit()
+
+    manager = RecordingManager()
+    client.app.state.sync_job_manager = manager
+    job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
+    fake_client = _FailingAfterNClient(fail_after=2)
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, access_codes: _EvidenceGateway(fake_client),
+        job_id,
+    )
+
+    status = client.get(f"/api/sync/jobs/{job_id}").json()
+    assert status["status"] == "failed"
+    # The two components fetched before the failure stay mirrored.
+    with session_factory() as session:
+        mirrored = session.scalars(select(TestRunEvidence.component_sn)).all()
+    assert sorted(mirrored) == ["20USEM00000201", "20USEM00000202"]
+    # And the lease is released, so the next attempt can continue where it stopped.
+    assert client.get("/api/sync/jobs/active", params={"kind": "evidence"}).status_code == 204
+
+
+def test_startup_recovery_leaves_a_live_sync_alone(session_factory):
+    """A second app instance must not kill a sync another process is running.
+
+    Startup recovery exists for jobs orphaned by a crash. It used to close
+    every active row, so merely opening the app a second time aborted a sync
+    that was making progress in the first one — observed against production
+    at 600/3766 components.
+    """
+    from datetime import timedelta
+
+    from app.sync_jobs import recover_interrupted_sync_jobs
+
+    with session_factory() as session:
+        live = SyncJob(
+            kind="components",
+            institute_code="TUDO",
+            status="running",
+            phase="fetching",
+            current=600,
+            total=3766,
+            message="Fetching components.",
+            requested_by="tester",
+            active_key="components",
+            updated_at=utcnow(),  # heartbeat from a second ago
+        )
+        orphaned = SyncJob(
+            kind="evidence",
+            institute_code="DESYZ",
+            status="running",
+            phase="fetching",
+            current=29,
+            total=262,
+            message="Fetched 29/262 components.",
+            requested_by="tester",
+            active_key="evidence:DESYZ",
+            updated_at=utcnow() - timedelta(hours=2),  # nobody has touched it
+        )
+        session.add_all([live, orphaned])
+        session.commit()
+        live_id, orphaned_id = live.id, orphaned.id
+
+    recovered = recover_interrupted_sync_jobs(session_factory)
+
+    assert recovered == 1
+    with session_factory() as session:
+        assert session.get(SyncJob, live_id).status == "running"
+        assert session.get(SyncJob, live_id).active_key == "components"
+        assert session.get(SyncJob, orphaned_id).status == "interrupted"
+        assert session.get(SyncJob, orphaned_id).active_key is None
+
+
+class _FlakyThenHealthyClient(_EvidenceClient):
+    """getComponent fails N times per serial, then serves normally."""
+
+    def __init__(self, failures_per_sn: int):
+        super().__init__()
+        self._budget: dict[str, int] = {}
+        self._failures = failures_per_sn
+
+    def get(self, action, json=None):
+        if action == "getComponent":
+            sn = json["component"]
+            left = self._budget.setdefault(sn, self._failures)
+            if left > 0:
+                self._budget[sn] = left - 1
+                raise RuntimeError("transient PDB hiccup")
+        return super().get(action, json=json)
+
+
+def test_evidence_job_retries_a_flaky_component_instead_of_failing_the_sweep(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
+):
+    """One transient PDB hiccup must not abort a 262-component sweep at zero.
+
+    Observed live: the first component's getComponent failed once on a flaky
+    connection and the whole institute sweep failed with nothing mirrored.
+    """
+    monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    with session_factory() as session:
+        session.add(
+            Component(
+                sn="20USEM00000301",
+                component_type="MODULE",
+                type_code="R5M0",
+                stage="GLUED",
+                location="TUDO",
+                institute_code="TUDO",
+            )
+        )
+        session.commit()
+
+    manager = RecordingManager()
+    client.app.state.sync_job_manager = manager
+    job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
+    fake_client = _FlakyThenHealthyClient(failures_per_sn=2)
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, access_codes: _EvidenceGateway(fake_client),
+        job_id,
+    )
+
+    status = client.get(f"/api/sync/jobs/{job_id}").json()
+    assert status["status"] == "succeeded", status["error"]
+    with session_factory() as session:
+        assert session.scalar(select(func.count(TestRunEvidence.id))) == 1
+
+
+def test_evidence_job_still_fails_honestly_when_a_component_never_answers(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
+):
+    monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    with session_factory() as session:
+        session.add(
+            Component(
+                sn="20USEM00000302",
+                component_type="MODULE",
+                type_code="R5M0",
+                stage="GLUED",
+                location="TUDO",
+                institute_code="TUDO",
+            )
+        )
+        session.commit()
+
+    manager = RecordingManager()
+    client.app.state.sync_job_manager = manager
+    job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
+    fake_client = _FlakyThenHealthyClient(failures_per_sn=99)
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, access_codes: _EvidenceGateway(fake_client),
+        job_id,
+    )
+
+    assert client.get(f"/api/sync/jobs/{job_id}").json()["status"] == "failed"

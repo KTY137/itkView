@@ -94,7 +94,8 @@ function optionalIsoDate(value: string): string | undefined {
  * (the prepared i18n strings only carry one search/scan placeholder).
  */
 export default function GlueBatchesScreen() {
-  const { canWrite, showToast } = useAuth();
+  const { canWrite, showToast, user } = useAuth();
+  const instituteCode = user?.institute_code ?? undefined;
   const [batches, setBatches] = useState<GlueBatch[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -131,6 +132,7 @@ export default function GlueBatchesScreen() {
         status: status || undefined,
         glue_type: glueType || undefined,
         q: query.trim() || undefined,
+        institute: instituteCode,
       },
       controller.signal,
     )
@@ -150,7 +152,7 @@ export default function GlueBatchesScreen() {
         setLoading(false);
       });
     return () => controller.abort();
-  }, [glueType, query, reloadKey, status]);
+  }, [glueType, instituteCode, query, reloadKey, status]);
 
   // Derived from the loaded data; the active filter value stays listed even
   // when the filtered result no longer contains other types.
@@ -181,7 +183,7 @@ export default function GlueBatchesScreen() {
       return;
     }
     try {
-      const batch = await scanGlueBatch(code);
+      const batch = await scanGlueBatch(code, instituteCode);
       setSelected(batch);
       setQuery("");
     } catch (caught: unknown) {

@@ -333,6 +333,9 @@ def test_phase0_patch_adds_attribution_and_csrf_columns(tmp_path):
         conn.execute(
             text("CREATE TABLE user_session (id INTEGER PRIMARY KEY, token VARCHAR(64))")
         )
+        conn.execute(
+            text("CREATE TABLE reminder (id INTEGER PRIMARY KEY, active BOOLEAN)")
+        )
 
     ensure_phase0_sqlite_schema(engine)
 
@@ -340,6 +343,8 @@ def test_phase0_patch_adds_attribution_and_csrf_columns(tmp_path):
         audit_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(audit_event)"))}
         outbox_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(outbox_action)"))}
         session_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(user_session)"))}
+        reminder_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(reminder)"))}
     assert "user_id" in audit_cols
     assert "user_id" in outbox_cols
     assert "csrf_token" in session_cols
+    assert "deleted_at" in reminder_cols

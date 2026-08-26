@@ -13,6 +13,7 @@ import logging
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import timedelta, timezone
 from time import sleep
 from typing import Any
 
@@ -22,13 +23,17 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.attachment_store import AttachmentSyncStats, download_attachments, pending_attachments
 from app.config import Settings
-from app.models import Component, InstituteProfile, SyncJob, utcnow
+from app.models import Component, InstituteProfile, SyncJob, TestRunEvidence, utcnow
 from app.pdb_credentials import PdbAccessCodes, PdbCredentialError, load_pdb_credentials
 from app.pdb_gateway import PdbGateway
 from app.pdb_sync import FetchResult, PdbSyncUnavailable, SyncProgress
-from app.pdb_test_evidence import PdbEvidenceUnavailable, fetch_test_run_evidence
+from app.pdb_test_evidence import (
+    PdbEvidenceUnavailable,
+    fetch_test_run_evidence,
+    flat_fingerprint,
+)
 from app.sync import UnknownParentError, sync_components
-from app.test_run_evidence import TestRunEvidenceRecord, upsert_test_run_evidence
+from app.test_run_evidence import EvidenceSyncStats, upsert_test_run_evidence
 from app.tool_sync import sync_tools_from_components
 
 log = logging.getLogger(__name__)
@@ -38,6 +43,12 @@ COMPONENT_SYNC_ACTIVE_KEY = "components"
 EVIDENCE_SYNC_KIND = "evidence"
 EVIDENCE_SYNC_ACTIVE_KEY_PREFIX = "evidence:"
 ACTIVE_SYNC_STATUSES = frozenset({"queued", "running"})
+# How long a job may go without a progress heartbeat before startup recovery
+# treats it as orphaned. The slowest legitimate quiet stretch is one PDB page
+# read-timeout (~60s, heartbeats fire on every retry), so three minutes never
+# mistakes a live sync for a dead one — while a genuinely crashed job releases
+# its single-flight lease after at most this long.
+SYNC_HEARTBEAT_GRACE = timedelta(minutes=3)
 SYNC_LEASE_MAX_ATTEMPTS = 6
 SYNC_LEASE_RETRY_SECONDS = 0.02
 
@@ -444,6 +455,74 @@ def _claim_evidence_job(
         return EvidenceSyncContext(institute=institute, user_id=job.user_id)
 
 
+def _fetch_evidence_with_retry(
+    gateway,
+    component_sn: str,
+    *,
+    known_flat: dict[str, tuple],
+    max_attempts: int,
+):
+    """Strict per-component fetch with a bounded transient-retry budget.
+
+    The sweep stays honest — a component that never answers still fails the
+    job — but one network hiccup no longer aborts a whole institute at zero,
+    which is exactly what a flaky home connection produced in practice. Shares
+    the page-retry budget (`sync_page_max_attempts`) and backoff shape.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return fetch_test_run_evidence(
+                gateway,
+                component_sn,
+                with_detail=True,
+                strict=True,
+                known_flat=known_flat,
+            )
+        except PdbEvidenceUnavailable:
+            if attempt >= max_attempts:
+                raise
+            sleep(0.5 * (2 ** (attempt - 1)))
+
+
+def _mirrored_flat_fingerprints(
+    session: Session, component_sns: list[str]
+) -> dict[str, tuple]:
+    """Fingerprints of mirrored runs that already carry their fetched detail.
+
+    Only rows marked `detail_synced` qualify: a flat-only row (from an older
+    sweep, or a run whose detail fetch failed) must take the detail round trip
+    on the next sync rather than being frozen in its shallow state.
+    """
+    fingerprints: dict[str, tuple] = {}
+    if not component_sns:
+        return fingerprints
+    rows = session.execute(
+        select(
+            TestRunEvidence.external_ref,
+            TestRunEvidence.passed,
+            TestRunEvidence.measured_at,
+            TestRunEvidence.payload,
+        ).where(
+            TestRunEvidence.source == "pdb",
+            TestRunEvidence.external_ref.is_not(None),
+            TestRunEvidence.component_sn.in_(component_sns),
+        )
+    )
+    for external_ref, passed, measured_at, payload in rows:
+        payload = payload or {}
+        if not payload.get("detail_synced"):
+            continue
+        fingerprints[external_ref] = flat_fingerprint(
+            passed=passed,
+            measured_at=measured_at,
+            state=payload.get("state"),
+            problems=payload.get("problems"),
+        )
+    return fingerprints
+
+
 def run_evidence_sync_job(
     session_factory: sessionmaker[Session],
     settings: Settings,
@@ -479,8 +558,16 @@ def run_evidence_sync_job(
                 )
             )
 
-        all_records: list[TestRunEvidenceRecord] = []
+        # Incremental detail: runs whose cheap listing data still matches the
+        # mirrored fingerprint skip their per-run getTestRun round trip. On a
+        # repeat sync that collapses the fetch phase from one request per run
+        # to one request per component.
+        with session_factory() as fingerprint_session:
+            known_flat = _mirrored_flat_fingerprints(fingerprint_session, component_sns)
+
         component_total = len(component_sns)
+        evidence_stats = EvidenceSyncStats()
+        runs_seen = 0
         _update_progress(
             session_factory,
             job_id,
@@ -490,13 +577,27 @@ def run_evidence_sync_job(
             message=f"Fetching detailed evidence for {component_total} components.",
         )
         for index, component_sn in enumerate(component_sns, start=1):
-            records = fetch_test_run_evidence(
+            records = _fetch_evidence_with_retry(
                 gateway,
                 component_sn,
-                with_detail=True,
-                strict=True,
+                known_flat=known_flat,
+                max_attempts=settings.sync_page_max_attempts,
             )
-            all_records.extend(records)
+            runs_seen += len(records)
+            # Commit each component as it arrives. A whole-institute sweep runs
+            # for minutes; collecting everything for one final transaction meant
+            # that closing the app — or any PDB hiccup — discarded every fetched
+            # run, and the UI then showed each required test as "missing".
+            # The upsert is idempotent, so a resumed sweep simply re-confirms.
+            if records:
+                with session_factory() as evidence_session:
+                    batch_stats = upsert_test_run_evidence(evidence_session, records)
+                    evidence_session.commit()
+                evidence_stats = EvidenceSyncStats(
+                    created=evidence_stats.created + batch_stats.created,
+                    updated=evidence_stats.updated + batch_stats.updated,
+                    unchanged=evidence_stats.unchanged + batch_stats.unchanged,
+                )
             _update_progress(
                 session_factory,
                 job_id,
@@ -505,16 +606,9 @@ def run_evidence_sync_job(
                 component_total,
                 message=(
                     f"Fetched {index}/{component_total} components "
-                    f"and {len(all_records)} test runs."
+                    f"and {runs_seen} test runs."
                 ),
             )
-
-        # Evidence becomes available in one short transaction. Attachment
-        # bytes are then mirrored component-by-component and are idempotent;
-        # an interrupted job can safely continue on its next run.
-        with session_factory() as evidence_session:
-            evidence_stats = upsert_test_run_evidence(evidence_session, all_records)
-            evidence_session.commit()
 
         with session_factory() as count_session:
             attachment_total = sum(
@@ -756,14 +850,28 @@ def fail_sync_job(
 
 
 def recover_interrupted_sync_jobs(session_factory: sessionmaker[Session]) -> int:
-    """Fail closed after restart; never resume a partial authoritative fetch."""
+    """Fail closed after restart; never resume a partial authoritative fetch.
+
+    Only jobs whose progress heartbeat has gone stale are closed. Starting a
+    second app instance therefore no longer aborts a sync the first one is
+    still running — that turned "open the app again" into "lose the sync",
+    observed against production at 600 of 3766 components.
+    """
 
     recovered = 0
     with session_factory() as session:
         jobs = list(
             session.scalars(select(SyncJob).where(SyncJob.status.in_(ACTIVE_SYNC_STATUSES)))
         )
+        cutoff = utcnow() - SYNC_HEARTBEAT_GRACE
         for job in jobs:
+            heartbeat = job.updated_at or job.created_at
+            if heartbeat is not None:
+                # SQLite hands timestamps back without their timezone.
+                if heartbeat.tzinfo is None:
+                    heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+                if heartbeat > cutoff:
+                    continue  # someone is still working on this one
             previous_phase = job.phase
             finished = utcnow()
             job.status = "interrupted"

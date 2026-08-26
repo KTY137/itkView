@@ -397,7 +397,7 @@ export function makeDemoIngestFiles(): IngestFile[] {
   ];
 }
 
-const DEMO_TOOLS: Tool[] = [
+const DEMO_TOOL_FIXTURES: Tool[] = [
   { kind: "jig", code: "HV-TAB-JIG-R5", label: "HV tab jig R5", rfid: "E28011700000000000000001", compatible_types: ["R5M0", "R5M1"] },
   { kind: "jig", code: "HV-TAB-JIG-R2", label: "HV tab jig R2", rfid: "E28011700000000000000002", compatible_types: ["R2"] },
   { kind: "pickup_tool", code: "PICKUP-R5", label: "Pickup R5", rfid: "E28011700000000000000003", compatible_types: ["R5M0", "R5M1"] },
@@ -411,8 +411,30 @@ const DEMO_TOOLS: Tool[] = [
   ...spec,
 }));
 
+let DEMO_TOOL_REGISTRY: Tool[] = DEMO_TOOL_FIXTURES.map((tool) => ({
+  ...tool,
+  compatible_types: [...tool.compatible_types],
+}));
+
 export function makeDemoTools(): Tool[] {
-  return DEMO_TOOLS.map((tool) => ({
+  return DEMO_TOOL_REGISTRY.map((tool) => ({
+    ...tool,
+    compatible_types: [...tool.compatible_types],
+  }));
+}
+
+export function upsertDemoTool(next: Tool): void {
+  DEMO_TOOL_REGISTRY = DEMO_TOOL_REGISTRY.some((tool) => tool.id === next.id)
+    ? DEMO_TOOL_REGISTRY.map((tool) => (tool.id === next.id ? next : tool))
+    : [...DEMO_TOOL_REGISTRY, next];
+}
+
+export function removeDemoTool(id: number): void {
+  DEMO_TOOL_REGISTRY = DEMO_TOOL_REGISTRY.filter((tool) => tool.id !== id);
+}
+
+export function resetDemoTools(): void {
+  DEMO_TOOL_REGISTRY = DEMO_TOOL_FIXTURES.map((tool) => ({
     ...tool,
     compatible_types: [...tool.compatible_types],
   }));

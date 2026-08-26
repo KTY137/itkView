@@ -92,3 +92,15 @@ def ensure_phase0_sqlite_schema(engine: Engine) -> None:
             }
             if "label" not in tool_columns:
                 connection.execute(text("ALTER TABLE tool ADD COLUMN label VARCHAR(120)"))
+        if "reminder" in tables:
+            reminder_columns = {
+                row[1] for row in connection.execute(text("PRAGMA table_info(reminder)"))
+            }
+            if "deleted_at" not in reminder_columns:
+                connection.execute(text("ALTER TABLE reminder ADD COLUMN deleted_at DATETIME"))
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_reminder_deleted_at "
+                    "ON reminder (deleted_at)"
+                )
+            )

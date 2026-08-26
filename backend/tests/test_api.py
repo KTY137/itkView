@@ -6,7 +6,7 @@ def test_health_reports_test_instance(client: TestClient):
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["pdb_instance"] == "test"
+    assert body["pdb_instance"] == "offline"
 
 
 def test_institute_roundtrip_and_conflict(as_admin: TestClient, tudo: dict):

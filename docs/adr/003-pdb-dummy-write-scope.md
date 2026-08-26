@@ -43,3 +43,14 @@ niemals (keine Dummy-SN-Vergabe).
 - `assemble_component` wird zuerst lokal als servervalidierter Outbox-Draft
   erzeugt. Der Worker wiederholt Dry-run und Snapshot-Pruefung; es gibt keinen
   direkten PDB-Aufruf aus Wizard oder Request-Handler.
+
+## Ergänzung (2026-08-26): Offline-Default, Reads ab Werk
+
+Die tote Testinstanz wurde aus der Konfiguration entfernt: `pdb_instance` ist
+jetzt `offline` (Code-Default, erreicht nichts) oder `production`. Die
+Endnutzer-Artefakte (Desktop-Bundle, Compose) setzen die beiden
+Read-Opt-ins ab Werk — Owner-Entscheidung, damit kein Institut Env-Variablen
+nachkonfigurieren muss. Alle uebrigen Schichten dieses ADRs (persoenliche
+Credentials als Traffic-Gate, `dummy_only`-Write-Scope, keine
+Produktions-Writes) bleiben unveraendert. Details: docs/09, Abschnitt
+„Offline-Default und Reads ab Werk".

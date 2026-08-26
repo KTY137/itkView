@@ -91,6 +91,75 @@ def test_mask_resolves_only_against_same_channel_name_and_kind():
         )
 
 
+def test_masked_smtp_password_requires_the_same_connection_identity():
+    existing = {
+        "notification_channels": {
+            "mail": {
+                "kind": "email",
+                "smtp_host": "smtp.example.org",
+                "smtp_port": 587,
+                "smtp_security": "starttls",
+                "smtp_username": "itkflow",
+                "smtp_password": "stored-secret",
+                "from_address": "itkflow@example.org",
+                "to_address": "ops@example.org",
+            }
+        }
+    }
+    unchanged = {
+        **existing["notification_channels"]["mail"],
+        "smtp_password": "***",
+    }
+    normalised = normalize_institute_settings_update(
+        existing,
+        {"notification_channels": {"mail": unchanged}},
+    )
+    assert normalised["notification_channels"]["mail"]["smtp_password"] == "stored-secret"
+
+    redirected = {**unchanged, "smtp_host": "attacker.example.org"}
+    with pytest.raises(InstituteSettingsValidationError) as caught:
+        normalize_institute_settings_update(
+            existing,
+            {"notification_channels": {"mail": redirected}},
+        )
+    assert "stored-secret" not in str(caught.value)
+    assert "attacker.example.org" not in str(caught.value)
+
+
+def test_authenticated_email_can_remove_credentials_without_reusing_password():
+    existing = {
+        "notification_channels": {
+            "mail": {
+                "kind": "email",
+                "smtp_host": "smtp.example.org",
+                "smtp_port": 587,
+                "smtp_security": "starttls",
+                "smtp_username": "itkflow",
+                "smtp_password": "stored-secret",
+                "from_address": "itkflow@example.org",
+                "to_address": "ops@example.org",
+            }
+        }
+    }
+    normalised = normalize_institute_settings_update(
+        existing,
+        {
+            "notification_channels": {
+                "mail": {
+                    "kind": "email",
+                    "smtp_host": "smtp.example.org",
+                    "smtp_port": 587,
+                    "smtp_security": "starttls",
+                    "from_address": "itkflow@example.org",
+                    "to_address": "ops@example.org",
+                }
+            }
+        },
+    )
+    assert "smtp_username" not in normalised["notification_channels"]["mail"]
+    assert "smtp_password" not in normalised["notification_channels"]["mail"]
+
+
 @pytest.mark.parametrize(
     "patch",
     [

@@ -160,6 +160,19 @@ export default function AddTestResult({
     [componentType, schemas],
   );
   const normalizedPinnedTestType = pinnedTestType?.trim().toUpperCase() || null;
+  const contextIdentity = [
+    componentSn,
+    componentType,
+    instituteCode ?? "",
+    normalizedPinnedTestType ?? "",
+    String(intentToken),
+  ].join("\u0000");
+  const operationGeneration = useRef(0);
+  const contextIdentityRef = useRef(contextIdentity);
+  if (contextIdentityRef.current !== contextIdentity) {
+    contextIdentityRef.current = contextIdentity;
+    operationGeneration.current += 1;
+  }
   const selectableSchemas = useMemo(
     () =>
       normalizedPinnedTestType === null
@@ -189,7 +202,10 @@ export default function AddTestResult({
     setIngest(null);
     setPreview(null);
     setStagedActionId(null);
-  }, [componentSn, componentType]);
+    return () => {
+      operationGeneration.current += 1;
+    };
+  }, [contextIdentity]);
 
   useEffect(() => {
     if (normalizedPinnedTestType === null || intentToken === 0) return;
@@ -216,11 +232,22 @@ export default function AddTestResult({
     }
   }
 
+  function beginOperation(): number {
+    operationGeneration.current += 1;
+    return operationGeneration.current;
+  }
+
+  function operationIsCurrent(generation: number): boolean {
+    return generation === operationGeneration.current;
+  }
+
   async function ingestPayload(
     filename: string,
     payload: Record<string, unknown>,
     parser?: "manual-entry",
+    existingGeneration?: number,
   ) {
+    const generation = existingGeneration ?? beginOperation();
     setBusy("ingest");
     setEntryError(null);
     setPreviewError(null);
@@ -241,23 +268,27 @@ export default function AddTestResult({
         ...(parser === undefined ? {} : { parser }),
       };
       created = await postIngestFile(body);
+      if (!operationIsCurrent(generation)) return;
       setIngest(created);
       const nextPreview = await getIngestPreview(created.id);
+      if (!operationIsCurrent(generation)) return;
       setPreview(nextPreview);
       setStagedActionId(created.outbox_action_id);
       await notifyPreviewReady(created, nextPreview);
     } catch (error) {
+      if (!operationIsCurrent(generation)) return;
       if (created === null) {
         setEntryError(labels.ingestFailed(errorMessage(error)));
       } else {
         setPreviewError(labels.previewFailed(errorMessage(error)));
       }
     } finally {
-      setBusy(null);
+      if (operationIsCurrent(generation)) setBusy(null);
     }
   }
 
   async function handleFile(file: File) {
+    const generation = beginOperation();
     setEntryError(null);
     if (file.size > maxFileBytes) {
       setEntryError(labels.fileTooLarge(file.name, maxFileBytes));
@@ -268,8 +299,10 @@ export default function AddTestResult({
     let parsed: unknown;
     try {
       const text = await file.text();
+      if (!operationIsCurrent(generation)) return;
       parsed = JSON.parse(text) as unknown;
     } catch (error) {
+      if (!operationIsCurrent(generation)) return;
       setEntryError(
         error instanceof SyntaxError
           ? labels.invalidJson(file.name)
@@ -278,12 +311,13 @@ export default function AddTestResult({
       setBusy(null);
       return;
     }
+    if (!operationIsCurrent(generation)) return;
     if (!isJsonObject(parsed)) {
       setEntryError(labels.jsonObjectRequired(file.name));
       setBusy(null);
       return;
     }
-    await ingestPayload(file.name, parsed);
+    await ingestPayload(file.name, parsed, undefined, generation);
   }
 
   function handleFileInput(event: ChangeEvent<HTMLInputElement>) {
@@ -317,29 +351,37 @@ export default function AddTestResult({
 
   async function handleSchemaSync() {
     if (onSyncSchemas === undefined) return;
+    const generation = beginOperation();
     setSchemaError(null);
     setSyncBusy(true);
     try {
       await onSyncSchemas(componentType);
     } catch (error) {
-      setSchemaError(labels.schemaSyncFailed(errorMessage(error)));
+      if (operationIsCurrent(generation)) {
+        setSchemaError(labels.schemaSyncFailed(errorMessage(error)));
+      }
     } finally {
-      setSyncBusy(false);
+      if (operationIsCurrent(generation)) setSyncBusy(false);
     }
   }
 
   async function refreshPreview() {
     if (ingest === null) return;
+    const generation = beginOperation();
+    const currentIngest = ingest;
     setBusy("preview");
     setPreviewError(null);
     try {
-      const nextPreview = await getIngestPreview(ingest.id);
+      const nextPreview = await getIngestPreview(currentIngest.id);
+      if (!operationIsCurrent(generation)) return;
       setPreview(nextPreview);
-      await notifyPreviewReady(ingest, nextPreview);
+      await notifyPreviewReady(currentIngest, nextPreview);
     } catch (error) {
-      setPreviewError(labels.previewFailed(errorMessage(error)));
+      if (operationIsCurrent(generation)) {
+        setPreviewError(labels.previewFailed(errorMessage(error)));
+      }
     } finally {
-      setBusy(null);
+      if (operationIsCurrent(generation)) setBusy(null);
     }
   }
 
@@ -355,30 +397,42 @@ export default function AddTestResult({
       return;
     }
 
+    const generation = beginOperation();
+    const currentIngest = ingest;
+    const currentPreview = preview;
     setBusy("stage");
     setStageError(null);
     try {
       const body: Parameters<typeof postIngestOutboxProposal>[1] = {
         ...(instituteCode === undefined ? {} : { institute_code: instituteCode }),
       };
-      const action = await postIngestOutboxProposal(ingest.id, body);
-      const nextIngest = { ...ingest, status: "proposed", outbox_action_id: action.id };
+      const action = await postIngestOutboxProposal(currentIngest.id, body);
+      if (!operationIsCurrent(generation)) return;
+      const nextIngest = {
+        ...currentIngest,
+        status: "proposed",
+        outbox_action_id: action.id,
+      };
       setIngest(nextIngest);
       setStagedActionId(action.id);
       try {
-        await onStaged?.(action, nextIngest, preview);
+        await onStaged?.(action, nextIngest, currentPreview);
+        if (!operationIsCurrent(generation)) return;
         await onRefresh?.();
       } catch {
         // The action is already staged; callback failures must not contradict that fact.
       }
     } catch (error) {
-      setStageError(labels.stageFailed(errorMessage(error)));
+      if (operationIsCurrent(generation)) {
+        setStageError(labels.stageFailed(errorMessage(error)));
+      }
     } finally {
-      setBusy(null);
+      if (operationIsCurrent(generation)) setBusy(null);
     }
   }
 
   function resetResult() {
+    beginOperation();
     setEntryError(null);
     setPreviewError(null);
     setStageError(null);

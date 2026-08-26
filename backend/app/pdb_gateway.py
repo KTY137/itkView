@@ -6,10 +6,10 @@ components (docs/09). Safety layers, in order:
 
 1. `Settings` refuses `pdb_instance="production"` without a second opt-in flag.
 2. This gateway re-checks that guard at construction time.
-3. For `pdb_instance="test"` the client is pinned to the (now defunct)
-   test-instance URL — the default configuration therefore reaches nothing.
-   For `production` the client uses itkdb's own defaults (which point at
-   production) and only exists behind the double opt-in.
+3. For `pdb_instance="offline"` (the code-level default) no client is ever
+   built — the configuration reaches nothing. For `production` the client uses
+   itkdb's own defaults (which point at production) and only exists behind the
+   double opt-in.
 4. Writes are scoped separately in `app.pdb_submit` / `app.pdb_scope`:
    `pdb_write_scope="dummy_only"` restricts every write to itkFlow-registered
    DUMMY test components.
@@ -167,7 +167,11 @@ class PdbGateway:
             raise ProductionAccessError(
                 "No personal ITKDB access codes are connected for this account."
             )
-        if self._settings.pdb_instance == "production" and not self._settings.allow_production:
+        if self._settings.pdb_instance != "production":
+            raise ProductionAccessError(
+                "No PDB is configured for this deployment — PDB access is disabled here."
+            )
+        if not self._settings.allow_production:
             # Settings already refuses this combination; re-checked defensively.
             raise ProductionAccessError(
                 "PdbGateway refuses production PDB access without explicit opt-in."
@@ -188,13 +192,9 @@ class PdbGateway:
                 access_code2=self._access_codes.access_code2,
             )
             _bound_user_auth_requests(user)
-            if self._settings.pdb_instance == "production":
-                # itkdb's own defaults point at the production PDB.
-                client = itkdb.Client(user=user)
-            else:
-                # Pin the client to the test URL; never fall back to itkdb's
-                # production default from a "test" configuration.
-                client = itkdb.Client(user=user, prefix_url=self._settings.pdb_test_api_url)
+            # Only reachable for pdb_instance="production" (guarded above);
+            # itkdb's own defaults point at the production PDB.
+            client = itkdb.Client(user=user)
             _bound_client_requests(client)
             self._client = client
         return self._client

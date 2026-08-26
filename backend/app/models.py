@@ -358,6 +358,9 @@ class Tool(Base):
     """
 
     __tablename__ = "tool"
+    __table_args__ = (
+        UniqueConstraint("institute_id", "code", name="uq_tool_institute_code"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     kind: Mapped[str] = mapped_column(String(24), index=True)  # jig | pickup_tool | panel | …
@@ -517,11 +520,13 @@ class Reminder(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None, index=True
+    )
 
     institute: Mapped[InstituteProfile | None] = relationship()
     occurrences: Mapped[list["ReminderOccurrence"]] = relationship(
         back_populates="reminder",
-        cascade="all, delete-orphan",
     )
 
 

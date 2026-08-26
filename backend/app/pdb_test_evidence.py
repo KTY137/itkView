@@ -18,12 +18,27 @@ Two depths, because they cost very differently:
 """
 
 import hashlib
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from app.test_run_evidence import TestRunEvidenceRecord
+
+
+def flat_fingerprint(
+    *, passed: Any, measured_at: Any, state: Any, problems: Any
+) -> tuple[Any, Any, Any, Any]:
+    """Identity of a run's cheap `getComponent` listing data.
+
+    The per-run `getTestRun` detail is refetched only when this changes.
+    Datetimes are normalised to naive UTC so a timezone-aware database value
+    compares equal to the parsed PDB timestamp.
+    """
+    if isinstance(measured_at, datetime) and measured_at.tzinfo is not None:
+        measured_at = measured_at.astimezone(timezone.utc).replace(tzinfo=None)
+    return (passed, measured_at, state, problems)
 
 
 class PdbEvidenceUnavailable(RuntimeError):
@@ -177,17 +192,23 @@ def _share_link_summaries(entries: Any) -> list[dict[str, Any]]:
     return summaries
 
 
-def _run_detail_payload(client: Any, run_id: str) -> dict[str, Any]:
-    """Measured values, properties and attachments for one run. Best effort."""
+def _run_detail_payload(client: Any, run_id: str) -> dict[str, Any] | None:
+    """Measured values, properties and attachments for one run. Best effort.
+
+    Returns ``None`` when the detail could not be read at all, which is
+    different from a run that genuinely carries no detail: only a real answer
+    may mark the run as mirrored, or a transient miss would be frozen forever
+    and its measurements would never arrive.
+    """
     try:
         # Never persist a short-lived EOS signature. The downloader asks for a
         # fresh URL only at the instant it needs the bytes.
         detail = client.get("getTestRun", json={"testRun": run_id, "noEosToken": True})
     except Exception:
         # A detail miss must degrade to pass/fail, never lose the whole run.
-        return {}
+        return None
     if not isinstance(detail, dict):
-        return {}
+        return None
 
     results, result_meta = _named_values(detail.get("results"))
     properties, _ = _named_values(detail.get("properties"))
@@ -207,12 +228,21 @@ def _run_detail_payload(client: Any, run_id: str) -> dict[str, Any]:
 
 
 def fetch_test_run_evidence(
-    gateway: Any, sn: str, *, with_detail: bool = False, strict: bool = False
+    gateway: Any,
+    sn: str,
+    *,
+    with_detail: bool = False,
+    strict: bool = False,
+    known_flat: Mapping[str, tuple] | None = None,
 ) -> list[TestRunEvidenceRecord]:
     """Fetch a component's test-run evidence.
 
     `with_detail` adds one `getTestRun` request per run; see the module
-    docstring for when that cost is worth paying.
+    docstring for when that cost is worth paying. `known_flat` (external_ref →
+    `flat_fingerprint`) makes the detail incremental: a run whose cheap listing
+    data still matches its mirrored fingerprint skips the detail round trip and
+    is emitted with `detail_omitted=True`, which tells the upsert to leave the
+    stored payload untouched.
 
     `strict` decides what an unreachable PDB means. A whole-institute sweep
     stays best effort — one bad component must not abort the run — but a person
@@ -256,17 +286,36 @@ def fetch_test_run_evidence(
                 "state": run.get("state"),
                 "problems": run.get("problems"),
             }
+            passed = _passed(run)
+            measured_at = _parse_dt(run.get("date") or run.get("cts") or run.get("stateTs"))
+            detail_omitted = False
             if with_detail and run_id:
-                payload.update(_run_detail_payload(client, str(run_id)))
+                ref = str(run_id)
+                fingerprint = flat_fingerprint(
+                    passed=passed,
+                    measured_at=measured_at,
+                    state=payload["state"],
+                    problems=payload["problems"],
+                )
+                if known_flat is not None and known_flat.get(ref) == fingerprint:
+                    detail_omitted = True
+                else:
+                    detail = _run_detail_payload(client, ref)
+                    if detail is not None:
+                        payload.update(detail)
+                        # Marker for the incremental sync: only runs that really
+                        # carry mirrored detail may skip their next detail fetch.
+                        payload["detail_synced"] = True
             records.append(
                 TestRunEvidenceRecord(
                     component_sn=sn,
                     test_type=test_type,
-                    passed=_passed(run),
+                    passed=passed,
                     source="pdb",
                     external_ref=str(run_id) if run_id else None,
-                    measured_at=_parse_dt(run.get("date") or run.get("cts") or run.get("stateTs")),
+                    measured_at=measured_at,
                     payload=payload,
+                    detail_omitted=detail_omitted,
                 )
             )
     return records

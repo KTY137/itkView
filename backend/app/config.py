@@ -1,33 +1,22 @@
 """Application settings.
 
-Safety design: the PDB production instance is never reachable by default.
-`pdb_instance` defaults to "test" (inert — that historical instance no longer
-exists, so the default configuration cannot reach any PDB at all). Switching to
-"production" is refused unless `allow_production` is also set — two deliberate
-steps, both via environment variables, neither of which exists in any committed
-file. Writes against production are additionally scoped by `pdb_write_scope`
-(default `dummy_only`): only components itkFlow itself registered into a
-DUMMY batch may ever be written to (see docs/09).
+Safety design: the code-level default reaches no PDB at all. `pdb_instance`
+defaults to "offline" — there is no PDB test service anymore, so the only real
+instance is production, and reaching it takes two deliberate switches
+(`pdb_instance=production` plus `allow_production`). Dev environments, tests
+and agent sessions therefore stay inert by construction; the shipped end-user
+artifacts (desktop bundle, Compose) enable production *reads* explicitly (see
+docs/09 — reads still require each person's own access codes, so an instance
+without connected accounts contacts nothing). Writes against production are
+additionally scoped by `pdb_write_scope` (default `dummy_only`): only
+components itkFlow itself registered into a DUMMY batch may ever be written.
 """
 
 from functools import lru_cache
 from typing import Literal
-from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-# UI base URL of the PDB test instance (links shown to users).
-PDB_TEST_UI_URL = "https://itkpd-test.unicorncollege.cz"
-# Historically documented API base URL of the PDB test instance. As of 2026-07
-# this hostname no longer resolves (the instance moved); override via
-# ITKFLOW_PDB_TEST_API_URL once the current URL is known. itkdb's own default
-# points at production, so we always pass an explicit prefix_url.
-PDB_TEST_API_URL_DEFAULT = "https://itkpd-test.unicorncollege.cz/"
-
-# Hosts that are (or front) the production PDB. A "test" URL pointing at any
-# of these is refused outright — that is exactly the accident we guard against.
-PDB_PRODUCTION_HOSTS = frozenset({"itkpd.unicornuniversity.net"})
 
 
 class ProductionAccessError(RuntimeError):
@@ -63,11 +52,11 @@ class Settings(BaseSettings):
     attachment_max_bytes: int = 100 * 1024 * 1024
 
     # --- PDB access -------------------------------------------------------
-    pdb_instance: Literal["test", "production"] = "test"
+    # "offline" reaches no PDB (dev/test default). The retired "test" instance
+    # is not a valid value anymore — it no longer exists.
+    pdb_instance: Literal["offline", "production"] = "offline"
     # Second, deliberate switch. Both must be set to reach production.
     allow_production: bool = False
-    # API base URL of the PDB *test* instance (itkdb prefix_url).
-    pdb_test_api_url: str = PDB_TEST_API_URL_DEFAULT
     # Explicit credentials for manually opted-in PDB integration tests only.
     # Web requests, sync jobs and the production worker never fall back to
     # these deployment-wide values (ADR 004).
@@ -93,7 +82,22 @@ class Settings(BaseSettings):
     # and registering one corrupts collaboration serial numbering.
     pdb_dummy_component_types: list[str] = ["MODULE", "HYBRID"]
 
+    # --- Sync tuning ------------------------------------------------------
+    # Transient-failure retry budget per PDB listing page during component
+    # syncs. Raise it on an unreliable connection; each retry backs off
+    # exponentially before the page is requested again.
+    sync_page_max_attempts: int = Field(default=3, ge=1, le=10)
+
     # --- Outbox worker ----------------------------------------------------
+    # Which process submits approved outbox actions to the PDB:
+    #   "worker" — the standalone `app.run_worker` service (Compose runs one).
+    #   "app"    — the API process drains the outbox itself. The desktop bundle
+    #              and the dev launcher run no worker, so without this a
+    #              reviewed action would reach `submitted` and never be pushed.
+    #   "off"    — nobody submits (tests).
+    # Exactly one process should drain; actions are claimed transactionally, so
+    # a misconfiguration cannot submit the same action twice.
+    outbox_processor: Literal["worker", "app", "off"] = "worker"
     # Seconds the async submission worker sleeps between polling cycles.
     worker_poll_seconds: int = 5
     # Give up auto-processing an action after this many attempts (safety cap).
@@ -129,24 +133,17 @@ class Settings(BaseSettings):
     def _guard_production(self) -> "Settings":
         if self.pdb_instance == "production" and not self.allow_production:
             raise ProductionAccessError(
-                "Refusing to configure the production PDB: set ITKFLOW_PDB_INSTANCE=test, "
-                "or additionally set ITKFLOW_ALLOW_PRODUCTION=true if this deployment is "
-                "deliberately meant to write to production."
-            )
-        host = urlparse(self.pdb_test_api_url).hostname or ""
-        if not self.pdb_test_api_url.startswith("https://"):
-            raise ProductionAccessError("The PDB test API URL must use https.")
-        if host in PDB_PRODUCTION_HOSTS:
-            raise ProductionAccessError(
-                f"ITKFLOW_PDB_TEST_API_URL points at the production host '{host}'. "
-                "The test URL must never be a production endpoint."
+                "Refusing to configure the production PDB: set "
+                "ITKFLOW_PDB_INSTANCE=offline, or additionally set "
+                "ITKFLOW_ALLOW_PRODUCTION=true if this deployment is deliberately "
+                "meant to reach production."
             )
         return self
 
     @property
     def pdb_ui_url(self) -> str:
-        if self.pdb_instance == "test":
-            return PDB_TEST_UI_URL
+        if self.pdb_instance != "production":
+            raise ProductionAccessError("No PDB is configured for this deployment.")
         # Intentionally not preconfigured; a production deployment must supply it.
         raise ProductionAccessError("Production PDB UI URL is not preconfigured.")
 

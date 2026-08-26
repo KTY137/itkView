@@ -43,3 +43,6 @@ desktop/src-tauri/gen/
 attachments/
 backend/attachments/
 .serena/
+
+# Personal Claude Code overrides — never commit
+.claude/settings.local.json

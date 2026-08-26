@@ -21,6 +21,9 @@ class TestRunEvidenceRecord:
     external_ref: str | None = None
     measured_at: datetime | None = None
     payload: dict[str, Any] | None = None
+    # True when the per-run detail fetch was skipped because the mirrored row
+    # already holds it: the upsert then never touches the stored payload.
+    detail_omitted: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,19 +83,21 @@ def upsert_test_run_evidence(
             created += 1
             continue
 
+        payload_changed = not record.detail_omitted and existing.payload != payload
         changed = (
             existing.component_sn != record.component_sn
             or existing.test_type != record.test_type
             or existing.passed != record.passed
             or existing.measured_at != record.measured_at
-            or existing.payload != payload
+            or payload_changed
         )
         if changed:
             existing.component_sn = record.component_sn
             existing.test_type = record.test_type
             existing.passed = record.passed
             existing.measured_at = record.measured_at
-            existing.payload = payload
+            if not record.detail_omitted:
+                existing.payload = payload
             existing.synced_at = utcnow()
             updated += 1
         else:

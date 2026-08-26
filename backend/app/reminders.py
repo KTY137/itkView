@@ -410,7 +410,17 @@ class ReminderScheduler:
                 # One bad tick (locked database, unreachable endpoint) must not
                 # end the loop, or reminders stop for the rest of the session.
                 print(f"[reminder-scheduler] tick failed: {type(exc).__name__}", flush=True)
-                await asyncio.to_thread(self.record_failure, exc)
+                try:
+                    await asyncio.to_thread(self.record_failure, exc)
+                except Exception as heartbeat_exc:  # noqa: BLE001 — keep ticking
+                    # A locked/unavailable database may reject the failure
+                    # heartbeat too. Persist no message (it may contain a URL),
+                    # and most importantly do not let telemetry kill the ticker.
+                    print(
+                        "[reminder-scheduler] failure heartbeat failed: "
+                        f"{type(heartbeat_exc).__name__}",
+                        flush=True,
+                    )
                 continue
             if stats.total:
                 print(

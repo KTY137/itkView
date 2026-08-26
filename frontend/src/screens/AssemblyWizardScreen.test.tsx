@@ -1,14 +1,17 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AssemblyPreview, ComponentOut, Tool } from "../api";
+import type { AssemblyPreview, ComponentOut, GlueBatch, Tool } from "../api";
 import {
   getGlueBatches,
   getTools,
   postAssemblyAction,
   postAssemblyPreview,
   scanAssemblyComponent,
+  scanGlueBatch,
+  scanTool,
 } from "../api";
+import { resetDemoTools } from "../demoData";
 import AssemblyWizardScreen from "./AssemblyWizardScreen";
 
 const authState = vi.hoisted(() => ({
@@ -73,6 +76,26 @@ const tool: Tool = {
   created_at: "2026-08-26T08:00:00Z",
 };
 
+const glue: GlueBatch = {
+  id: 12,
+  institute_id: 1,
+  glue_type: "POLARIS_EPOXY",
+  batch_no: "BATCH-12",
+  pdb_sn: "20USEGT0000012",
+  status: "in_use",
+  manufacturing_date: null,
+  expiry_date: null,
+  opening_date: "2026-08-26T08:00:00Z",
+  bipack_count: 1,
+  note: null,
+  mixed_at: "2026-08-26T08:00:00Z",
+  pot_life_minutes: 45,
+  created_at: "2026-08-26T08:00:00Z",
+  pot_life_remaining_seconds: 2_400,
+  pot_life_expired: false,
+  usage_count: 0,
+};
+
 function preview(overrides: Partial<AssemblyPreview> = {}): AssemblyPreview {
   return {
     valid: true,
@@ -93,6 +116,7 @@ function preview(overrides: Partial<AssemblyPreview> = {}): AssemblyPreview {
 
 describe("AssemblyWizardScreen", () => {
   beforeEach(() => {
+    resetDemoTools();
     authState.current = { canWrite: true, demo: true, showToast: vi.fn() };
   });
 
@@ -150,7 +174,16 @@ describe("AssemblyWizardScreen", () => {
     render(<AssemblyWizardScreen onBack={vi.fn()} onStaged={vi.fn()} />);
 
     await user.type(screen.getByLabelText("Parent component"), `${parent.sn}{enter}`);
-    await waitFor(() => expect(getTools).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(getTools).toHaveBeenCalledWith(
+        { fits: "R5M0", status: "active", institute: "TUDO" },
+        expect.any(AbortSignal),
+      );
+      expect(getGlueBatches).toHaveBeenCalledWith(
+        { status: "in_use", institute: "TUDO" },
+        expect.any(AbortSignal),
+      );
+    });
     await user.type(screen.getByLabelText("Child component"), `${child.sn}{enter}`);
     await user.type(screen.getByLabelText("Assembly slot"), "H0");
     await user.selectOptions(screen.getByLabelText("Compatible tool"), "9");
@@ -200,5 +233,80 @@ describe("AssemblyWizardScreen", () => {
     resolvePreview(preview());
     await waitFor(() => expect(screen.queryByText("Running dry-run…")).not.toBeInTheDocument());
     expect(screen.queryByRole("heading", { name: "Server dry-run" })).not.toBeInTheDocument();
+  });
+
+  it("invalidates an in-flight child scan when the parent is reset", async () => {
+    authState.current = { canWrite: true, demo: false, showToast: vi.fn() };
+    let resolveChild: (value: ComponentOut) => void = () => {};
+    vi.mocked(scanAssemblyComponent).mockImplementation((code) => {
+      if (code === parent.sn) return Promise.resolve(parent);
+      return new Promise((resolve) => {
+        resolveChild = resolve;
+      });
+    });
+    vi.mocked(getTools).mockResolvedValue([]);
+    vi.mocked(getGlueBatches).mockResolvedValue([]);
+    const user = userEvent.setup();
+    render(<AssemblyWizardScreen onBack={vi.fn()} onStaged={vi.fn()} />);
+
+    const parentInput = screen.getByLabelText("Parent component");
+    await user.type(parentInput, `${parent.sn}{enter}`);
+    expect(await screen.findByText(parent.local_name as string)).toBeInTheDocument();
+    const childInput = screen.getByLabelText("Child component");
+    await user.type(childInput, `${child.sn}{enter}`);
+    await waitFor(() => expect(scanAssemblyComponent).toHaveBeenCalledWith(child.sn));
+
+    await user.clear(parentInput);
+    resolveChild(child);
+    await waitFor(() => expect(childInput).toHaveValue(""));
+    expect(screen.queryByText(child.sn)).not.toBeInTheDocument();
+  });
+
+  it("aborts and discards stale tool and glue scans after a parent reset", async () => {
+    authState.current = { canWrite: true, demo: false, showToast: vi.fn() };
+    vi.mocked(scanAssemblyComponent).mockResolvedValue(parent);
+    vi.mocked(getTools).mockResolvedValue([]);
+    vi.mocked(getGlueBatches).mockResolvedValue([]);
+    let resolveTool: (value: Tool) => void = () => {};
+    let resolveGlue: (value: GlueBatch) => void = () => {};
+    vi.mocked(scanTool).mockReturnValue(
+      new Promise((resolve) => {
+        resolveTool = resolve;
+      }),
+    );
+    vi.mocked(scanGlueBatch).mockReturnValue(
+      new Promise((resolve) => {
+        resolveGlue = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    render(<AssemblyWizardScreen onBack={vi.fn()} onStaged={vi.fn()} />);
+
+    const parentInput = screen.getByLabelText("Parent component");
+    await user.type(parentInput, `${parent.sn}{enter}`);
+    expect(await screen.findByText(parent.local_name as string)).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Scan compatible tool"), "RFID-09{enter}");
+    await user.type(screen.getByLabelText("Scan glue batch"), "BATCH-12{enter}");
+    await waitFor(() => {
+      expect(scanTool).toHaveBeenCalledWith("RFID-09", "TUDO", expect.any(AbortSignal));
+      expect(scanGlueBatch).toHaveBeenCalledWith(
+        "BATCH-12",
+        "TUDO",
+        expect.any(AbortSignal),
+      );
+    });
+
+    const toolSignal = vi.mocked(scanTool).mock.calls.at(-1)?.[2];
+    const glueSignal = vi.mocked(scanGlueBatch).mock.calls.at(-1)?.[2];
+    await user.clear(parentInput);
+    expect(toolSignal?.aborted).toBe(true);
+    expect(glueSignal?.aborted).toBe(true);
+
+    resolveTool(tool);
+    resolveGlue(glue);
+    await waitFor(() => {
+      expect(screen.queryByRole("option", { name: /R5 assembly jig/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole("option", { name: /BATCH-12/ })).not.toBeInTheDocument();
+    });
   });
 });

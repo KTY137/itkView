@@ -23,18 +23,20 @@ admin exists, anyone who can reach the port can claim the instance — do not
 expose the service beyond a trusted network before that account is created.
 
 Then sign in and connect your personal PDB access codes under **Account**.
-If that connection test reports “The PDB could not be reached” while
-`/health` shows `"pdb_instance": "test"`, the deployment is on the retired
-test configuration and no PDB is reachable by design — enable the two
-production opt-ins below and restart.
+Compose enables production PDB **reads** out of the box — nothing contacts the
+PDB until a person connects their own codes. If the connection test says the
+deployment has **no PDB configured**, `ITKFLOW_PDB_INSTANCE=offline` is set in
+`.env`; remove it and restart to restore the default.
 
 ## Safety
 
-The default target is the historical, inert **PDB test configuration**; that
-test service no longer exists. Production access requires deliberately setting
-both `ITKFLOW_PDB_INSTANCE=production` and
-`ITKFLOW_ALLOW_PRODUCTION=true`. Writes remain confined to itkFlow-registered
-DUMMY module/hybrid components.
+There is no PDB test service; the code-level default (`pdb_instance=offline`)
+reaches no PDB, and this Compose file deliberately overrides it to
+production **reads** (docs/09). All PDB traffic runs under each person's own
+access codes, and writes remain confined to itkFlow-registered DUMMY
+module/hybrid components (`pdb_write_scope=dummy_only`). Set
+`ITKFLOW_PDB_INSTANCE=offline` in `.env` for a deployment that must reach no
+PDB at all.
 
 `ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY` must be the same stable, URL-safe
 base64 32-byte key in the backend and worker. Back it up separately from the

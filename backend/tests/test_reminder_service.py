@@ -274,7 +274,7 @@ def test_unacknowledged_occurrence_escalates_once_on_the_configured_channel(
             "reminder_escalation": {"after_minutes": 5, "channel": "ops"},
         }
         session.commit()
-        reminder = _add_reminder(session, tudo["id"])
+        _add_reminder(session, tudo["id"])
 
         initial = process_due_reminders(
             session,

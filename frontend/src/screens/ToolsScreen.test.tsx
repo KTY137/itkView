@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Institute, Tool } from "../api";
 import { deleteTool, getInstitutes, getTools, patchTool, postTool } from "../api";
+import { resetDemoTools } from "../demoData";
 import ToolsScreen from "./ToolsScreen";
 
 const authState = vi.hoisted(() => ({
@@ -56,6 +57,7 @@ const existing: Tool = {
 
 describe("ToolsScreen", () => {
   beforeEach(() => {
+    resetDemoTools();
     authState.current = {
       canWrite: true,
       isAdmin: true,
