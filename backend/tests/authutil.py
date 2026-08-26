@@ -11,7 +11,36 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth import hash_password
-from app.models import User
+from app.models import InstituteProfile, User
+
+
+def create_institute_profile(
+    session_factory: sessionmaker[Session],
+    *,
+    code: str,
+    name: str,
+    local_name_prefix: str = "",
+    settings: dict | None = None,
+) -> dict:
+    """Insert a tenant fixture without depending on the admin-only HTTP API."""
+    with session_factory() as session:
+        institute = InstituteProfile(
+            code=code,
+            name=name,
+            local_name_prefix=local_name_prefix,
+            settings=settings or {},
+        )
+        session.add(institute)
+        session.commit()
+        session.refresh(institute)
+        return {
+            "id": institute.id,
+            "code": institute.code,
+            "name": institute.name,
+            "local_name_prefix": institute.local_name_prefix,
+            "settings": institute.settings,
+            "created_at": institute.created_at.isoformat(),
+        }
 
 
 def create_account(

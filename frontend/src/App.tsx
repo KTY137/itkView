@@ -1,13 +1,24 @@
 import { useEffect, useRef, useState } from "react";
-import { getInstitutes } from "./api";
+import { getInstitutes, patchInstitute, postNotificationTest } from "./api";
 import type { Institute } from "./api";
 import { useAuth } from "./auth";
+import { useComponentSyncJob, useEvidenceSyncJob } from "./componentSync";
 import { roleName, t } from "./i18n";
+import { CompactSyncStatus } from "./SyncProgress";
+import AccountScreen from "./screens/AccountScreen";
+import AdminSettingsScreen from "./screens/AdminSettingsScreen";
+import type { AdminSettingsUpdate } from "./screens/AdminSettingsScreen";
+import AssemblyWizardScreen from "./screens/AssemblyWizardScreen";
 import BoardScreen from "./screens/BoardScreen";
 import ComponentsScreen from "./screens/ComponentsScreen";
 import DashboardScreen from "./screens/DashboardScreen";
+import GlueBatchesScreen from "./screens/GlueBatchesScreen";
 import LoginScreen from "./screens/LoginScreen";
-import OutboxScreen from "./screens/OutboxScreen";
+import OpsHealthScreen from "./screens/OpsHealthScreen";
+import SetupScreen from "./screens/SetupScreen";
+import StagedScreen from "./screens/StagedScreen";
+import RemindersScreen from "./screens/RemindersScreen";
+import ShipmentsScreen from "./screens/ShipmentsScreen";
 import StatisticsScreen from "./screens/StatisticsScreen";
 import ToolsScreen from "./screens/ToolsScreen";
 import TriageScreen from "./screens/TriageScreen";
@@ -25,29 +36,43 @@ const SCREENS = [
   { id: "board", label: t.nav.board, icon: "▦" },
   { id: "components", label: t.nav.components, icon: "▣" },
   { id: "triage", label: t.nav.triage, icon: "⇪" },
-  { id: "outbox", label: t.nav.outbox, icon: "⇅" },
+  { id: "staged", label: t.nav.staged, icon: "⇅" },
   { id: "dashboard", label: t.nav.dashboard, icon: "◔" },
   { id: "statistics", label: t.nav.statistics, icon: "📈" },
 ] as const;
 
-const SITE_SCREENS = [{ id: "tools", label: t.nav.tools, icon: "⚒" }] as const;
+// Rail order matches the mockup: Tools, then the Phase-4 logistics screens.
+const SITE_SCREENS = [
+  { id: "tools", label: t.nav.tools, icon: "⚒" },
+  { id: "glue", label: t.nav.glueBatches, icon: "⬡" },
+  { id: "shipments", label: t.nav.shipments, icon: "⛟" },
+  { id: "reminders", label: t.nav.reminders, icon: "✉" },
+] as const;
 
 // Admin-only; kept out of SITE_SCREENS so the nav entry is gated on the role.
 const USERS_NAV = { id: "users", label: t.nav.users, icon: "◈" } as const;
-
-const SOON = [
-  { label: t.nav.glueBatches, icon: "⬡" },
-  { label: t.nav.shipments, icon: "⛟" },
-  { label: t.nav.reminders, icon: "✉" },
-] as const;
+const OPS_HEALTH_NAV = { id: "opsHealth", label: t.nav.opsHealth, icon: "◉" } as const;
+const SETTINGS_NAV = { id: "adminSettings", label: t.nav.settings, icon: "⚙" } as const;
+const ACCOUNT_SCREEN = { id: "account", label: t.nav.account } as const;
+const ASSEMBLY_SCREEN = { id: "assembly", label: t.nav.assembly } as const;
 
 export type ScreenId =
   | (typeof SCREENS)[number]["id"]
   | (typeof SITE_SCREENS)[number]["id"]
-  | (typeof USERS_NAV)["id"];
+  | (typeof USERS_NAV)["id"]
+  | (typeof OPS_HEALTH_NAV)["id"]
+  | (typeof SETTINGS_NAV)["id"]
+  | (typeof ACCOUNT_SCREEN)["id"]
+  | (typeof ASSEMBLY_SCREEN)["id"];
 
-/** Cross-screen navigation intent (open a component, or seed the search). */
-export type NavIntent = { token: number; sn?: string; q?: string; returnTo?: ScreenId };
+/** Cross-screen navigation intent (open a component, seed search, or pin a test form). */
+export type NavIntent = {
+  token: number;
+  sn?: string;
+  q?: string;
+  testType?: string;
+  returnTo?: ScreenId;
+};
 
 /** Auth gate: session probe → splash, no session → login, otherwise the shell.
  * Demo mode (backend unreachable) renders the shell too, so the app stays
@@ -64,6 +89,7 @@ export default function App() {
       </div>
     );
   }
+  if (status === "setup") return <SetupScreen />;
   if (status === "unauthenticated") return <LoginScreen />;
   return <AppShell />;
 }
@@ -78,10 +104,13 @@ function initials(name: string): string {
 
 function AppShell() {
   const { user, demo, logout, isAdmin } = useAuth();
+  const componentSync = useComponentSyncJob(!demo);
+  const evidenceSync = useEvidenceSyncJob(!demo, componentSync.job);
   const [screen, setScreen] = useState<ScreenId>("board");
   const [health, setHealth] = useState<Health | null>(null);
   const [healthError, setHealthError] = useState(false);
   const [institutes, setInstitutes] = useState<Institute[]>([]);
+  const [adminInstituteCode, setAdminInstituteCode] = useState("");
   const [nav, setNav] = useState<NavIntent>({ token: 0 });
   const [scanText, setScanText] = useState("");
   const scanRef = useRef<HTMLInputElement>(null);
@@ -113,6 +142,18 @@ function AppShell() {
       .then(setInstitutes)
       .catch(() => setInstitutes([]));
   }, []);
+
+  useEffect(() => {
+    const ownCode = user?.institute_code ?? null;
+    setAdminInstituteCode((current) => {
+      if (ownCode !== null) {
+        return institutes.some((institute) => institute.code === ownCode) ? ownCode : "";
+      }
+      return institutes.some((institute) => institute.code === current)
+        ? current
+        : (institutes[0]?.code ?? "");
+    });
+  }, [institutes, user?.institute_code]);
 
   // F2 focuses the scan field (scanner-first ergonomics, as in the mockup).
   useEffect(() => {
@@ -147,16 +188,50 @@ function AppShell() {
     setScanText("");
   }
 
+  async function handleSaveAdminSettings(code: string, update: AdminSettingsUpdate) {
+    const updated = await patchInstitute(code, update);
+    setInstitutes((current) =>
+      [...current.filter((institute) => institute.code !== updated.code), updated].sort(
+        (left, right) => left.code.localeCompare(right.code),
+      ),
+    );
+    return updated;
+  }
+
   const activeLabel =
-    [...SCREENS, ...SITE_SCREENS, USERS_NAV].find((s) => s.id === screen)?.label ?? "";
+    [
+      ...SCREENS,
+      ...SITE_SCREENS,
+      USERS_NAV,
+      OPS_HEALTH_NAV,
+      SETTINGS_NAV,
+      ACCOUNT_SCREEN,
+      ASSEMBLY_SCREEN,
+    ].find(
+      (item) => item.id === screen,
+    )?.label ?? "";
   // A signed-in user's home institute wins for branding; fall back to the first
   // synced institute (e.g. in demo mode there is no user).
   const brandCode = user?.institute_code ?? institutes[0]?.code;
   const brandInstitute = institutes.find((i) => i.code === brandCode) ?? institutes[0];
+  const adminInstitutes =
+    user?.institute_code === null || user?.institute_code === undefined
+      ? institutes
+      : institutes.filter((institute) => institute.code === user.institute_code);
   // Institute branding is profile data (hard rule #4: never hardcode an
   // institute) — the logo comes from the selected institute's settings.
   const rawLogo = brandInstitute?.settings?.logo_url;
   const logoUrl = typeof rawLogo === "string" && rawLogo !== "" ? rawLogo : null;
+  const syncJobs = [componentSync.job, evidenceSync.job].filter(
+    (job) => job !== null,
+  );
+  const activeSyncJobs = syncJobs.filter(
+    (job) => job.status === "queued" || job.status === "running",
+  );
+  const visibleSyncJob = [...(activeSyncJobs.length > 0 ? activeSyncJobs : syncJobs)].sort(
+    (left, right) =>
+      new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime(),
+  )[0] ?? null;
 
   return (
     <div className="frame">
@@ -211,16 +286,30 @@ function AppShell() {
               </span>{" "}
               {USERS_NAV.label}
             </button>
+            <button
+              type="button"
+              className="nav-btn"
+              aria-current={screen === "opsHealth" ? "page" : undefined}
+              onClick={() => goToScreen("opsHealth")}
+            >
+              <span className="ic" aria-hidden="true">
+                {OPS_HEALTH_NAV.icon}
+              </span>{" "}
+              {OPS_HEALTH_NAV.label}
+            </button>
+            <button
+              type="button"
+              className="nav-btn"
+              aria-current={screen === "adminSettings" ? "page" : undefined}
+              onClick={() => goToScreen("adminSettings")}
+            >
+              <span className="ic" aria-hidden="true">
+                {SETTINGS_NAV.icon}
+              </span>{" "}
+              {SETTINGS_NAV.label}
+            </button>
           </>
         )}
-        {SOON.map((s) => (
-          <button key={s.label} type="button" className="nav-btn dis" disabled>
-            <span className="ic" aria-hidden="true">
-              {s.icon}
-            </span>{" "}
-            {s.label} <span className="soon">P4</span>
-          </button>
-        ))}
         <div className="rail-bottom">
           {logoUrl !== null && (
             <div className="rail-logo">
@@ -229,14 +318,23 @@ function AppShell() {
           )}
           {user !== null ? (
             <div className="me" title={t.auth.signedInAs}>
-              <span className="ava">{initials(user.display_name)}</span>
-              <span className="me-id">
-                <span className="me-name">{user.display_name}</span>
-                <span className="role">
-                  {roleName(user.role)}
-                  {user.institute_code ? ` · ${user.institute_code}` : ""}
+              <button
+                type="button"
+                className="me-account"
+                aria-current={screen === "account" ? "page" : undefined}
+                aria-label={`${t.nav.account}: ${user.display_name}`}
+                title={t.account.openSettings}
+                onClick={() => goToScreen("account")}
+              >
+                <span className="ava">{initials(user.display_name)}</span>
+                <span className="me-id">
+                  <span className="me-name">{user.display_name}</span>
+                  <span className="role">
+                    {roleName(user.role)}
+                    {user.institute_code ? ` · ${user.institute_code}` : ""}
+                  </span>
                 </span>
-              </span>
+              </button>
               <button
                 type="button"
                 className="logout-btn"
@@ -275,6 +373,12 @@ function AppShell() {
             />
             <kbd>F2</kbd>
           </form>
+          {visibleSyncJob !== null && (
+            <CompactSyncStatus
+              job={visibleSyncJob}
+              onOpen={() => goToScreen("components")}
+            />
+          )}
           <span className="sync">
             <span
               className={
@@ -297,17 +401,64 @@ function AppShell() {
 
         <div className="content">
           {screen === "board" ? (
-            <BoardScreen onOpen={(sn) => navigateTo({ sn, returnTo: "board" })} />
+            <BoardScreen
+              onOpen={(sn) => navigateTo({ sn, returnTo: "board" })}
+              onAssemble={() => setScreen("assembly")}
+            />
+          ) : screen === "assembly" ? (
+            <AssemblyWizardScreen
+              onBack={() => setScreen("board")}
+              onStaged={() => setScreen("staged")}
+            />
           ) : screen === "components" ? (
-            <ComponentsScreen nav={nav} onNavigate={(target) => setScreen(target)} />
+            <ComponentsScreen
+              nav={nav}
+              onNavigate={(target) => setScreen(target)}
+              componentSync={componentSync}
+              evidenceSync={evidenceSync}
+            />
           ) : screen === "triage" ? (
-            <TriageScreen />
-          ) : screen === "outbox" ? (
-            <OutboxScreen />
+            <TriageScreen
+              onOpenComponent={(sn: string) => navigateTo({ sn, returnTo: "triage" })}
+            />
+          ) : screen === "staged" ? (
+            <StagedScreen
+              onOpenComponent={(sn: string) => navigateTo({ sn, returnTo: "staged" })}
+            />
           ) : screen === "tools" ? (
             <ToolsScreen />
+          ) : screen === "glue" ? (
+            <GlueBatchesScreen />
+          ) : screen === "shipments" ? (
+            <ShipmentsScreen
+              onOpenComponent={(sn: string) => navigateTo({ sn, returnTo: "shipments" })}
+              onAddTest={(sn: string, testType: string) =>
+                navigateTo({ sn, testType, returnTo: "shipments" })
+              }
+            />
+          ) : screen === "reminders" ? (
+            <RemindersScreen />
+          ) : screen === "account" ? (
+            <AccountScreen />
           ) : screen === "users" ? (
             <UsersScreen />
+          ) : screen === "opsHealth" ? (
+            <OpsHealthScreen
+              institutes={adminInstitutes}
+              selectedCode={adminInstituteCode}
+              allowAllInstitutes={user?.institute_code == null}
+              onSelectedCodeChange={setAdminInstituteCode}
+              onNavigate={setScreen}
+            />
+          ) : screen === "adminSettings" ? (
+            <AdminSettingsScreen
+              institutes={adminInstitutes}
+              selectedCode={adminInstituteCode}
+              onSelectedCodeChange={setAdminInstituteCode}
+              onSave={handleSaveAdminSettings}
+              onTestChannel={(code, channel) => postNotificationTest(channel, code).then(() => {})}
+              labels={t.adminSettings}
+            />
           ) : screen === "statistics" ? (
             <StatisticsScreen />
           ) : (

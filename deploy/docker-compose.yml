@@ -1,5 +1,5 @@
 # itkFlow full stack. Copy .env.example to .env first.
-# The PDB production instance is not configurable here — test instance only.
+# PDB access stays inert unless both production-read opt-ins are set in .env.
 
 services:
   postgres:
@@ -22,9 +22,13 @@ services:
       dockerfile: ../deploy/backend.Dockerfile
     environment:
       ITKFLOW_DATABASE_URL: postgresql+psycopg://itkflow:${POSTGRES_PASSWORD}@postgres:5432/itkflow
-      ITKFLOW_PDB_INSTANCE: test
-      ITKFLOW_ITKDB_ACCESS_CODE1: ${ITKFLOW_ITKDB_ACCESS_CODE1:-}
-      ITKFLOW_ITKDB_ACCESS_CODE2: ${ITKFLOW_ITKDB_ACCESS_CODE2:-}
+      ITKFLOW_PDB_INSTANCE: ${ITKFLOW_PDB_INSTANCE:-test}
+      ITKFLOW_ALLOW_PRODUCTION: ${ITKFLOW_ALLOW_PRODUCTION:-false}
+      ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY: ${ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY:?set a stable encryption key in deploy/.env}
+      ITKFLOW_PDB_WRITE_SCOPE: dummy_only
+      # Both processes read this so the pair stays consistent: the default lets
+      # the worker fire reminders, and this service does not (docs/11).
+      ITKFLOW_REMINDER_SCHEDULER: ${ITKFLOW_REMINDER_SCHEDULER:-worker}
     depends_on:
       postgres:
         condition: service_healthy
@@ -32,8 +36,8 @@ services:
       - "8000:8000"
 
   # Async outbox worker: the only process that writes reviewed actions to the
-  # PDB test instance. Shares the database with the backend; idle (no writes)
-  # unless ITKDB access codes are provided.
+  # PDB. Shares the database and encryption key with the backend. Every action
+  # is submitted as the personal PDB identity bound when it was approved.
   worker:
     build:
       context: ../backend
@@ -41,10 +45,14 @@ services:
     command: ["python", "-m", "app.run_worker"]
     environment:
       ITKFLOW_DATABASE_URL: postgresql+psycopg://itkflow:${POSTGRES_PASSWORD}@postgres:5432/itkflow
-      ITKFLOW_PDB_INSTANCE: test
-      ITKFLOW_ITKDB_ACCESS_CODE1: ${ITKFLOW_ITKDB_ACCESS_CODE1:-}
-      ITKFLOW_ITKDB_ACCESS_CODE2: ${ITKFLOW_ITKDB_ACCESS_CODE2:-}
+      ITKFLOW_PDB_INSTANCE: ${ITKFLOW_PDB_INSTANCE:-test}
+      ITKFLOW_ALLOW_PRODUCTION: ${ITKFLOW_ALLOW_PRODUCTION:-false}
+      ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY: ${ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY:?set a stable encryption key in deploy/.env}
+      ITKFLOW_PDB_WRITE_SCOPE: dummy_only
       ITKFLOW_WORKER_POLL_SECONDS: ${ITKFLOW_WORKER_POLL_SECONDS:-5}
+      # This process also fires due reminders, unless the pair is switched over
+      # to the API service (docs/11).
+      ITKFLOW_REMINDER_SCHEDULER: ${ITKFLOW_REMINDER_SCHEDULER:-worker}
     depends_on:
       postgres:
         condition: service_healthy

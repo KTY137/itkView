@@ -67,6 +67,36 @@ bestaetigen ⚠): `20USE` + 2 Zeichen fuer die Art —
 `20USE`**`5M`**`…` Modul · `20USE`**`5S`**`…` Sensor · `20USE`**`5H`**`…` Hybrid
 · `20USE`**`PB`**`…` Powerboard. ✓ (im Fixture-Datensatz sichtbar)
 
+### ASIC-Bestand: `CATEGORY_A`, `CATEGORY_X`, `BOND_PULLING`
+
+Diese Werte sind **PDB-Stage-Codes von ASICs**, keine `component_type`- oder
+`type_code`-Werte und keine Modul-Assembly-Stages. Die read-only zFlow-Referenz
+modelliert fuer ABC/HCC unter anderem `ON_WAFER` als Anfang sowie
+`CATEGORY_A`, `CATEGORY_X` und `BOND_PULLING` als alternative finale Stages; sie
+markiert `CATEGORY_A` als `preferred` und ordnet `PULL_TEST` der Stage
+`BOND_PULLING` zu. ✓ (`references/zeuthenflow/modules/dbObjects/dbAsics.py`, nur
+gelesen)
+
+| Stage | Belastbare Bedeutung | Konsequenz fuer Anzeige/Bestand |
+|---|---|---|
+| `CATEGORY_A` | Qualitaetskategorie A nach Wafer-Probing; in der Referenz final und bevorzugt. Oeffentliche ABCStar- und AMACStar-Unterlagen beschreiben A als innerhalb der erwarteten Parameter und fuer Detektorbau vorgesehen. ✓⚠ | Familienneutral nur als `Category A · preferred` erklaeren und den Rohcode sichtbar lassen. `Detector-grade` ist nur zulaessig, wenn die konkrete ASIC-Familie dies belegt. Das ist **keine** Erlaubnis, ASICs zu registrieren oder zu bewegen. |
+| `CATEGORY_X` | Finale Nicht-A-Kategorie. Fuer ABCStar bedeutet X fehlgeschlagene Basistests/zu viele defekte Kanaele; solche Dice koennen noch fuer mechanische, Klebe- oder Wirebond-Versuche dienen. Fuer AMACStar bedeutet X mindestens einen vitalen Parameter ausserhalb des Bereichs und laut Quelle keine weitere Verwendung. Die Wiederverwendung ist also ASIC-familienabhaengig. ⚠ | Sicherer gemeinsamer Text: `Category X · family policy required`. Keine automatische Aussage `trash`, `available`, `not detector-grade` oder `usable for tests`, solange Familie und Institutsregel das nicht festlegen. |
+| `BOND_PULLING` | In der Referenz finale ASIC-Stage und Zielstage des Testtyps `PULL_TEST`. ✓ | Als `Bond-pull sample` erklaeren; nicht als Qualitaetsrang zwischen A und X sortieren. Ob der Test destruktiv ist und ob der Chip danach Bestand bleibt, muss die aktuelle PDB-/Institutsregel festlegen. ⚠ |
+
+Die Kategorien sind bei ABCStar und AMACStar fachlich belegt, aber fuer HCCStar
+ist in den hier verfuegbaren Quellen keine gleich genaue A/X-Definition
+gefunden worden. Deshalb muss die UI bei unbekannter ASIC-Familie Rohcode plus
+neutralen Hinweis zeigen und darf keine Bestandsentscheidung ableiten.
+
+Primaerquellen fuer die Qualitaetsbedeutung:
+
+- [ABCStar production paper, arXiv:2605.22559](https://arxiv.org/abs/2605.22559)
+- [AMACStar grading, CERN CDS ATL-ITK-PROC-2022-024](https://cds.cern.ch/record/2837316/files/ATL-ITK-PROC-2022-024.pdf)
+
+Alle diese ASIC-Pfade bleiben in itkFlow read-only. `CATEGORY_A` ist niemals
+ein Schlupfloch in der harten Regel: Sensoren und ASICs werden weder als DUMMY
+registriert noch durch itkFlow in eine andere Stage geschrieben.
+
 ## 3. Wo die App die Labels herzieht (und warum sie „weird" wirken)
 
 - Mirror: `component_type`, `type_code` wie oben. ✓
@@ -125,7 +155,7 @@ ueberschreibbar) ✓:
 Stage-Reihenfolge & Pflichttests sind Seed-Defaults fuer Endcap; ein Institut
 mit anderem Ablauf (Barrel) ueberschreibt sie im Profil — **kein Hardcoding**.
 
-## 5. Konsequenzen fuer die offenen Assembly-Features
+## 5. Konsequenzen fuer die Assembly-Features
 
 - **Create Module** (`register_component`): **Umgesetzt (2026-07-10).**
   `POST /api/components/register` (operator-gated) validiert den Typ (nur
@@ -140,8 +170,20 @@ mit anderem Ablauf (Barrel) ueberschreibt sie im Profil — **kein Hardcoding**.
   z. B. `{"GLUE_WEIGHT": ["JIG"]}`, Regel-#4-safe, Default leer);
   `ingestion.missing_required_properties` speist den Ingest-Dry-Run — `preview` +
   `propose-outbox` blocken, wenn das benutzte Jig in `payload['properties']`
-  fehlt. Offen: Quick-Select aus der `Tool`-Registry im Wizard (`docs/07`) und
-  der exakte PDB-Property-Key (§6).
+  fehlt. Der Quick-Select aus der `Tool`-Registry ist seit 2026-08-26 im
+  Assembly-Wizard umgesetzt. Semantische Felder (`tool`, `glue_batch`, `slot`)
+  werden ueber `assembly_property_keys` im Institutsprofil auf bestaetigte
+  PDB-Property-Codes gemappt; ohne Profil-Mapping wird kein Code erfunden.
+
+- **Assembly-Wizard**: **Umgesetzt (2026-08-26).** Parent und Child werden
+  exakt aus dem lokalen Mirror gescannt; aktive, zum Parent-`type_code`
+  kompatible Tools und benutzbare Glue-Batches werden schnell ausgewaehlt.
+  `POST /api/assembly/preview` und `POST /api/assembly/actions` verwenden
+  dieselbe Validierung. Der Worker prueft aktuellen Komponenten-/Tool-/Glue-
+  Zustand und Dry-run-Snapshots erneut. Der reale `assembleComponent`-Pfad ist
+  vor Client-Aufbau auf DUMMY-`MODULE|HYBRID` fuer **beide** Teilnehmer
+  begrenzt; Sensoren/ASICs sind nie zulaessig. Produktionskomponenten koennen
+  fuer lokale Nachvollziehbarkeit staged, aber nicht submitted werden.
 
 - **Metrologie-Ingestion**: Die Messprogramm-/zFlow-Ausgabe fuer `MODULE_METROLOGY`
   ist bereits die Standard-PDB-`uploadTestRunResults`-Form (Result-Groups
@@ -156,7 +198,8 @@ mit anderem Ablauf (Barrel) ueberschreibt sie im Profil — **kein Hardcoding**.
 
 - Exaktes `type_code`-Vokabular (alle Ringe/Positionen, Barrel-Codes) und die
   exakten `componentType`-Codes der ASICs (`ABCStar`/`HCCStar`/`AMAC`?).
-- Exakte PDB-Property-Keys fuer „benutztes Jig" je Klebeschritt (Testtyp/Stage).
+- Exakte PDB-Property-Keys fuer „benutztes Jig" je Klebeschritt (Testtyp/Stage)
+  je Institut bestaetigen und anschliessend im Profil konfigurieren.
 - Seriennummern-Schema (§2) offiziell bestaetigen.
 - Barrel- vs. Endcap-Stagenamen, falls ein zweites Institut Barrel baut.
 

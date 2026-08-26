@@ -9,17 +9,17 @@ def test_health_reports_test_instance(client: TestClient):
     assert body["pdb_instance"] == "test"
 
 
-def test_institute_roundtrip_and_conflict(client: TestClient, tudo: dict):
+def test_institute_roundtrip_and_conflict(as_admin: TestClient, tudo: dict):
     assert tudo["code"] == "TUDO"
-    listed = client.get("/api/institutes").json()
+    listed = as_admin.get("/api/institutes").json()
     assert [i["code"] for i in listed] == ["TUDO"]
 
-    duplicate = client.post("/api/institutes", json={"code": "TUDO", "name": "again"})
+    duplicate = as_admin.post("/api/institutes", json={"code": "TUDO", "name": "again"})
     assert duplicate.status_code == 409
 
 
-def test_institute_code_is_validated(client: TestClient):
-    response = client.post("/api/institutes", json={"code": "tudo!", "name": "bad code"})
+def test_institute_code_is_validated(as_admin: TestClient):
+    response = as_admin.post("/api/institutes", json={"code": "tudo!", "name": "bad code"})
     assert response.status_code == 422
 
 
@@ -62,6 +62,23 @@ def test_outbox_lifecycle_with_audit_trail(client: TestClient, tudo: dict, as_op
     subjects = {event["subject"] for event in audit}
     assert f"outbox:{action_id}" in subjects
     assert len([e for e in audit if e["action"] == "outbox.transition"]) == len(steps)
+
+    targeted = client.get(f"/api/outbox/{action_id}/audit")
+    assert targeted.status_code == 200, targeted.text
+    action_audit = targeted.json()
+    assert [event["action"] for event in action_audit] == [
+        "outbox.created",
+        *("outbox.transition" for _ in steps),
+    ]
+    assert all(event["outbox_action_id"] == action_id for event in action_audit)
+    assert [event["id"] for event in action_audit] == sorted(
+        event["id"] for event in action_audit
+    )
+
+
+def test_outbox_audit_returns_404_for_unknown_action(client: TestClient):
+    response = client.get("/api/outbox/999999/audit")
+    assert response.status_code == 404
 
 
 def test_outbox_contract_is_public_and_not_an_action_id(client: TestClient):

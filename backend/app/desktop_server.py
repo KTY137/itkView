@@ -136,6 +136,9 @@ def build_settings(data_dir: Path, static_dir: Path | None):
     overrides: dict[str, object] = {
         "database_url": database_url,
         "pdb_credential_encryption_key": ensure_encryption_key(data_dir),
+        # The bundle ships one process, so the API has to fire due reminders
+        # itself — the worker default would mean they never fire here (docs/11).
+        "reminder_scheduler": os.environ.get("ITKFLOW_REMINDER_SCHEDULER", "app"),
     }
     if static_dir is not None:
         overrides["static_dir"] = str(static_dir)

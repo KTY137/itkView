@@ -2,6 +2,7 @@
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
+from authutil import create_institute_profile
 
 from app.domain.stages import (
     DEFAULT_STAGE_MODEL,
@@ -247,15 +248,13 @@ def test_stage_suggestion_respects_institute_profile_override(
     client: TestClient, session_factory
 ):
     # Institute profile relaxes GLUED to require only GLUE_WEIGHT.
-    inst = client.post(
-        "/api/institutes",
-        json={
-            "code": "TUDO",
-            "name": "TU Dortmund",
-            "local_name_prefix": "TUDO-",
-            "settings": {"stage_requirements": {"GLUED": ["GLUE_WEIGHT"]}},
-        },
-    ).json()
+    inst = create_institute_profile(
+        session_factory,
+        code="TUDO",
+        name="TU Dortmund",
+        local_name_prefix="TUDO-",
+        settings={"stage_requirements": {"GLUED": ["GLUE_WEIGHT"]}},
+    )
     with session_factory() as session:
         sync_components(session, load_fixture_records(DEMO_FIXTURE_PATH))
         session.commit()

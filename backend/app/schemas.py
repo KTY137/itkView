@@ -65,6 +65,20 @@ class ComponentSyncOut(BaseModel):
     total: int
 
 
+class EvidenceSyncJobResultOut(BaseModel):
+    institute_code: str
+    component_types: list[str]
+    components_processed: int
+    created: int
+    updated: int
+    unchanged: int
+    total: int
+    attachments_downloaded: int
+    attachments_reused: int
+    attachments_failed: int
+    attachments_total: int
+
+
 SyncJobStatus = Literal["queued", "running", "succeeded", "failed", "interrupted"]
 SyncJobPhase = Literal[
     "queued",
@@ -73,6 +87,7 @@ SyncJobPhase = Literal[
     "upserting",
     "stage_events",
     "tools",
+    "attachments",
     "committing",
     "complete",
 ]
@@ -84,7 +99,7 @@ class SyncJobOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    kind: Literal["components"]
+    kind: Literal["components", "evidence"]
     institute_code: str
     status: SyncJobStatus
     phase: SyncJobPhase
@@ -92,7 +107,7 @@ class SyncJobOut(BaseModel):
     total: int | None
     percent: float | None
     message: str
-    result: ComponentSyncOut | None
+    result: ComponentSyncOut | EvidenceSyncJobResultOut | None
     error: str | None
     created_at: datetime
     started_at: datetime | None
@@ -123,6 +138,70 @@ class StageSuggestionOut(BaseModel):
     suggested_stage: str | None
     checks: list[RequirementCheckOut]
     blocking: list[RequirementCheckOut]
+
+
+class PreviewRequirementCheckOut(BaseModel):
+    stage: str
+    test_type: str
+    status: Literal["passed", "failed", "missing", "pending"]
+
+
+class ComponentPreviewStateOut(BaseModel):
+    stage: str
+    checks: list[PreviewRequirementCheckOut]
+
+
+class ComponentPreviewActionOut(BaseModel):
+    id: int
+    kind: str
+    status: str
+    summary: str
+    to_stage: str | None
+    test_type: str | None
+    created_by: str
+    created_at: datetime
+    submittable: bool
+    submittable_reason: str | None
+
+
+class TestRunAttachmentOut(BaseModel):
+    """One mirrored attachment. `stored` distinguishes "known" from "on disk"."""
+
+    code: str
+    test_type: str
+    test_run_ref: str | None
+    filename: str | None
+    content_type: str | None
+    title: str | None
+    size_bytes: int | None
+    stored: bool
+    is_image: bool
+
+
+class ComponentPreviewTestOut(BaseModel):
+    test_type: str
+    passed: bool | None
+    external_ref: str | None
+    measured_at: datetime | None
+    synced_at: datetime | None
+    source: str
+    run_number: str | int | None
+    properties: dict[str, Any]
+    results: dict[str, Any]
+    result_meta: dict[str, Any]
+    attachments: list[TestRunAttachmentOut]
+    ghost: bool
+    outbox_action_id: int | None
+
+
+class ComponentProjectedStateOut(ComponentPreviewStateOut):
+    tests: list[ComponentPreviewTestOut]
+
+
+class ComponentPreviewOut(BaseModel):
+    current: ComponentPreviewStateOut
+    staged_actions: list[ComponentPreviewActionOut]
+    projected: ComponentProjectedStateOut
 
 
 class CountBucket(BaseModel):
@@ -198,6 +277,14 @@ class IngestFileCreate(BaseModel):
     # `uploaded_by` is set from the session (docs/06), not the body.
     filename: str = Field(min_length=1, max_length=240)
     payload: dict = Field(default_factory=dict)
+    # A component-page upload pins the intended target. The payload stays
+    # untouched; a conflicting embedded SN becomes a dry-run issue.
+    component_sn: str | None = Field(default=None, min_length=1, max_length=20)
+    # A workflow deep-link may also pin the expected test type. The raw
+    # payload is not rewritten; a conflicting embedded test type is surfaced
+    # as a blocking dry-run issue.
+    test_type: str | None = Field(default=None, min_length=1, max_length=64)
+    parser: Literal["manual-entry"] | None = None
 
 
 class IngestFileOut(BaseModel):
@@ -246,6 +333,25 @@ class IngestPreviewOut(BaseModel):
     warnings: list[str]
 
 
+class TestTypeSchemaOut(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: int
+    component_type: str
+    test_code: str
+    name: str
+    schema_data: dict[str, Any] = Field(alias="schema")
+    synced_at: datetime
+
+
+class TestTypeSchemaSyncOut(BaseModel):
+    component_type: str
+    created: int
+    updated: int
+    unchanged: int
+    total: int
+
+
 class AuditOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -267,6 +373,56 @@ class HealthOut(BaseModel):
     pdb_write_scope: str
 
 
+class OpsHeartbeatOut(BaseModel):
+    service: Literal["outbox-worker", "reminder-scheduler"]
+    status: Literal["healthy", "stale", "missing", "error", "disabled"]
+    last_seen_at: datetime | None
+    age_seconds: int | None
+    stale_after_seconds: int
+    detail: dict[str, Any]
+
+
+class OpsSyncOut(BaseModel):
+    active: list[SyncJobOut]
+    latest: list[SyncJobOut]
+    stale_active: int
+
+
+class OpsOutboxOut(BaseModel):
+    backlog: int
+    failed: int
+    at_attempt_limit: int
+    oldest_open_at: datetime | None
+    oldest_open_age_seconds: int | None
+
+
+class OpsRemindersOut(BaseModel):
+    active: int
+    open_occurrences: int
+    failed_occurrences: int
+    escalated_open: int
+    overdue: int
+
+
+class OpsIngestOut(BaseModel):
+    total: int
+    triage: int
+    failed: int
+    parser_issues: int
+    unassigned: int
+
+
+class OpsHealthOut(BaseModel):
+    status: Literal["healthy", "warning", "critical"]
+    generated_at: datetime
+    institute_code: str | None
+    heartbeats: list[OpsHeartbeatOut]
+    sync: OpsSyncOut
+    outbox: OpsOutboxOut
+    reminders: OpsRemindersOut
+    ingest: OpsIngestOut
+
+
 # --- Auth / users (docs/06) ------------------------------------------------
 
 Role = Literal["viewer", "operator", "admin"]
@@ -275,6 +431,18 @@ Role = Literal["viewer", "operator", "admin"]
 class LoginIn(BaseModel):
     email: str = Field(min_length=3, max_length=200)
     password: str = Field(min_length=1, max_length=200)
+
+
+class SetupStatusOut(BaseModel):
+    # True while the user table is empty; the frontend then offers the
+    # first-run "create the first admin account" form instead of the login.
+    needs_admin: bool
+
+
+class SetupAdminIn(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    display_name: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=8, max_length=200)
 
 
 class UserCreate(BaseModel):
@@ -350,6 +518,7 @@ ToolStatus = Literal["active", "flagged", "blacklisted"]
 
 
 class ToolCreate(BaseModel):
+    institute_code: str | None = Field(default=None, min_length=1, max_length=32)
     kind: str = Field(min_length=1, max_length=24)
     code: str = Field(min_length=1, max_length=64)
     label: str | None = Field(default=None, max_length=120)
@@ -359,7 +528,9 @@ class ToolCreate(BaseModel):
 
 
 class ToolUpdate(BaseModel):
+    kind: str | None = Field(default=None, min_length=1, max_length=24)
     code: str | None = Field(default=None, min_length=1, max_length=64)
+    label: str | None = Field(default=None, max_length=120)
     rfid: str | None = Field(default=None, max_length=64)
     compatible_types: list[str] | None = None
     status: ToolStatus | None = None
@@ -377,6 +548,78 @@ class ToolOut(BaseModel):
     institute_id: int | None
     status: str
     created_at: datetime
+
+
+# --- Scanner-first assembly dry-run / outbox contract ----------------------
+
+
+class AssemblyDraftIn(BaseModel):
+    parent_sn: str = Field(min_length=1, max_length=20)
+    child_sn: str = Field(min_length=1, max_length=20)
+    slot: str = Field(min_length=1, max_length=64)
+    tool_id: int = Field(gt=0)
+    glue_batch_id: int | None = Field(default=None, gt=0)
+
+
+class AssemblyIssueOut(BaseModel):
+    code: str
+    message: str
+
+
+class AssemblyComponentOut(BaseModel):
+    sn: str
+    local_name: str | None
+    component_type: str
+    type_code: str
+    stage: str
+    location: str
+    institute_code: str
+    parent_sn: str | None
+    is_dummy: bool
+    stale: bool
+    trashed: bool
+
+
+class AssemblyToolOut(BaseModel):
+    id: int
+    kind: str
+    code: str
+    label: str | None
+    rfid: str | None
+    compatible_types: list[str]
+    status: str
+
+
+class AssemblyGlueBatchOut(BaseModel):
+    id: int
+    glue_type: str
+    batch_no: str
+    pdb_sn: str | None
+    status: str
+    mixed_at: datetime | None
+    pot_life_minutes: int | None
+    pot_life_remaining_seconds: int | None
+    pot_life_expired: bool
+
+
+class AssemblyPreviewOut(BaseModel):
+    valid: bool
+    submittable: bool
+    submittable_reason: str | None
+    summary: str
+    slot: str
+    parent: AssemblyComponentOut | None
+    child: AssemblyComponentOut | None
+    tool: AssemblyToolOut | None
+    glue_batch: AssemblyGlueBatchOut | None
+    pdb_properties: dict[str, str]
+    issues: list[AssemblyIssueOut]
+    warnings: list[AssemblyIssueOut]
+
+
+class AssemblyStageOut(BaseModel):
+    preview: AssemblyPreviewOut
+    action: OutboxOut
 
 
 # --- Production statistics (reconstructed from the stage-event history) ------
@@ -460,29 +703,14 @@ class EvidenceSyncOut(BaseModel):
     updated: int
     unchanged: int
     total: int
+    attachments_downloaded: int = 0
+    attachments_reused: int = 0
+    attachments_failed: int = 0
+    attachments_total: int = 0
 
 
-class InstituteEvidenceSyncOut(BaseModel):
-    institute_code: str
-    components_processed: int
-    created: int
-    updated: int
-    unchanged: int
-    total: int
-
-
-class TestRunAttachmentOut(BaseModel):
-    """One mirrored attachment. `stored` distinguishes "known" from "on disk"."""
-
-    code: str
-    test_type: str
-    test_run_ref: str | None
-    filename: str | None
-    content_type: str | None
-    title: str | None
-    size_bytes: int | None
-    stored: bool
-    is_image: bool
+class InstituteEvidenceSyncOut(EvidenceSyncJobResultOut):
+    pass
 
 
 class TestRunDetailOut(BaseModel):
@@ -509,3 +737,241 @@ class AttachmentSyncOut(BaseModel):
     reused: int
     failed: int
     total: int
+
+
+# --- Glue batches (Phase 4, docs/11) -----------------------------------------
+
+GlueBatchStatus = Literal["new", "in_use", "expired", "empty"]
+
+
+class GlueBatchCreate(BaseModel):
+    glue_type: str = Field(min_length=1, max_length=48)
+    batch_no: str = Field(min_length=1, max_length=64)
+    pdb_sn: str | None = Field(default=None, max_length=20)
+    status: GlueBatchStatus = "new"
+    manufacturing_date: datetime | None = None
+    expiry_date: datetime | None = None
+    opening_date: datetime | None = None
+    bipack_count: int | None = Field(default=None, ge=0)
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class GlueBatchUpdate(BaseModel):
+    batch_no: str | None = Field(default=None, min_length=1, max_length=64)
+    pdb_sn: str | None = Field(default=None, max_length=20)
+    status: GlueBatchStatus | None = None
+    manufacturing_date: datetime | None = None
+    expiry_date: datetime | None = None
+    opening_date: datetime | None = None
+    bipack_count: int | None = Field(default=None, ge=0)
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class GlueBatchMixIn(BaseModel):
+    # Explicit pot life wins; otherwise the institute profile's
+    # `glue_pot_life_minutes[glue_type]` default applies.
+    pot_life_minutes: int | None = Field(default=None, gt=0, le=24 * 60)
+
+
+class GlueUsageCreate(BaseModel):
+    component_sn: str = Field(min_length=1, max_length=64)
+    amount_mg: float | None = Field(default=None, ge=0)
+    note: str | None = Field(default=None, max_length=240)
+
+
+class GlueUsageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    glue_batch_id: int
+    component_sn: str
+    amount_mg: float | None
+    note: str | None
+    used_by: str
+    used_at: datetime
+
+
+class GlueBatchOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    glue_type: str
+    batch_no: str
+    pdb_sn: str | None
+    status: str
+    manufacturing_date: datetime | None
+    expiry_date: datetime | None
+    opening_date: datetime | None
+    bipack_count: int | None
+    note: str | None
+    mixed_at: datetime | None
+    pot_life_minutes: int | None
+    institute_id: int | None
+    created_at: datetime
+    # Computed server-side from mixed_at/pot_life_minutes (domain/glue.py).
+    pot_life_remaining_seconds: int | None = None
+    pot_life_expired: bool = False
+    usage_count: int = 0
+
+
+# --- Shipments (Phase 4, docs/11) --------------------------------------------
+
+ReceptionStatus = Literal["pending", "in_progress", "done"]
+ReceptionTestStatus = Literal["missing", "pending", "passed", "failed"]
+
+
+class ShipmentChecklistItem(BaseModel):
+    label: str = Field(min_length=1, max_length=200)
+    done: bool = False
+
+
+class ShipmentReceptionItem(BaseModel):
+    sn: str = Field(min_length=1, max_length=64)
+    received: bool = False
+    note: str | None = Field(default=None, max_length=240)
+
+
+class ShipmentReceptionUpdate(BaseModel):
+    """Partial update of the local receiving check; omitted fields are kept."""
+
+    status: ReceptionStatus | None = None
+    checklist: list[ShipmentChecklistItem] | None = None
+    items: list[ShipmentReceptionItem] | None = None
+    note: str | None = Field(default=None, max_length=2000)
+    # Only an admin may use this explicit escape hatch, and only while moving
+    # the reception to done. The API additionally requires a non-blank reason
+    # and emits a dedicated audit event.
+    test_override: bool = False
+    test_override_reason: str | None = Field(default=None, max_length=500)
+
+
+class ShipmentReceptionTestOut(BaseModel):
+    test_type: str
+    status: ReceptionTestStatus
+
+
+class ShipmentItemOut(BaseModel):
+    sn: str
+    component_type: str | None = None
+    component_mirrored: bool = False
+    is_dummy: bool = False
+    submittable: bool = False
+    submittable_reason: str | None = None
+    reception_tests_configured: bool = False
+    reception_test_status: ReceptionTestStatus = "passed"
+    reception_tests: list[ShipmentReceptionTestOut] = Field(default_factory=list)
+
+
+class ShipmentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    pdb_id: str
+    name: str | None
+    sender_code: str
+    recipient_code: str
+    status: str
+    # Relative to the owning institute: incoming | outgoing | internal | unknown.
+    direction: str = "unknown"
+    sent_at: datetime | None
+    items: list[ShipmentItemOut]
+    institute_id: int | None
+    synced_at: datetime
+    reception_status: str
+    reception_checklist: list[dict]
+    reception_items: list[dict]
+    reception_note: str | None
+    reception_by: str | None
+    reception_updated_at: datetime | None
+    reception_tests_configured: bool = False
+    reception_test_status: ReceptionTestStatus = "passed"
+
+
+class ShipmentSyncOut(BaseModel):
+    institute_code: str
+    created: int
+    updated: int
+    unchanged: int
+    total: int
+
+
+# --- Reminders / notifications (Phase 4, docs/11) ----------------------------
+
+ReminderScheduleKind = Literal["once", "daily", "weekly", "monthly"]
+
+
+class ReminderCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    note: str | None = Field(default=None, max_length=2000)
+    channel: str | None = Field(default=None, max_length=64)
+    schedule_kind: ReminderScheduleKind = "once"
+    next_due_at: datetime
+
+
+class ReminderUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    note: str | None = Field(default=None, max_length=2000)
+    channel: str | None = Field(default=None, max_length=64)
+    schedule_kind: ReminderScheduleKind | None = None
+    next_due_at: datetime | None = None
+    active: bool | None = None
+
+
+class ReminderOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    note: str | None
+    channel: str | None
+    schedule_kind: str
+    next_due_at: datetime
+    active: bool
+    last_fired_at: datetime | None
+    last_error: str | None
+    created_by: str
+    institute_id: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ReminderOccurrenceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    reminder_id: int
+    institute_id: int | None
+    due_at: datetime
+    fired_at: datetime
+    delivery_status: Literal["sent", "audit_only", "failed"]
+    delivery_error: str | None
+    escalation_due_at: datetime | None
+    escalation_channel: str | None
+    escalated_at: datetime | None
+    escalation_error: str | None
+    acknowledged_at: datetime | None
+    acknowledged_by: str | None
+
+
+class NotificationChannelOut(BaseModel):
+    """Channel name and kind only — webhook URLs never leave the server."""
+
+    name: str
+    kind: str
+
+
+class NotificationTestIn(BaseModel):
+    channel: str = Field(min_length=1, max_length=64)
+    # Institute-bound admins may omit this (their own institute is implied).
+    # Global admins must select a target explicitly.
+    institute_code: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=16,
+        pattern=r"^[A-Z0-9_]+$",
+    )
+
+
+class NotificationTestOut(BaseModel):
+    channel: str
+    sent: bool

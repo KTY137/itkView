@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 from sqlalchemy import text
+from authutil import create_institute_profile
 
 from app.db import ensure_phase0_sqlite_schema, make_engine
 from app.ingestion import parse_payload
@@ -202,7 +203,7 @@ def test_ingest_endpoints_are_in_openapi(client: TestClient):
 
 
 def test_ingest_file_resolves_local_name_against_mirror(
-    client: TestClient, session_factory, as_operator
+    client: TestClient, session_factory, tudo, as_operator
 ):
     with session_factory() as session:
         sync_components(session, load_fixture_records(DEMO_FIXTURE_PATH))
@@ -243,7 +244,7 @@ def test_ingest_file_with_unknown_local_name_goes_to_triage(client: TestClient, 
 
 
 def test_ingest_preview_reports_dry_run_and_mirror_state(
-    client: TestClient, session_factory, as_operator
+    client: TestClient, session_factory, tudo, as_operator
 ):
     with session_factory() as session:
         sync_components(session, load_fixture_records(DEMO_FIXTURE_PATH))
@@ -316,9 +317,11 @@ def test_ingest_proposal_blocked_by_dry_run_issues(client: TestClient, tudo: dic
 
 
 def test_ingest_file_can_propose_outbox_action(client: TestClient, session_factory, as_operator):
-    client.post(
-        "/api/institutes",
-        json={"code": "TUDO", "name": "TU Dortmund", "local_name_prefix": "TUDO-"},
+    create_institute_profile(
+        session_factory,
+        code="TUDO",
+        name="TU Dortmund",
+        local_name_prefix="TUDO-",
     )
     with session_factory() as session:
         sync_components(session, load_fixture_records(DEMO_FIXTURE_PATH))

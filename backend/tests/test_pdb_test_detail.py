@@ -60,9 +60,11 @@ class _FakeClient:
         self._details = RUN_DETAIL if details is None else details
         self._fail_detail = fail_detail
         self.calls: list[str] = []
+        self.requests: list[tuple[str, dict | None]] = []
 
     def get(self, action, json=None):
         self.calls.append(action)
+        self.requests.append((action, json))
         if action == "getComponent":
             return self._component
         if action == "getTestRun":
@@ -99,6 +101,8 @@ def test_shallow_walk_makes_one_request():
 def test_detail_walk_fetches_each_run():
     _, client = _records()
     assert client.calls == ["getComponent", "getTestRun", "getTestRun"]
+    detail_requests = [body for action, body in client.requests if action == "getTestRun"]
+    assert all(body["noEosToken"] is True for body in detail_requests)
 
 
 def test_measured_values_are_keyed_by_code():
@@ -135,6 +139,60 @@ def test_attachment_metadata_is_mirrored_without_bytes():
     assert attachment["code"] == "abc123"
     assert attachment["content_type"] == "image/jpeg"
     assert attachment["filename"] == "scale.jpg"
+
+
+def test_attachment_type_and_safe_url_metadata_are_retained():
+    details = {
+        **RUN_DETAIL,
+        "RUN-GW": {
+            **RUN_DETAIL["RUN-GW"],
+            "attachments": [
+                {
+                    "code": "eos-1",
+                    "filename": "image.png",
+                    "contentType": "image/png",
+                    "type": "eos",
+                    "url": "https://eosatlas.cern.ch/eos/image.png?signature=must-not-persist",
+                }
+            ],
+        },
+    }
+    records, _ = _records(details=details)
+    attachment = next(r for r in records if r.external_ref == "RUN-GW").payload["attachments"][0]
+
+    assert attachment["type"] == "eos"
+    assert attachment["source"] == "pdb"
+    assert attachment["url"] == "https://eosatlas.cern.ch/eos/image.png"
+
+
+def test_result_urls_become_deduplicated_share_link_descriptors():
+    details = {
+        **RUN_DETAIL,
+        "RUN-GW": {
+            **RUN_DETAIL["RUN-GW"],
+            "results": [
+                {
+                    "code": "URLS",
+                    "name": "Visual inspection images",
+                    "value": [
+                        "https://cernbox.cern.ch/s/public/photo-1.jpg",
+                        "failed",
+                        "https://cernbox.cern.ch/s/public/photo-1.jpg",
+                        "https://cernbox.cern.ch/s/public/photo-2.png",
+                    ],
+                }
+            ],
+            "attachments": [],
+        },
+    }
+    records, _ = _records(details=details)
+    attachments = next(r for r in records if r.external_ref == "RUN-GW").payload["attachments"]
+
+    assert len(attachments) == 2
+    assert {entry["source"] for entry in attachments} == {"share_link"}
+    assert {entry["type"] for entry in attachments} == {"share_link"}
+    assert all(len(entry["code"]) == 64 for entry in attachments)
+    assert all(entry["url"].startswith("https://cernbox.cern.ch/") for entry in attachments)
 
 
 def test_iv_arrays_survive_intact():

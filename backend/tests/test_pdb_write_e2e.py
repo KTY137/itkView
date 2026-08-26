@@ -28,6 +28,7 @@ from app.db import Base, ensure_phase0_sqlite_schema, make_engine, make_session_
 from app.models import Component, IngestFile, InstituteProfile, OutboxAction
 from app.outbox import OutboxStatus
 from app.outbox_worker import process_due_actions
+from app.pdb_credentials import PdbAccessCodes
 from app.pdb_submit import make_pdb_submitter, register_dummy_component
 
 pytestmark = pytest.mark.pdb_write
@@ -64,7 +65,16 @@ def session_factory(settings: Settings):
 
 
 @pytest.fixture(scope="module")
-def dummy_module(settings: Settings, session_factory) -> Component:
+def service_access_codes(settings: Settings) -> PdbAccessCodes:
+    """Explicit credential override reserved for this manually opted-in test."""
+    return PdbAccessCodes(
+        settings.itkdb_access_code1,
+        settings.itkdb_access_code2,
+    )
+
+
+@pytest.fixture(scope="module")
+def dummy_module(settings: Settings, session_factory, service_access_codes) -> Component:
     """The DUMMY module all writes in this test target."""
     reuse_sn = os.environ.get("ITKFLOW_PDB_WRITE_TEST_SN")
     with session_factory() as session:
@@ -99,6 +109,7 @@ def dummy_module(settings: Settings, session_factory) -> Component:
                 type_code=DUMMY_TYPE_CODE,
                 institute_code="TUDO",
                 local_name="TUDO-ITKFLOW-DUMMY-1",
+                access_codes=service_access_codes,
             )
             print(
                 f"\nRegistered DUMMY module {component.sn} — reuse it next time via "
@@ -108,7 +119,12 @@ def dummy_module(settings: Settings, session_factory) -> Component:
         return component
 
 
-def test_upload_test_run_to_dummy_module(settings, session_factory, dummy_module):
+def test_upload_test_run_to_dummy_module(
+    settings,
+    session_factory,
+    dummy_module,
+    service_access_codes,
+):
     """Full loop: ingest file → approved outbox action → real submitter."""
     with session_factory() as session:
         ingest = IngestFile(
@@ -146,7 +162,10 @@ def test_upload_test_run_to_dummy_module(settings, session_factory, dummy_module
         session.commit()
         action_id = action.id
 
-    submitter = make_pdb_submitter(settings)
+    submitter = make_pdb_submitter(
+        settings,
+        service_access_codes=service_access_codes,
+    )
     with session_factory() as session:
         process_due_actions(session, submitter=submitter, max_attempts=1)
         session.commit()
@@ -158,10 +177,18 @@ def test_upload_test_run_to_dummy_module(settings, session_factory, dummy_module
         print(f"\nUploaded test run, PDB ref: {action.external_ref}")
 
 
-def test_stage_move_on_dummy_module(settings, session_factory, dummy_module):
+def test_stage_move_on_dummy_module(
+    settings,
+    session_factory,
+    dummy_module,
+    service_access_codes,
+):
     """Direct submitter call for the stage move (independent of the local
     stage-suggestion engine — the PDB validates the transition itself)."""
-    submitter = make_pdb_submitter(settings)
+    submitter = make_pdb_submitter(
+        settings,
+        service_access_codes=service_access_codes,
+    )
 
     class _Action:
         kind = "stage_move"

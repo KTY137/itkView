@@ -1,37 +1,55 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { NavIntent, ScreenId } from "../App";
+import AddTestResult from "../AddTestResult";
+import ImageLightbox from "../ImageLightbox";
 import {
   ApiError,
   componentAttachmentUrl,
-  componentImageUrl,
   getComponent,
-  getComponentImages,
+  getComponentAttachments,
+  getComponentPreview,
   getComponents,
   getComponentStaged,
   getComponentThumbnails,
   getInstitutes,
   getStageSuggestion,
+  getTestTypeSchemas,
   postComponentSyncEvidence,
   postInstitute,
-  postInstituteEvidenceSync,
   postOutboxAction,
+  postTestTypeSchemaSync,
 } from "../api";
 import type {
   ComponentDetail,
-  ComponentImage,
   ComponentOut,
+  ComponentPreview,
+  ComponentPreviewAction,
   Institute,
   OutboxAction,
+  PreviewRequirementCheck,
   RequirementCheck,
   StageSuggestion,
+  TestRunAttachment,
+  TestTypeSchema,
 } from "../api";
 import { TestResultsSection } from "../TestResults";
 import { useAuth } from "../auth";
-import type { ComponentSyncController } from "../componentSync";
+import type {
+  ComponentSyncController,
+  EvidenceSyncController,
+} from "../componentSync";
 import { filterDemoComponents, getDemoComponent } from "../demoData";
 import { formatTimestamp, t } from "../i18n";
 import { SyncProgressPanel } from "../SyncProgress";
+import {
+  canDiscard,
+  canPush,
+  discardStagedAction,
+  pushToPdb,
+} from "../stagedActions";
+import { readStagedPreviewPreference } from "../stagedPreview";
+import type { StagedPreviewMode } from "../stagedPreview";
 import { describeComponent, roleLabel, stageChipClass, stageLabel } from "../ui";
 import RegisterModuleForm from "./RegisterModuleForm";
 
@@ -90,12 +108,14 @@ export default function ComponentsScreen({
   nav,
   onNavigate,
   componentSync,
+  evidenceSync,
 }: {
   nav?: NavIntent;
   onNavigate?: (screen: ScreenId) => void;
   componentSync: ComponentSyncController;
+  evidenceSync: EvidenceSyncController;
 }) {
-  const { canWrite, isAdmin } = useAuth();
+  const { canWrite, isAdmin, user } = useAuth();
   const [q, setQ] = useState("");
   const [stage, setStage] = useState("");
   const [rows, setRows] = useState<ComponentOut[]>([]);
@@ -109,6 +129,8 @@ export default function ComponentsScreen({
   const [staleFilter, setStaleFilter] = useState("all");
   const [selectedSn, setSelectedSn] = useState<string | null>(null);
   const [detailReturnTo, setDetailReturnTo] = useState<ScreenId | null>(null);
+  const [detailTestType, setDetailTestType] = useState<string | null>(null);
+  const [detailIntentToken, setDetailIntentToken] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
   const [institutes, setInstitutes] = useState<Institute[]>([]);
   const [selectedInstitute, setSelectedInstitute] = useState("");
@@ -118,7 +140,6 @@ export default function ComponentsScreen({
   const [newInstituteName, setNewInstituteName] = useState("");
   const [newInstitutePrefix, setNewInstitutePrefix] = useState("");
   const [creatingInstitute, setCreatingInstitute] = useState(false);
-  const [evidenceSyncing, setEvidenceSyncing] = useState(false);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
   // Serial number -> attachment code for one locally stored image, fetched
   // once for the whole list rather than per row.
@@ -128,8 +149,19 @@ export default function ComponentsScreen({
   const reloadedSyncJob = useRef<number | null>(
     componentSync.job?.status === "succeeded" ? componentSync.job.id : null,
   );
+  const reloadedEvidenceJob = useRef<number | null>(
+    evidenceSync.job?.status === "succeeded" ? evidenceSync.job.id : null,
+  );
 
   const debouncedQ = useDebounced(q, 250);
+  const canWriteSelectedInstitute =
+    canWrite &&
+    selectedInstitute !== "" &&
+    (user?.institute_code === null || user?.institute_code === selectedInstitute);
+  const writableInstitutes =
+    user?.institute_code === null
+      ? institutes
+      : institutes.filter((institute) => institute.code === user?.institute_code);
 
   // Refresh the heavy component list once, only after the background job has
   // committed. Progress polling itself only reads the tiny job-status record.
@@ -149,6 +181,13 @@ export default function ComponentsScreen({
     setReloadKey((key) => key + 1);
   }, [componentSync.job]);
 
+  useEffect(() => {
+    const job = evidenceSync.job;
+    if (job?.status !== "succeeded" || reloadedEvidenceJob.current === job.id) return;
+    reloadedEvidenceJob.current = job.id;
+    setReloadKey((key) => key + 1);
+  }, [evidenceSync.job]);
+
   // React to a cross-screen navigation intent (board card click, topbar scan).
   const navToken = nav?.token ?? 0;
   useEffect(() => {
@@ -156,15 +195,21 @@ export default function ComponentsScreen({
     if (nav.sn !== undefined) {
       setSelectedSn(nav.sn);
       setDetailReturnTo(nav.returnTo ?? null);
+      setDetailTestType(nav.testType ?? null);
+      setDetailIntentToken(nav.testType === undefined ? 0 : nav.token);
     } else if (nav.q !== undefined) {
       setSelectedSn(null);
       setDetailReturnTo(null);
+      setDetailTestType(null);
+      setDetailIntentToken(0);
       setQ(nav.q);
     } else {
       // Empty intent (e.g. clicking the "Components" nav while a detail is
       // open): drop the detail and return to the list.
       setSelectedSn(null);
       setDetailReturnTo(null);
+      setDetailTestType(null);
+      setDetailIntentToken(0);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navToken]);
@@ -178,6 +223,13 @@ export default function ComponentsScreen({
         setInstituteError(null);
         setSelectedInstitute((current) => {
           if (current !== "" && sorted.some((i) => i.code === current)) return current;
+          if (
+            user?.institute_code !== null &&
+            user?.institute_code !== undefined &&
+            sorted.some((institute) => institute.code === user.institute_code)
+          ) {
+            return user.institute_code;
+          }
           return sorted[0]?.code ?? "";
         });
       })
@@ -187,7 +239,7 @@ export default function ComponentsScreen({
         setInstituteError(errorMessage(err));
       });
     return () => ctrl.abort();
-  }, []);
+  }, [user?.institute_code]);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -256,6 +308,8 @@ export default function ComponentsScreen({
 
   function openFromList(sn: string) {
     setDetailReturnTo(null);
+    setDetailTestType(null);
+    setDetailIntentToken(0);
     setSelectedSn(sn);
   }
 
@@ -263,6 +317,8 @@ export default function ComponentsScreen({
     const target = detailReturnTo;
     setSelectedSn(null);
     setDetailReturnTo(null);
+    setDetailTestType(null);
+    setDetailIntentToken(0);
     if (target !== null && target !== "components" && onNavigate !== undefined) {
       onNavigate(target);
     }
@@ -315,29 +371,29 @@ export default function ComponentsScreen({
       setSyncNotice(t.components.syncNeedsInstitute);
       return;
     }
-    setEvidenceSyncing(true);
     setSyncNotice(null);
-    try {
-      const result = await postInstituteEvidenceSync(selectedInstitute);
-      setSyncNotice(
-        t.components.syncEvidenceInstituteDone(result.created, result.components_processed),
-      );
-    } catch (err) {
-      setSyncNotice(`${t.components.syncFailed}: ${errorMessage(err)}`);
-    } finally {
-      setEvidenceSyncing(false);
-    }
+    await evidenceSync.start(selectedInstitute);
   }
 
   if (selectedSn !== null) {
     return (
       <ComponentDetailPanel
+        key={selectedSn}
         sn={selectedSn}
         backLabel={
           detailReturnTo === "board" ? t.components.backToBoard : t.components.backToList
         }
         onBack={handleDetailBack}
-        onOpen={setSelectedSn}
+        onOpen={(sn) => {
+          setDetailTestType(null);
+          setDetailIntentToken(0);
+          setSelectedSn(sn);
+        }}
+        evidenceJobId={
+          evidenceSync.job?.status === "succeeded" ? evidenceSync.job.id : null
+        }
+        pinnedTestType={detailTestType}
+        testIntentToken={detailIntentToken}
       />
     );
   }
@@ -382,7 +438,7 @@ export default function ComponentsScreen({
                 </option>
               ))}
             </select>
-            {canWrite && (
+            {canWriteSelectedInstitute && (
               <>
                 <button
                   type="button"
@@ -390,7 +446,8 @@ export default function ComponentsScreen({
                   disabled={
                     componentSync.active ||
                     componentSync.discovering ||
-                    evidenceSyncing ||
+                    evidenceSync.active ||
+                    evidenceSync.discovering ||
                     selectedInstitute === ""
                   }
                   onClick={() => void handleSyncSelectedInstitute()}
@@ -407,18 +464,21 @@ export default function ComponentsScreen({
                   disabled={
                     componentSync.active ||
                     componentSync.discovering ||
-                    evidenceSyncing ||
+                    evidenceSync.active ||
+                    evidenceSync.discovering ||
                     selectedInstitute === ""
                   }
                   onClick={() => void handleSyncInstituteEvidence()}
                 >
-                  {evidenceSyncing
+                  {evidenceSync.discovering
+                    ? t.components.checkingEvidenceSync
+                    : evidenceSync.active
                     ? t.components.syncingEvidenceInstitute
                     : t.components.syncEvidenceInstitute}
                 </button>
               </>
             )}
-            {isAdmin && (
+            {isAdmin && user?.institute_id === null && (
               <button
                 type="button"
                 className="btn"
@@ -449,8 +509,23 @@ export default function ComponentsScreen({
               </button>
             </div>
           )}
-          <SyncProgressPanel controller={componentSync} canRetry={canWrite} />
-          {isAdmin && showCreateInstitute && (
+          <SyncProgressPanel
+            controller={componentSync}
+            canRetry={
+              canWrite &&
+              (user?.institute_code === null ||
+                user?.institute_code === componentSync.job?.institute_code)
+            }
+          />
+          <SyncProgressPanel
+            controller={evidenceSync}
+            canRetry={
+              canWrite &&
+              (user?.institute_code === null ||
+                user?.institute_code === evidenceSync.job?.institute_code)
+            }
+          />
+          {isAdmin && user?.institute_id === null && showCreateInstitute && (
             <form className="toolbar create-institute-form" onSubmit={handleCreateInstitute}>
               <input
                 className="short-input mono"
@@ -483,10 +558,14 @@ export default function ComponentsScreen({
               </button>
             </form>
           )}
-          {canWrite && (
+          {canWrite && writableInstitutes.length > 0 && (
             <RegisterModuleForm
-              institutes={institutes}
-              defaultInstitute={selectedInstitute}
+              institutes={writableInstitutes}
+              defaultInstitute={
+                writableInstitutes.some((institute) => institute.code === selectedInstitute)
+                  ? selectedInstitute
+                  : (writableInstitutes[0]?.code ?? "")
+              }
               onDone={(message) => setSyncNotice(message)}
             />
           )}
@@ -640,13 +719,19 @@ function ComponentDetailPanel({
   backLabel,
   onBack,
   onOpen,
+  evidenceJobId,
+  pinnedTestType,
+  testIntentToken,
 }: {
   sn: string;
   backLabel: string;
   onBack: () => void;
   onOpen: (sn: string) => void;
+  evidenceJobId: number | null;
+  pinnedTestType: string | null;
+  testIntentToken: number;
 }) {
-  const { canWrite, showToast } = useAuth();
+  const { canWrite, user, showToast } = useAuth();
   const [detail, setDetail] = useState<ComponentDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -655,20 +740,58 @@ function ComponentDetailPanel({
   const [suggestion, setSuggestion] = useState<StageSuggestion | null>(null);
   const [evidenceSyncing, setEvidenceSyncing] = useState(false);
   const [evidenceNotice, setEvidenceNotice] = useState<string | null>(null);
+  const [previewMode] = useState<StagedPreviewMode>(() => readStagedPreviewPreference());
+  const [preview, setPreview] = useState<ComponentPreview | null>(null);
+  const [previewOutbox, setPreviewOutbox] = useState<OutboxAction[]>([]);
+  const [previewLoading, setPreviewLoading] = useState(true);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewTab, setPreviewTab] = useState<"current" | "staged">("current");
+  const [previewReloadKey, setPreviewReloadKey] = useState(0);
+  const [testSchemas, setTestSchemas] = useState<TestTypeSchema[]>([]);
+  const [testSchemasLoading, setTestSchemasLoading] = useState(false);
+  const [testSchemasSyncing, setTestSchemasSyncing] = useState(false);
+  const [testSchemasError, setTestSchemasError] = useState<string | null>(null);
+  const [testSchemasReloadKey, setTestSchemasReloadKey] = useState(0);
+  const testSchemaSyncRequest = useRef(0);
+  const currentTestSchemaComponentType = useRef<string | null>(null);
+  const seenEvidenceJob = useRef<number | null>(evidenceJobId);
+  const testSchemaComponentType = detail?.component_type ?? null;
+  currentTestSchemaComponentType.current = testSchemaComponentType;
+  const canWriteComponent =
+    canWrite &&
+    detail !== null &&
+    (user?.institute_code === null || user?.institute_code === detail.institute_code);
 
   async function handleSyncEvidence() {
     setEvidenceSyncing(true);
     setEvidenceNotice(null);
     try {
       const result = await postComponentSyncEvidence(sn);
-      setEvidenceNotice(t.components.syncEvidenceDone(result.created, result.total));
+      setEvidenceNotice(
+        t.components.syncEvidenceDone(
+          result.created,
+          result.total,
+          result.attachments_downloaded,
+          result.attachments_reused,
+          result.attachments_failed,
+          result.attachments_total,
+        ),
+      );
       setReloadKey((k) => k + 1); // re-evaluate the stage suggestion with new evidence
+      setPreviewReloadKey((key) => key + 1);
     } catch (err) {
       setEvidenceNotice(`${t.components.syncEvidenceFailed}: ${errorMessage(err)}`);
     } finally {
       setEvidenceSyncing(false);
     }
   }
+
+  useEffect(() => {
+    if (evidenceJobId === null || seenEvidenceJob.current === evidenceJobId) return;
+    seenEvidenceJob.current = evidenceJobId;
+    setReloadKey((key) => key + 1);
+    setPreviewReloadKey((key) => key + 1);
+  }, [evidenceJobId]);
 
   // Stage suggestion is a best-effort extra: hide the section when the backend
   // is offline or has no data for this component, without disturbing the detail.
@@ -682,6 +805,59 @@ function ComponentDetailPanel({
       });
     return () => ctrl.abort();
   }, [sn, reloadKey]);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setPreviewLoading(true);
+    setPreviewError(null);
+    Promise.all([
+      getComponentPreview(sn, ctrl.signal),
+      getComponentStaged(sn, ctrl.signal),
+    ])
+      .then(([previewData, staged]) => {
+        setPreview(previewData);
+        setPreviewOutbox(staged);
+        setPreviewLoading(false);
+      })
+      .catch((caught: unknown) => {
+        if (ctrl.signal.aborted) return;
+        setPreview(null);
+        setPreviewOutbox([]);
+        setPreviewError(errorMessage(caught));
+        setPreviewLoading(false);
+      });
+    return () => ctrl.abort();
+  }, [previewReloadKey, sn]);
+
+  useEffect(() => {
+    setPreviewTab("current");
+  }, [sn]);
+
+  useEffect(() => {
+    if ((preview?.staged_actions.length ?? 0) === 0) setPreviewTab("current");
+  }, [preview]);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setTestSchemas([]);
+    setTestSchemasError(null);
+    if (testSchemaComponentType === null || demo) {
+      setTestSchemasLoading(false);
+      return () => ctrl.abort();
+    }
+    setTestSchemasLoading(true);
+    getTestTypeSchemas(testSchemaComponentType, ctrl.signal)
+      .then((schemas) => {
+        setTestSchemas(schemas);
+        setTestSchemasLoading(false);
+      })
+      .catch((caught: unknown) => {
+        if (ctrl.signal.aborted) return;
+        setTestSchemasError(errorMessage(caught));
+        setTestSchemasLoading(false);
+      });
+    return () => ctrl.abort();
+  }, [demo, testSchemaComponentType, testSchemasReloadKey]);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -761,9 +937,59 @@ function ComponentDetailPanel({
       .catch(() => showToast(t.components.snCopyFailed));
   };
 
+  const stagedCount = preview?.staged_actions.length ?? 0;
+  const hasStagedPreview = preview !== null && stagedCount > 0;
+  const showingProjection =
+    hasStagedPreview &&
+    (previewMode === "inline" || (previewMode === "tabs" && previewTab === "staged"));
+  const displayedStage = showingProjection ? preview.projected.stage : detail.stage;
+
+  function refreshPreview() {
+    setPreviewReloadKey((key) => key + 1);
+  }
+
+  async function handleSyncTestSchemas(componentType: string) {
+    const requestId = ++testSchemaSyncRequest.current;
+    setTestSchemasSyncing(true);
+    setTestSchemasError(null);
+    try {
+      const result = await postTestTypeSchemaSync(componentType);
+      const schemas = await getTestTypeSchemas(componentType);
+      if (
+        requestId === testSchemaSyncRequest.current &&
+        currentTestSchemaComponentType.current === componentType
+      ) {
+        setTestSchemas(schemas);
+        showToast(t.addTest.schemasSynced(result.total));
+      }
+    } finally {
+      if (requestId === testSchemaSyncRequest.current) setTestSchemasSyncing(false);
+    }
+  }
+
   return (
     <div className="screen">
       {toolbar}
+      {previewMode === "tabs" && hasStagedPreview && (
+        <div className="preview-tabs" role="group" aria-label={t.components.previewTabsLabel}>
+          <button
+            type="button"
+            className={previewTab === "current" ? "preview-tab active" : "preview-tab"}
+            aria-pressed={previewTab === "current"}
+            onClick={() => setPreviewTab("current")}
+          >
+            {t.components.previewCurrent}
+          </button>
+          <button
+            type="button"
+            className={previewTab === "staged" ? "preview-tab active" : "preview-tab"}
+            aria-pressed={previewTab === "staged"}
+            onClick={() => setPreviewTab("staged")}
+          >
+            {t.components.previewStaged(stagedCount)}
+          </button>
+        </div>
+      )}
       <div className="detail-head">
         <h2 className="detail-title">{detail.local_name ?? detail.sn}</h2>
         <button
@@ -778,12 +1004,39 @@ function ComponentDetailPanel({
             ⧉
           </span>
         </button>
-        <span className={stageChipClass(detail.stage)} title={detail.stage}>
-          {stageLabel(detail.stage)}
-        </span>
+        {previewMode === "inline" && showingProjection && preview.current.stage !== displayedStage ? (
+          <span className="inline-stage-preview" aria-label={t.components.previewStageChange(
+            stageLabel(preview.current.stage),
+            stageLabel(displayedStage),
+          )}>
+            <span className={stageChipClass(preview.current.stage)} title={preview.current.stage}>
+              {stageLabel(preview.current.stage)}
+            </span>
+            <span className="preview-arrow" aria-hidden="true">→</span>
+            <span className="chip stage ghost-stage" title={displayedStage}>
+              {stageLabel(displayedStage)}
+            </span>
+          </span>
+        ) : (
+          <span
+            className={showingProjection ? "chip stage ghost-stage" : stageChipClass(displayedStage)}
+            title={displayedStage}
+          >
+            {stageLabel(displayedStage)}
+          </span>
+        )}
         {detail.is_dummy && <span className="chip muted">{t.components.dummy}</span>}
         {detail.trashed && <span className="chip red">{t.components.trashed}</span>}
       </div>
+      {previewMode !== "off" && previewLoading && (
+        <p className="state-note preview-state-note">{t.components.previewLoading}</p>
+      )}
+      {previewMode !== "off" && previewError !== null && (
+        <div className="info-banner" role="status">
+          <span>{t.components.previewLoadError}: {previewError}</span>
+          <button type="button" className="btn" onClick={refreshPreview}>{t.common.retry}</button>
+        </div>
+      )}
       <div className="det">
         <div className="det-col">
           <h3 className="section-title">{t.components.masterData}</h3>
@@ -843,7 +1096,7 @@ function ComponentDetailPanel({
           </div>
         </div>
         <div className="det-col">
-          {canWrite && (
+          {canWriteComponent && (
             <>
               <div className="toolbar">
                 <button
@@ -865,22 +1118,86 @@ function ComponentDetailPanel({
               )}
             </>
           )}
-          <StagedChangesSection sn={detail.sn} />
-          {suggestion !== null ? (
-            <StageSuggestionSection
-              suggestion={suggestion}
-              instituteCode={detail.institute_code}
-            />
-          ) : (
+          {canWriteComponent && !demo && (
             <>
-              <h3 className="section-title">{t.components.stageTitle}</h3>
-              <div className="panel">
-                <p className="state-note">{t.components.stageUnavailable}</p>
-              </div>
+              {testSchemasError !== null && (
+                <div className="info-banner" role="status">
+                  <span>{t.addTest.schemasLoadFailed}: {testSchemasError}</span>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => setTestSchemasReloadKey((key) => key + 1)}
+                  >
+                    {t.common.retry}
+                  </button>
+                </div>
+              )}
+              <AddTestResult
+                componentSn={detail.sn}
+                componentType={detail.component_type}
+                instituteCode={detail.institute_code}
+                labels={t.addTest}
+                schemas={testSchemas}
+                schemasLoading={testSchemasLoading}
+                schemasSyncing={testSchemasSyncing}
+                pinnedTestType={pinnedTestType ?? undefined}
+                intentToken={testIntentToken}
+                onSyncSchemas={handleSyncTestSchemas}
+                onRefresh={() => {
+                  setReloadKey((key) => key + 1);
+                  refreshPreview();
+                }}
+                onStaged={(action) => showToast(t.addTest.stagedToast(action.id))}
+              />
             </>
           )}
-          <TestResultsSection sn={detail.sn} canWrite={canWrite} />
-          <ImagesSection sn={detail.sn} />
+          {previewMode === "off" || preview === null ? (
+            <>
+              <StagedChangesSection sn={detail.sn} refreshKey={previewReloadKey} />
+              {suggestion !== null ? (
+                <StageSuggestionSection
+                  suggestion={suggestion}
+                  instituteCode={detail.institute_code}
+                  onStagedChanged={refreshPreview}
+                />
+              ) : (
+                <UnavailableStageSection />
+              )}
+              <TestResultsSection sn={detail.sn} refreshKey={reloadKey} />
+            </>
+          ) : showingProjection ? (
+            <>
+              <StagedActionsPanel
+                actions={preview.staged_actions}
+                outboxActions={previewOutbox}
+                canWrite={canWriteComponent}
+                onChanged={refreshPreview}
+              />
+              <ProjectedChecksSection
+                stage={preview.projected.stage}
+                checks={preview.projected.checks}
+              />
+              <TestResultsSection
+                sn={detail.sn}
+                refreshKey={reloadKey}
+                projectedRuns={preview.projected.tests}
+              />
+            </>
+          ) : (
+            <>
+              {suggestion !== null ? (
+                <StageSuggestionSection
+                  suggestion={suggestion}
+                  instituteCode={detail.institute_code}
+                  onStagedChanged={refreshPreview}
+                />
+              ) : (
+                <UnavailableStageSection />
+              )}
+              <TestResultsSection sn={detail.sn} refreshKey={reloadKey} />
+            </>
+          )}
+          <ImagesSection sn={detail.sn} refreshKey={reloadKey} />
         </div>
       </div>
     </div>
@@ -890,7 +1207,7 @@ function ComponentDetailPanel({
 /** Ghost layer: outbox actions staged for this component but not yet pushed to
  * the PDB. Closes the loop with "Propose stage move" — a proposal appears here
  * immediately, rendered as a dashed "ghost" row, until it is confirmed. */
-function StagedChangesSection({ sn }: { sn: string }) {
+function StagedChangesSection({ sn, refreshKey }: { sn: string; refreshKey: number }) {
   const [staged, setStaged] = useState<OutboxAction[] | null>(null);
 
   useEffect(() => {
@@ -900,7 +1217,7 @@ function StagedChangesSection({ sn }: { sn: string }) {
       .then(setStaged)
       .catch(() => setStaged([])); // offline / none: show the empty state
     return () => ctrl.abort();
-  }, [sn]);
+  }, [refreshKey, sn]);
 
   function summarize(action: OutboxAction): string {
     const p = action.payload ?? {};
@@ -937,6 +1254,196 @@ function StagedChangesSection({ sn }: { sn: string }) {
   );
 }
 
+function StagedActionsPanel({
+  actions,
+  outboxActions,
+  canWrite,
+  onChanged,
+}: {
+  actions: ComponentPreviewAction[];
+  outboxActions: OutboxAction[];
+  canWrite: boolean;
+  onChanged: () => void;
+}) {
+  const { user, showToast } = useAuth();
+  const [busy, setBusy] = useState<{ id: number; kind: "push" | "discard" } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  function fullAction(id: number): OutboxAction | undefined {
+    return outboxActions.find((action) => action.id === id);
+  }
+
+  async function handlePush(metadata: ComponentPreviewAction) {
+    const action = fullAction(metadata.id);
+    if (action === undefined) {
+      setNotice(t.components.previewActionUnavailable);
+      return;
+    }
+    setBusy({ id: metadata.id, kind: "push" });
+    setNotice(null);
+    try {
+      await pushToPdb(action, user?.email ?? "ui-user");
+      showToast(t.components.previewPushed(metadata.summary));
+      onChanged();
+    } catch (caught) {
+      setNotice(`${t.components.previewPushFailed}: ${errorMessage(caught)}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleDiscard(metadata: ComponentPreviewAction) {
+    const action = fullAction(metadata.id);
+    if (action === undefined) {
+      setNotice(t.components.previewActionUnavailable);
+      return;
+    }
+    setBusy({ id: metadata.id, kind: "discard" });
+    setNotice(null);
+    try {
+      await discardStagedAction(action, user?.email ?? "ui-user");
+      showToast(t.components.previewDiscarded(metadata.summary));
+      onChanged();
+    } catch (caught) {
+      setNotice(`${t.components.previewDiscardFailed}: ${errorMessage(caught)}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <>
+      <h3 className="section-title">{t.components.stagedTitle}</h3>
+      <div className="panel projected-panel">
+        {actions.length === 0 ? (
+          <p className="state-note">{t.components.stagedEmpty}</p>
+        ) : (
+          <ul className="ghost-list staged-action-list" title={t.components.stagedGhostHint}>
+            {actions.map((metadata) => {
+              const action = fullAction(metadata.id);
+              const pushing = busy?.id === metadata.id && busy.kind === "push";
+              const discarding = busy?.id === metadata.id && busy.kind === "discard";
+              return (
+                <li className="ghost-row staged-action-row" key={metadata.id}>
+                  <div className="staged-action-main">
+                    <span className="chip stage">{metadata.kind}</span>
+                    <strong className="ghost-summary">{metadata.summary}</strong>
+                    <span className={statusChip(metadata.status)}>
+                      {t.components.previewStatuses[metadata.status]}
+                    </span>
+                  </div>
+                  <div className="staged-action-meta">
+                    <span>{t.components.previewCreatedBy(metadata.created_by)}</span>
+                    <span className="mono muted">{formatTimestamp(metadata.created_at)}</span>
+                  </div>
+                  {!metadata.submittable && (
+                    <p className="staged-scope-hint">
+                      {metadata.submittable_reason === "not_dummy"
+                        ? t.components.previewDummyOnly
+                        : t.components.previewScopeUnavailable}
+                    </p>
+                  )}
+                  {canWrite && (
+                    <div className="staged-action-buttons">
+                      {metadata.submittable && action !== undefined && canPush(action.status) && (
+                        <button
+                          type="button"
+                          className="btn primary"
+                          disabled={busy !== null}
+                          onClick={() => void handlePush(metadata)}
+                        >
+                          {pushing ? t.components.previewPushing : t.components.previewPush}
+                        </button>
+                      )}
+                      {action !== undefined && canDiscard(action.status) && (
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={busy !== null}
+                          onClick={() => void handleDiscard(metadata)}
+                        >
+                          {discarding ? t.components.previewDiscarding : t.components.previewDiscard}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {notice !== null && <p className="state-note">{notice}</p>}
+      </div>
+    </>
+  );
+}
+
+const PREVIEW_CHECK_CLASS: Record<PreviewRequirementCheck["status"], string> = {
+  passed: "chip green",
+  failed: "chip red",
+  missing: "chip amber",
+  pending: "chip queued",
+};
+
+function previewCheckLabel(status: PreviewRequirementCheck["status"]): string {
+  if (status === "passed") return t.components.stagePassed;
+  if (status === "failed") return t.components.stageFailed;
+  if (status === "missing") return t.components.stageMissing;
+  return t.components.previewPending;
+}
+
+function ProjectedChecksSection({
+  stage,
+  checks,
+}: {
+  stage: string;
+  checks: PreviewRequirementCheck[];
+}) {
+  return (
+    <>
+      <h3 className="section-title">{t.components.previewProjectedChecks}</h3>
+      <div className="panel projected-panel">
+        <div className="projected-stage-line">
+          <span>{t.components.previewProjectedStage}</span>
+          <span className="chip stage ghost-stage" title={stage}>{stageLabel(stage)}</span>
+        </div>
+        {checks.length === 0 ? (
+          <p className="state-note">{t.components.stageNoRequirements}</p>
+        ) : (
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th scope="col">{t.components.stageColTest}</th>
+                <th scope="col">{t.components.stageColStage}</th>
+                <th scope="col">{t.components.stageColStatus}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {checks.map((check) => (
+                <tr className={check.status === "pending" ? "ghost-check-row" : undefined} key={`${check.stage}:${check.test_type}`}>
+                  <td className="mono">{check.test_type}</td>
+                  <td><span className={stageChipClass(check.stage)} title={check.stage}>{stageLabel(check.stage)}</span></td>
+                  <td><span className={PREVIEW_CHECK_CLASS[check.status]}>{previewCheckLabel(check.status)}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <div className="callout preview-callout">{t.components.previewProjectionHint}</div>
+      </div>
+    </>
+  );
+}
+
+function UnavailableStageSection() {
+  return (
+    <>
+      <h3 className="section-title">{t.components.stageTitle}</h3>
+      <div className="panel"><p className="state-note">{t.components.stageUnavailable}</p></div>
+    </>
+  );
+}
+
 function statusChip(status: string): string {
   if (status === "confirmed") return "chip green";
   if (status === "failed") return "chip red";
@@ -944,27 +1451,28 @@ function statusChip(status: string): string {
   return "chip amber"; // draft / validated / approved / submitted are in-flight
 }
 
-/** Metrology / visual-inspection images for a component, pulled from the PDB.
- * Best-effort: shows a thumbnail grid with a click-to-enlarge lightbox, an
- * empty state, and a gentle offline hint when the backend is not reachable. */
-function ImagesSection({ sn }: { sn: string }) {
-  const [images, setImages] = useState<ComponentImage[]>([]);
+/** Locally mirrored metrology / visual-inspection images for a component.
+ * The detail view never streams from the PDB; evidence sync owns the bytes. */
+function ImagesSection({ sn, refreshKey }: { sn: string; refreshKey: number }) {
+  const [images, setImages] = useState<TestRunAttachment[]>([]);
   const [offline, setOffline] = useState(false);
-  const [lightbox, setLightbox] = useState<ComponentImage | null>(null);
+  const [lightbox, setLightbox] = useState<TestRunAttachment | null>(null);
 
   useEffect(() => {
     const ctrl = new AbortController();
     setImages([]);
     setOffline(false);
     setLightbox(null);
-    getComponentImages(sn, ctrl.signal)
-      .then(setImages)
+    getComponentAttachments(sn, ctrl.signal)
+      .then((attachments) =>
+        setImages(attachments.filter((attachment) => attachment.stored && attachment.is_image)),
+      )
       .catch((err: unknown) => {
         if (ctrl.signal.aborted) return;
         if (err instanceof ApiError && err.isNetwork) setOffline(true);
       });
     return () => ctrl.abort();
-  }, [sn]);
+  }, [refreshKey, sn]);
 
   return (
     <>
@@ -980,34 +1488,22 @@ function ImagesSection({ sn }: { sn: string }) {
               <button
                 type="button"
                 className="img-thumb"
-                key={img.id}
-                title={img.test_type ?? img.title}
+                key={img.code}
+                title={img.title ?? img.filename ?? img.test_type}
                 onClick={() => setLightbox(img)}
               >
                 <img
-                  src={componentImageUrl(sn, img.id, img.test_run_ref)}
-                  alt={img.title || t.images.untitled}
+                  src={componentAttachmentUrl(sn, img.code)}
+                  alt={img.title ?? img.filename ?? t.images.untitled}
                 />
-                {img.test_type !== null && <span className="img-tag">{img.test_type}</span>}
+                <span className="img-tag">{img.test_type}</span>
               </button>
             ))}
           </div>
         )}
       </div>
       {lightbox !== null && (
-        <div className="img-lightbox" role="dialog" aria-modal="true" onClick={() => setLightbox(null)}>
-          <button type="button" className="img-lightbox-close" aria-label={t.images.close}>
-            ×
-          </button>
-          <img
-            src={componentImageUrl(sn, lightbox.id, lightbox.test_run_ref)}
-            alt={lightbox.title || t.images.untitled}
-          />
-          <div className="img-lightbox-cap">
-            {lightbox.test_type ? `${lightbox.test_type} · ` : ""}
-            {lightbox.filename ?? lightbox.title}
-          </div>
-        </div>
+        <ImageLightbox sn={sn} attachment={lightbox} onClose={() => setLightbox(null)} />
       )}
     </>
   );
@@ -1028,11 +1524,16 @@ const STATUS_LABEL: Record<RequirementCheck["status"], string> = {
 function StageSuggestionSection({
   suggestion,
   instituteCode,
+  onStagedChanged,
 }: {
   suggestion: StageSuggestion;
   instituteCode: string;
+  onStagedChanged: () => void;
 }) {
   const { canWrite, user } = useAuth();
+  const canWriteInstitute =
+    canWrite &&
+    (user?.institute_code === null || user?.institute_code === instituteCode);
   const [notice, setNotice] = useState<string | null>(null);
   const [proposing, setProposing] = useState(false);
   const [proposed, setProposed] = useState(false);
@@ -1054,6 +1555,7 @@ function StageSuggestionSection({
       });
       setProposed(true);
       setNotice(t.components.stageProposed(action.id, stageLabel(suggestion.suggested_stage)));
+      onStagedChanged();
     } catch (err) {
       setNotice(`${t.components.stageProposeFailed}: ${errorMessage(err)}`);
     } finally {
@@ -1101,7 +1603,9 @@ function StageSuggestionSection({
                 ? t.components.stageNoNext
                 : t.components.stageBlocked}
           </span>
-          {canWrite && suggestion.move_suggested && suggestion.suggested_stage !== null && (
+          {canWriteInstitute &&
+            suggestion.move_suggested &&
+            suggestion.suggested_stage !== null && (
             <button
               className="btn primary"
               type="button"

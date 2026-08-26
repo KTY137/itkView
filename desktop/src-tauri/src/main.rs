@@ -119,8 +119,31 @@ fn stop_server(app: &AppHandle) {
     let child = state.0.lock().ok().and_then(|mut guard| guard.take());
     if let Some(child) = child {
         // Without this the backend keeps running headless after the window is
-        // gone, holding the database and the port.
-        let _ = child.kill();
+        // gone, holding the database and the port. The sidecar is a PyInstaller
+        // onefile bundle: the spawned process is only the bootstrap, which
+        // re-executes itself as the real server — killing the bootstrap alone
+        // orphans that child, so the whole process tree has to go.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let tree_killed = std::process::Command::new("taskkill")
+                .args(["/PID", &child.pid().to_string(), "/T", "/F"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if !tree_killed {
+                let _ = child.kill();
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            // PyInstaller onefile forks the same bootstrap/child pair on unix;
+            // a real unix build needs a process-group kill (setsid/killpg) or
+            // it re-creates the orphaned-server bug fixed above for Windows.
+            let _ = child.kill();
+        }
     }
 }
 

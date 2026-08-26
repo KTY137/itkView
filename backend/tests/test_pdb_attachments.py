@@ -83,18 +83,18 @@ def test_fetch_binary_none_when_not_configured():
     assert fetch_image_binary(_FakeGateway(configured=False), "SN", "M1") is None
 
 
-def test_images_endpoint_empty_without_pdb(client: TestClient):
-    # Test settings have no access codes -> gateway inert -> graceful empty list.
-    assert client.get("/api/components/20USEM00000001/images").json() == []
+def test_images_endpoint_requires_personal_pdb_connection(client: TestClient, as_viewer):
+    response = client.get("/api/components/20USEM00000001/images")
+    assert response.status_code == 409
 
 
-def test_images_endpoint_with_injected_gateway(client: TestClient):
+def test_images_endpoint_with_injected_gateway(client: TestClient, as_viewer):
     client.app.state.pdb_gateway = _FakeGateway(component=COMPONENT)
     body = client.get("/api/components/20USEM00000001/images").json()
     assert {img["id"] for img in body} == {"A1", "M1", "V1"}
 
 
-def test_image_binary_endpoint_streams(client: TestClient):
+def test_image_binary_endpoint_streams(client: TestClient, as_viewer):
     client.app.state.pdb_gateway = _FakeGateway(binary=_FakeResponse(b"PNGDATA", "image/png"))
     resp = client.get("/api/components/SN/images/M1")
     assert resp.status_code == 200
@@ -102,6 +102,7 @@ def test_image_binary_endpoint_streams(client: TestClient):
     assert resp.headers["content-type"].startswith("image/png")
 
 
-def test_image_binary_endpoint_404_when_missing(client: TestClient):
+def test_image_binary_endpoint_404_when_missing(client: TestClient, as_viewer):
+    client.app.state.pdb_gateway = _FakeGateway(binary=None)
     resp = client.get("/api/components/SN/images/NOPE")
     assert resp.status_code == 404

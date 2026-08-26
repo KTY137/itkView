@@ -17,11 +17,18 @@ import {
   ApiError,
   componentAttachmentUrl,
   getComponentTests,
-  postComponentAttachmentSync,
+  type ComponentPreviewTest,
   type TestRunAttachment,
   type TestRunDetail,
 } from "./api";
 import { t } from "./i18n";
+import ImageLightbox from "./ImageLightbox";
+
+type DisplayTestRun = TestRunDetail | ComponentPreviewTest;
+
+function isGhostRun(run: DisplayTestRun): run is ComponentPreviewTest {
+  return "ghost" in run && run.ghost;
+}
 
 /** A measured value that is a numeric array — an IV sweep and friends. */
 function asNumericArray(value: unknown): number[] | null {
@@ -112,12 +119,12 @@ function CurvePlot({ xs, ys, xLabel, yLabel }: {
   );
 }
 
-function label(run: TestRunDetail, code: string): string {
+function label(run: DisplayTestRun, code: string): string {
   return run.result_meta[code]?.name ?? code;
 }
 
 /** Curves first: an IV sweep is the point of the run, the scalars are context. */
-function RunCurves({ run }: { run: TestRunDetail }) {
+function RunCurves({ run }: { run: DisplayTestRun }) {
   const arrays = Object.entries(run.results)
     .map(([code, value]) => [code, asNumericArray(value)] as const)
     .filter((entry): entry is readonly [string, number[]] => entry[1] !== null);
@@ -156,7 +163,7 @@ function RunCurves({ run }: { run: TestRunDetail }) {
   );
 }
 
-function RunScalars({ run }: { run: TestRunDetail }) {
+function RunScalars({ run }: { run: DisplayTestRun }) {
   const scalars = Object.entries(run.results).filter(([, value]) => asNumericArray(value) === null);
   if (scalars.length === 0) return null;
 
@@ -174,7 +181,7 @@ function RunScalars({ run }: { run: TestRunDetail }) {
   );
 }
 
-function RunConditions({ run }: { run: TestRunDetail }) {
+function RunConditions({ run }: { run: DisplayTestRun }) {
   const entries = Object.entries(run.properties).filter(
     ([, value]) => value !== null && value !== undefined && value !== "",
   );
@@ -231,11 +238,17 @@ function RunAttachments({ sn, attachments, onOpen }: {
   );
 }
 
-export function TestResultsSection({ sn, canWrite }: { sn: string; canWrite: boolean }) {
-  const [runs, setRuns] = useState<TestRunDetail[] | null>(null);
+export function TestResultsSection({
+  sn,
+  refreshKey = 0,
+  projectedRuns,
+}: {
+  sn: string;
+  refreshKey?: number;
+  projectedRuns?: ComponentPreviewTest[];
+}) {
+  const [runs, setRuns] = useState<DisplayTestRun[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [syncing, setSyncing] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<TestRunAttachment | null>(null);
 
   function load(signal?: AbortSignal) {
@@ -253,29 +266,17 @@ export function TestResultsSection({ sn, canWrite }: { sn: string; canWrite: boo
 
   useEffect(() => {
     const ctrl = new AbortController();
-    setRuns(null);
-    setNotice(null);
     setLightbox(null);
+    if (projectedRuns !== undefined) {
+      setRuns(projectedRuns);
+      setError(null);
+      return () => ctrl.abort();
+    }
+    setRuns(null);
     void load(ctrl.signal);
     return () => ctrl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sn]);
-
-  async function handleSyncAttachments() {
-    setSyncing(true);
-    setNotice(null);
-    try {
-      const result = await postComponentAttachmentSync(sn);
-      setNotice(t.images.syncDone(result.downloaded, result.total));
-      await load();
-    } catch (err: unknown) {
-      setNotice(err instanceof ApiError ? err.message : t.images.syncFailed);
-    } finally {
-      setSyncing(false);
-    }
-  }
-
-  const hasAttachments = (runs ?? []).some((run) => run.attachments.length > 0);
+  }, [projectedRuns, refreshKey, sn]);
 
   return (
     <>
@@ -291,71 +292,69 @@ export function TestResultsSection({ sn, canWrite }: { sn: string; canWrite: boo
           </p>
         ) : (
           <>
-            {canWrite && hasAttachments && (
-              <div className="toolbar">
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={syncing}
-                  onClick={() => void handleSyncAttachments()}
-                >
-                  {syncing ? t.images.syncingAttachments : t.images.syncAttachments}
-                </button>
-              </div>
-            )}
-            {notice !== null && (
-              <div className="info-banner" role="status">
-                <span>{notice}</span>
-                <button type="button" className="btn" onClick={() => setNotice(null)}>
-                  OK
-                </button>
-              </div>
-            )}
             <ul className="run-list">
-              {runs.map((run) => (
-                <li className="run" key={`${run.test_type}-${run.external_ref ?? "x"}`}>
+              {runs.map((run, index) => {
+                const ghost = isGhostRun(run);
+                return (
+                <li
+                  className={ghost ? "run ghost-run" : "run"}
+                  key={
+                    ghost
+                      ? `${run.test_type}-ghost-${run.outbox_action_id ?? index}`
+                      : `${run.test_type}-${run.external_ref ?? index}`
+                  }
+                >
                   <div className="run-head">
                     <strong className="run-type">{run.test_type}</strong>
-                    <span className={run.passed ? "chip green" : "chip red"}>
-                      {run.passed ? t.testResults.passed : t.testResults.failed}
+                    <span
+                      className={
+                        ghost
+                          ? "chip amber"
+                          : run.passed === true
+                            ? "chip green"
+                            : run.passed === false
+                              ? "chip red"
+                              : "chip neutral"
+                      }
+                    >
+                      {ghost
+                        ? t.testResults.staged
+                        : run.passed === true
+                          ? t.testResults.passed
+                          : run.passed === false
+                            ? t.testResults.failed
+                            : t.testResults.pending}
                     </span>
                     {run.run_number !== null && (
-                      <span className="chip muted">{t.testResults.runNumber(run.run_number)}</span>
+                      <span className="chip muted">
+                        {t.testResults.runNumber(String(run.run_number))}
+                      </span>
                     )}
-                    <span className="muted run-date">{formatTimestamp(run.measured_at)}</span>
+                    <span className="muted run-date">
+                      {ghost && run.measured_at === null
+                        ? t.testResults.awaitingSubmission
+                        : formatTimestamp(run.measured_at)}
+                    </span>
                   </div>
                   <RunCurves run={run} />
                   <RunScalars run={run} />
                   {Object.keys(run.results).length === 0 && (
-                    <p className="state-note">{t.testResults.noValues}</p>
+                    <p className="state-note">
+                      {ghost ? t.testResults.stagedHint : t.testResults.noValues}
+                    </p>
                   )}
                   <RunAttachments sn={sn} attachments={run.attachments} onOpen={setLightbox} />
                   <RunConditions run={run} />
                 </li>
-              ))}
+                );
+              })}
             </ul>
           </>
         )}
       </div>
 
       {lightbox !== null && (
-        <div
-          className="img-lightbox"
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setLightbox(null)}
-        >
-          <button type="button" className="img-lightbox-close" aria-label={t.images.close}>
-            ×
-          </button>
-          <img
-            src={componentAttachmentUrl(sn, lightbox.code)}
-            alt={lightbox.title ?? lightbox.filename ?? t.images.untitled}
-          />
-          <div className="img-lightbox-cap">
-            {lightbox.test_type} · {lightbox.filename ?? lightbox.code}
-          </div>
-        </div>
+        <ImageLightbox sn={sn} attachment={lightbox} onClose={() => setLightbox(null)} />
       )}
     </>
   );

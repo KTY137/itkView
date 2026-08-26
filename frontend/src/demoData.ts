@@ -1,12 +1,19 @@
 import { OUTBOX_STATUSES } from "./api";
 import type {
+  AssemblyDraft,
+  AssemblyPreview,
   ComponentDetail,
   ComponentOut,
   CountBucket,
   DashboardSummary,
+  GlueBatch,
+  GlueUsage,
   IngestFile,
+  NotificationChannel,
   OutboxAction,
   ProductionStats,
+  Reminder,
+  Shipment,
   StatsDimensions,
   Tool,
 } from "./api";
@@ -136,8 +143,22 @@ export const DEMO_COMPONENTS: ComponentOut[] = [
     sn: "20USBML9990001",
     local_name: "TUDO-DUMMY-M-01",
     component_type: "MODULE",
-    type_code: "BML",
-    stage: "TESTED",
+    type_code: "R5M0",
+    stage: "GLUED",
+    location: "TUDO",
+    institute_code: "TUDO",
+    parent_sn: null,
+    is_dummy: true,
+    trashed: false,
+    stale: false,
+    synced_at: SYNCED,
+  },
+  {
+    sn: "20USBHL9990002",
+    local_name: "TUDO-DUMMY-H-02",
+    component_type: "HYBRID",
+    type_code: "R5H0",
+    stage: "READY",
     location: "TUDO",
     institute_code: "TUDO",
     parent_sn: null,
@@ -185,6 +206,46 @@ export function getDemoComponent(sn: string): ComponentDetail | null {
     ...found,
     children: DEMO_COMPONENTS.filter((c) => c.parent_sn === found.sn),
   };
+}
+
+const DEMO_STAGED_ASSEMBLIES: OutboxAction[] = [];
+
+export function stageDemoAssemblyAction(
+  draft: AssemblyDraft,
+  preview: AssemblyPreview,
+): OutboxAction {
+  const timestamp = new Date().toISOString();
+  const action: OutboxAction = {
+    id: 8_000 + DEMO_STAGED_ASSEMBLIES.length,
+    institute_id: 1,
+    kind: "assemble_component",
+    payload: {
+      ...draft,
+      expected_parent_component_type: preview.parent?.component_type,
+      expected_parent_type_code: preview.parent?.type_code,
+      expected_parent_stage: preview.parent?.stage,
+      expected_parent_location: preview.parent?.location,
+      expected_parent_institute_code: preview.parent?.institute_code,
+      expected_child_component_type: preview.child?.component_type,
+      expected_child_type_code: preview.child?.type_code,
+      expected_child_parent_sn: preview.child?.parent_sn,
+      expected_child_location: preview.child?.location,
+      expected_child_institute_code: preview.child?.institute_code,
+      expected_tool_code: preview.tool?.code,
+      expected_glue_batch_no: preview.glue_batch?.batch_no,
+      pdb_properties: preview.pdb_properties,
+      dry_run_required: true,
+    },
+    status: "draft",
+    error: null,
+    attempts: 0,
+    created_by: "demo.operator@example.org",
+    external_ref: null,
+    created_at: timestamp,
+    updated_at: timestamp,
+  };
+  DEMO_STAGED_ASSEMBLIES.push(action);
+  return { ...action, payload: { ...action.payload } };
 }
 
 /** Fresh copy of the demo outbox so local (demo) transitions can mutate it. */
@@ -281,6 +342,23 @@ export function makeDemoOutbox(): OutboxAction[] {
       created_at: "2026-07-07T13:10:00Z",
       updated_at: "2026-07-07T13:15:00Z",
     },
+    {
+      id: 108,
+      institute_id: 1,
+      kind: "stage_move",
+      payload: { sn: "20USBML9990001", to_stage: "FINISHED" },
+      status: "draft",
+      error: null,
+      attempts: 0,
+      created_by: "anna.abel",
+      external_ref: null,
+      created_at: "2026-07-08T07:20:00Z",
+      updated_at: "2026-07-08T07:20:00Z",
+    },
+    ...DEMO_STAGED_ASSEMBLIES.map((action) => ({
+      ...action,
+      payload: { ...action.payload },
+    })),
   ];
 }
 
@@ -333,8 +411,15 @@ const DEMO_TOOLS: Tool[] = [
   ...spec,
 }));
 
+export function makeDemoTools(): Tool[] {
+  return DEMO_TOOLS.map((tool) => ({
+    ...tool,
+    compatible_types: [...tool.compatible_types],
+  }));
+}
+
 export function filterDemoTools(kind: string, fits: string): Tool[] {
-  return DEMO_TOOLS.filter(
+  return makeDemoTools().filter(
     (tool) =>
       (kind === "" || tool.kind === kind) &&
       (fits === "" || tool.compatible_types.includes(fits)),
@@ -345,11 +430,86 @@ export function filterDemoTools(kind: string, fits: string): Tool[] {
 export function scanDemoTool(code: string): Tool | null {
   const needle = code.trim().toUpperCase();
   return (
-    DEMO_TOOLS.find(
+    makeDemoTools().find(
       (tool) =>
         tool.code.toUpperCase() === needle || (tool.rfid ?? "").toUpperCase() === needle,
     ) ?? null
   );
+}
+
+export function scanDemoComponent(code: string): ComponentOut | null {
+  const needle = code.trim().toUpperCase();
+  return (
+    DEMO_COMPONENTS.find(
+      (component) =>
+        component.sn.toUpperCase() === needle ||
+        (component.local_name ?? "").toUpperCase() === needle,
+    ) ?? null
+  );
+}
+
+export function makeDemoAssemblyPreview(
+  parent: ComponentOut,
+  child: ComponentOut,
+  tool: Tool,
+  glue: GlueBatch | null,
+  slot: string,
+): AssemblyPreview {
+  const issues: AssemblyPreview["issues"] = [];
+  const safeTypes = new Set(["MODULE", "HYBRID"]);
+  if (!safeTypes.has(parent.component_type)) {
+    issues.push({ code: "parent_type_not_allowed", message: "Parent must be a module or hybrid." });
+  }
+  if (!safeTypes.has(child.component_type)) {
+    issues.push({
+      code: "child_type_not_allowed",
+      message: "Child must be a module or hybrid; sensors and ASICs are never written.",
+    });
+  }
+  if (parent.sn === child.sn) {
+    issues.push({ code: "same_component", message: "A component cannot contain itself." });
+  }
+  if (child.parent_sn !== null) {
+    issues.push({ code: "child_has_parent", message: `Child is already in ${child.parent_sn}.` });
+  }
+  if (tool.status !== "active") {
+    issues.push({ code: "tool_not_active", message: "Only an active tool may be used." });
+  }
+  if (!tool.compatible_types.includes(parent.type_code)) {
+    issues.push({ code: "tool_incompatible", message: `Tool does not fit ${parent.type_code}.` });
+  }
+  if (glue !== null && (glue.status !== "in_use" || glue.pot_life_expired)) {
+    issues.push({ code: "glue_unavailable", message: "Glue batch is not usable." });
+  }
+  const valid = issues.length === 0 && slot.trim() !== "";
+  const submittable = valid && parent.is_dummy && child.is_dummy;
+  return {
+    valid,
+    submittable,
+    submittable_reason: valid && !submittable ? "not_dummy" : valid ? null : "validation_failed",
+    summary: `Assemble ${child.sn} into ${parent.sn} at ${slot}`,
+    slot,
+    parent,
+    child,
+    tool,
+    glue_batch:
+      glue === null
+        ? null
+        : {
+            id: glue.id,
+            glue_type: glue.glue_type,
+            batch_no: glue.batch_no,
+            pdb_sn: glue.pdb_sn,
+            status: glue.status,
+            mixed_at: glue.mixed_at,
+            pot_life_minutes: glue.pot_life_minutes,
+            pot_life_remaining_seconds: glue.pot_life_remaining_seconds,
+            pot_life_expired: glue.pot_life_expired,
+          },
+    pdb_properties: {},
+    issues,
+    warnings: [],
+  };
 }
 
 function buckets(values: string[]): CountBucket[] {
@@ -447,4 +607,256 @@ export function makeDemoDashboardSummary(): DashboardSummary {
     by_institute: buckets(DEMO_COMPONENTS.map((c) => c.institute_code)),
     outbox_by_status: orderBuckets(buckets(outbox.map((a) => a.status)), [...OUTBOX_STATUSES]),
   };
+}
+
+// ---- Glue batches / shipments / reminders (Phase 4 demo fallback) ------------
+
+export function makeDemoGlueBatches(): GlueBatch[] {
+  const now = Date.now();
+  return [
+    {
+      id: 1,
+      glue_type: "POLARIS_EPOXY",
+      batch_no: "PX41A9F2K0",
+      pdb_sn: "20USEGT0000098",
+      status: "in_use",
+      manufacturing_date: "2026-05-02T00:00:00Z",
+      expiry_date: "2027-05-02T00:00:00Z",
+      opening_date: "2026-08-20T08:00:00Z",
+      bipack_count: 12,
+      note: null,
+      mixed_at: new Date(now - 10 * 60_000).toISOString(),
+      pot_life_minutes: 45,
+      institute_id: 1,
+      created_at: "2026-08-20T08:00:00Z",
+      pot_life_remaining_seconds: 35 * 60,
+      pot_life_expired: false,
+      usage_count: 3,
+    },
+    {
+      id: 2,
+      glue_type: "TRUE_BLUE",
+      batch_no: "TB77C1D4M8",
+      pdb_sn: null,
+      status: "new",
+      manufacturing_date: "2026-06-15T00:00:00Z",
+      expiry_date: "2026-12-15T00:00:00Z",
+      opening_date: null,
+      bipack_count: 6,
+      note: "Reserve for R5 modules",
+      mixed_at: null,
+      pot_life_minutes: null,
+      institute_id: 1,
+      created_at: "2026-08-22T09:30:00Z",
+      pot_life_remaining_seconds: null,
+      pot_life_expired: false,
+      usage_count: 0,
+    },
+    {
+      id: 3,
+      glue_type: "LOCTITE_3525",
+      batch_no: "LC90B2E1Q5",
+      pdb_sn: null,
+      status: "empty",
+      manufacturing_date: "2026-02-01T00:00:00Z",
+      expiry_date: "2026-08-01T00:00:00Z",
+      opening_date: "2026-03-12T00:00:00Z",
+      bipack_count: 0,
+      note: null,
+      mixed_at: "2026-07-30T10:00:00Z",
+      pot_life_minutes: 30,
+      institute_id: 1,
+      created_at: "2026-02-05T10:00:00Z",
+      pot_life_remaining_seconds: 0,
+      pot_life_expired: true,
+      usage_count: 18,
+    },
+  ];
+}
+
+export function filterDemoGlueBatches(status: string, glueType: string, q: string): GlueBatch[] {
+  const needle = q.trim().toLowerCase();
+  return makeDemoGlueBatches().filter(
+    (b) =>
+      (status === "" || b.status === status) &&
+      (glueType === "" || b.glue_type === glueType) &&
+      (needle === "" ||
+        b.batch_no.toLowerCase().includes(needle) ||
+        (b.pdb_sn ?? "").toLowerCase().includes(needle) ||
+        b.glue_type.toLowerCase().includes(needle)),
+  );
+}
+
+export function makeDemoGlueUsage(batchId: number): GlueUsage[] {
+  if (batchId !== 1) return [];
+  return [
+    {
+      id: 1,
+      glue_batch_id: 1,
+      component_sn: "20USEM00000435",
+      amount_mg: 135.2,
+      note: null,
+      used_by: "anna.abel@example.org",
+      used_at: "2026-08-24T09:12:00Z",
+    },
+    {
+      id: 2,
+      glue_batch_id: 1,
+      component_sn: "20USEM00000436",
+      amount_mg: 128.7,
+      note: "Rework",
+      used_by: "anna.abel@example.org",
+      used_at: "2026-08-24T11:40:00Z",
+    },
+  ];
+}
+
+export function makeDemoShipments(): Shipment[] {
+  return [
+    {
+      id: 1,
+      pdb_id: "68a1demo01",
+      name: "Hybrid panel delivery",
+      sender_code: "DESYZ",
+      recipient_code: "TUDO",
+      status: "inTransit",
+      direction: "incoming",
+      sent_at: "2026-08-21T14:00:00Z",
+      items: [
+        {
+          sn: "20USEH00000101",
+          component_type: "HYBRID",
+          component_mirrored: true,
+          is_dummy: true,
+          submittable: true,
+          submittable_reason: null,
+          reception_tests_configured: true,
+          reception_test_status: "missing",
+          reception_tests: [{ test_type: "HYBRID_RECEPTION", status: "missing" }],
+        },
+        {
+          sn: "20USEH00000102",
+          component_type: "HYBRID",
+          component_mirrored: true,
+          is_dummy: false,
+          submittable: false,
+          submittable_reason: "not_dummy",
+          reception_tests_configured: true,
+          reception_test_status: "pending",
+          reception_tests: [{ test_type: "HYBRID_RECEPTION", status: "pending" }],
+        },
+      ],
+      institute_id: 1,
+      synced_at: "2026-08-25T07:00:00Z",
+      reception_status: "pending",
+      reception_checklist: [
+        { label: "Packaging intact", done: false },
+        { label: "Contents match the shipment list", done: false },
+        { label: "No visible damage", done: false },
+      ],
+      reception_items: [],
+      reception_note: null,
+      reception_by: null,
+      reception_updated_at: null,
+      reception_tests_configured: true,
+      reception_test_status: "pending",
+    },
+    {
+      id: 2,
+      pdb_id: "68a1demo02",
+      name: "Finished modules to loading site",
+      sender_code: "TUDO",
+      recipient_code: "AVS",
+      status: "delivered",
+      direction: "outgoing",
+      sent_at: "2026-08-10T09:00:00Z",
+      items: [
+        {
+          sn: "20USEM00000399",
+          component_type: "MODULE",
+          component_mirrored: true,
+          is_dummy: false,
+          submittable: false,
+          submittable_reason: "not_dummy",
+          reception_tests_configured: false,
+          reception_test_status: "passed",
+          reception_tests: [],
+        },
+      ],
+      institute_id: 1,
+      synced_at: "2026-08-25T07:00:00Z",
+      reception_status: "done",
+      reception_checklist: [
+        { label: "Packaging intact", done: true },
+        { label: "Contents match the shipment list", done: true },
+        { label: "No visible damage", done: true },
+      ],
+      reception_items: [{ sn: "20USEM00000399", received: true }],
+      reception_note: "Confirmed by recipient.",
+      reception_by: "anna.abel@example.org",
+      reception_updated_at: "2026-08-12T10:00:00Z",
+      reception_tests_configured: false,
+      reception_test_status: "passed",
+    },
+  ];
+}
+
+export function filterDemoShipments(
+  direction: string,
+  reception: string,
+  q: string,
+): Shipment[] {
+  const needle = q.trim().toLowerCase();
+  return makeDemoShipments().filter(
+    (s) =>
+      (direction === "" || s.direction === direction) &&
+      (reception === "" || s.reception_status === reception) &&
+      (needle === "" ||
+        (s.name ?? "").toLowerCase().includes(needle) ||
+        s.pdb_id.toLowerCase().includes(needle) ||
+        s.sender_code.toLowerCase().includes(needle) ||
+        s.recipient_code.toLowerCase().includes(needle)),
+  );
+}
+
+export function makeDemoReminders(): Reminder[] {
+  return [
+    {
+      id: 1,
+      title: "Clean the flow bench",
+      note: "Weekly cleanroom duty.",
+      channel: "lab",
+      schedule_kind: "weekly",
+      next_due_at: "2026-09-01T06:00:00Z",
+      active: true,
+      last_fired_at: "2026-08-25T06:00:00Z",
+      last_error: null,
+      created_by: "anna.abel@example.org",
+      institute_id: 1,
+      created_at: "2026-07-01T12:00:00Z",
+      updated_at: "2026-08-25T06:00:00Z",
+    },
+    {
+      id: 2,
+      title: "Check dry-air supply",
+      note: null,
+      channel: null,
+      schedule_kind: "daily",
+      next_due_at: "2026-08-26T05:30:00Z",
+      active: true,
+      last_fired_at: "2026-08-25T05:30:00Z",
+      last_error: null,
+      created_by: "anna.abel@example.org",
+      institute_id: 1,
+      created_at: "2026-07-15T09:00:00Z",
+      updated_at: "2026-08-25T05:30:00Z",
+    },
+  ];
+}
+
+export function makeDemoNotificationChannels(): NotificationChannel[] {
+  return [
+    { name: "lab", kind: "mattermost" },
+    { name: "ops", kind: "webhook" },
+  ];
 }

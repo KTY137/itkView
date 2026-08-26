@@ -6,6 +6,7 @@ that an institute profile can override. Nothing here is hardcoded per site.
 """
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 
@@ -60,6 +61,39 @@ def hybrid_chip_glue_target(
     return GlueTarget(
         target_mg=n_abc * abc_target_mg + n_hcc * hcc_target_mg,
         tolerance_mg=n_abc * abc_tolerance_mg + n_hcc * hcc_tolerance_mg,
+    )
+
+
+@dataclass(frozen=True)
+class PotLifeState:
+    """Where a mixed glue batch stands relative to its pot life."""
+
+    mixed_at: datetime
+    expires_at: datetime
+    remaining_seconds: int  # 0 once expired
+    expired: bool
+
+
+def pot_life_state(
+    mixed_at: datetime | None, pot_life_minutes: int | None, now: datetime | None = None
+) -> PotLifeState | None:
+    """Pot-life countdown for a mixed batch; None while unmixed or untimed.
+
+    Naive timestamps (SQLite round-trips drop the offset) are treated as UTC.
+    """
+    if mixed_at is None or pot_life_minutes is None or pot_life_minutes <= 0:
+        return None
+    if mixed_at.tzinfo is None:
+        mixed_at = mixed_at.replace(tzinfo=timezone.utc)
+    if now is None:
+        now = datetime.now(timezone.utc)
+    expires_at = mixed_at + timedelta(minutes=pot_life_minutes)
+    remaining = int((expires_at - now).total_seconds())
+    return PotLifeState(
+        mixed_at=mixed_at,
+        expires_at=expires_at,
+        remaining_seconds=max(0, remaining),
+        expired=remaining <= 0,
     )
 
 

@@ -16,10 +16,73 @@ UI-Arbeit folgt zusaetzlich der verbindlichen Design-Referenz
 `docs/05-ui-design-reference.md` (+ Mockup `docs/itkflow-ui-mockup.html`), damit
 die Umsetzung nicht vom Design-Ziel abdriftet.
 
-## Aktueller Stand (2026-08-25)
+## Aktueller Stand (2026-08-26)
 
 - Monorepo steht mit `backend/`, `frontend/`, `agent/`, `deploy/`, CI- und
   Docker-Grundstruktur.
+- **Logistik & Betrieb (Phase-4-Kickoff, 2026-08-26):** Die drei
+  Phase-4-Kernmodule sind implementiert (Vertrag/Details:
+  `docs/11-logistics-operations.md`): **Glue-Batch-Registry** (lokale Batches
+  mit Lebenszyklus new→in_use→expired/empty, Topfzeit-Timer ab `mixed_at` mit
+  Profil-Default `glue_pot_life_minutes[glue_type]`, Verbrauchslog je
+  Komponente, Scan nach PDB-SN/Batch-Nr.; keine PDB-Registrierung von GLUE —
+  nur Referenz); **Shipment-Mirror + Empfangspruefung** (read-only Sync ueber
+  `listShipmentsByInstitution` in beide Richtungen + `listShipmentItems`,
+  Dedupe per Id, 503 statt Null-Erfolg; lokal fuehrende `reception_*`-Felder
+  mit Checklisten-Template aus `shipment_reception_checklist`, die kein
+  Re-Sync ueberschreibt); **Reminder + Notification-Adapter**
+  (`once|daily|weekly|monthly` mit Catch-up, Feuern im Worker-Poll-Loop;
+  Kanaele als `notification_channels` im Institutsprofil — Mattermost-/
+  generischer Webhook via stdlib-urllib, Webhook-URLs werden in allen
+  API-Antworten als `***` maskiert und tauchen nie in Fehlern/Logs auf;
+  kanallose Reminder feuern nur ins Audit). Drei neue Screens (Glue Batches,
+  Shipments, Reminders) ersetzen die P4-Platzhalter in der Rail. Als dritter
+  Kanaltyp kam **Telegram** dazu (eigener `kind`, weil Telegram `chat_id` im
+  Body braucht und die generische Webhook-Form ignoriert; Bot-Token steckt in
+  der URL und faellt damit unter dieselbe Maskierung) — der Alt-Kanal des
+  zFlow ist damit abgedeckt. Der Assembly-Wizard-Quick-Select ist inzwischen
+  umgesetzt; offen bleiben E-Mail/SMTP-Adapter und Eskalation
+  (docs/11 „Remaining Phase 4 scope").
+- **Shipment -> Reception Tests (Phase 4, 2026-08-26):** Das je Institut
+  gepflegte `shipment_reception_tests`-Mapping ordnet Komponententypen ihre
+  erforderlichen Testtypen zu. Shipment-Responses projizieren je Item und
+  aggregiert `missing|pending|passed|failed` aus lokalem `TestRunEvidence` und
+  `upload_test_run`-Actions; pending gilt ausdruecklich nicht als bestanden.
+  Fehlende/fehlgeschlagene Nachweise verlinken in die auf SN und exakten
+  Testtyp gepinnte Testerfassung. `done` wird serverseitig bis zum Pass aller
+  konfigurierten Nachweise blockiert. Nur Admins koennen mit explizitem Grund
+  uebersteuern; dafuer entsteht ein eigenes Audit-Event. Die UI weist getrennt
+  aus, ob ein DUMMY spaeter gepusht werden darf oder ein Produktionsbauteil nur
+  staged bleibt. Mapping, Projektion, Re-Sync-Erhalt, Rollen/Scope, Gate,
+  Deep-Link und strukturierte Settings sind offline getestet; kein Testpfad
+  ruft die Live-PDB auf.
+- **Reminder feuern in jeder Deployment-Form (2026-08-26, Nachzug):** Der erste
+  Wurf haengte das Ticken allein am Outbox-Worker — den es weder im
+  Desktop-Bundle (ein einziger Prozess) noch beim Dev-Launcher gibt. Ein
+  geplanter Reminder waere dort **nie** gefeuert. `ITKFLOW_REMINDER_SCHEDULER`
+  (`worker` = Default/Compose, `app`, `off`) waehlt jetzt den tickenden
+  Prozess; `create_app` startet dafuer einen `ReminderScheduler` als
+  Hintergrund-Task (Tick im Worker-Thread, da DB und Webhook blockieren),
+  Desktop-Bundle und `start-itkflow.ps1` setzen `app`. Zustellung ist dabei
+  **at most once**: eine Faelligkeit wird per guarded UPDATE in eigener
+  Transaktion beansprucht, bevor gesendet wird — zwei Scheduler koennen
+  denselben Termin nicht doppelt verschicken. Reminder bleiben PDB-inert.
+- **Operations Health (Phase 4, 2026-08-26):** Persistente Heartbeats fuer
+  Outbox-Worker und Reminder-Scheduler sowie `GET /api/ops/health` aggregieren
+  ausschliesslich lokale Telemetrie: aktive/letzte Sync-Jobs, Staged-Backlog,
+  Fehler und Retry-Limit, offene Reminder-Tasks und Parser-/Triage-Probleme.
+  Der admin-only Screen zeigt Fresh/Stale/Missing textuell, ist fuer
+  Institutsadmins mandantengefiltert und verlinkt nach Staged, Ingest log und
+  Reminders. Kein Refresh fuehrt einen Live-PDB-Aufruf aus.
+- **First-Run-Setup in der UI (2026-08-25):** `GET /api/setup` +
+  `POST /api/setup/admin` legen den allerersten Admin ohne CLI an (nur solange
+  die User-Tabelle leer ist, danach dauerhaft 409; AuditEvent
+  `setup.admin_created`, Auto-Login). Frontend zeigt dafuer den `SetupScreen`
+  (Auth-Status `setup`). Der `create_admin`-Schritt entfaellt fuer Desktop wie
+  Compose (docs/06, deploy/README). Ausserdem baut `npm run build` in
+  `desktop/` jetzt die komplette Tauri-App in einem Schritt:
+  `build-sidecar.py --bundle` haengt `tauri build --target <host triple>` an,
+  womit das Triple-Problem aus ADR 005 automatisch geloest ist.
 - **Desktop-Paketierung (2026-08-25):** `desktop/` enthaelt eine Tauri-Shell,
   die den als PyInstaller-Onefile gepackten Backend-Sidecar startet, auf
   `/health` wartet und den Webview darauf zeigt. Das Backend kann die gebaute
@@ -52,6 +115,52 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   nicht erreichbare PDB sah bisher aus wie „diese Komponente hat keine Tests" —
   genau die Verwechslung, die eine ganze Instituts-Ansicht wie lauter fehlende
   Pflichttests aussehen laesst.
+- **Staged-first + Auto-Mirror (ADR 006, M1–M4 umgesetzt,
+  2026-08-26):** Der zusammenhaengende Produktschnitt liegt im Arbeitsbaum;
+  die abschliessende gemeinsame Regression und Abnahme laeuft getrennt davon.
+
+  - **M1 Auto-Mirror:** Binary-Store, EOS mit frisch bezogener URL und
+    credential-freie Share-Links verwenden denselben abgesicherten lokalen
+    Attachment-Store. Nach einem erfolgreichen persistenten Komponentenjob
+    startet automatisch ein ebenfalls persistenter Evidence-/Attachment-Job.
+    Topbar und Components-Screen verfolgen beide Jobs ueber Navigation und
+    Reload hinweg. Detailgalerie, Testlaufkarten und Thumbnails lesen nur noch
+    lokal gespiegelte Dateien; Metrologie-Bilder brauchen deshalb nach dem
+    Mirror keinen direkten PDB-/EOS-Zugriff mehr.
+  - **M2 Preview + Ghost:** `GET /api/components/{sn}/preview` projiziert den
+    aktuellen Mirror mit offenen Actions serverseitig. Die Detailseite bietet
+    `Current`/`Staged`-Tabs, Inline- oder Off-Modus; die browserlokale
+    Preference aendert weder Status noch Berechtigung. Ghost-Tests zeigen ihre
+    servergebundene Ingest-Evidenz inklusive lokaler Attachments und zaehlen
+    bis zur Bestaetigung nur als `pending`.
+  - **M3 Testerfassung:** `GET /api/test-types` und
+    `POST /api/test-types/sync` spiegeln Testtyp-Schemata read-only ueber die
+    persoenliche PDB-Verbindung. `Add test result` auf der
+    Komponentendetailseite bietet Datei-Drop sowie ein schemaerzeugtes Formular;
+    beide erzeugen einen an `component_sn` gepinnten `IngestFile`, durchlaufen
+    denselben Dry-Run und legen erst danach eine Staged-Action an. Abweichende
+    Payload-SNs blockieren statt still umgeschrieben zu werden.
+  - **M4 Staged + Ingest log:** `Staged` ersetzt die generische Outbox-Ansicht
+    als gruppierter Arbeitsvorrat mit Komponentenbild, Stage, lesbarer Summary,
+    `Push to PDB`/`Discard` und separater History. Das `Ingest log` ist ein
+    read-only Verlauf mit Dry-Run und Komponentenlinks; Upload und manuelle
+    Erfassung liegen ausschliesslich auf der Detailseite. ADR, UI-Referenz und
+    Offline-Mockup sind auf diesen Zuschnitt nachgezogen.
+
+  Kein M-Punkt hebt `dummy_only`, Outbox/Audit oder persoenliche
+  Credential-Bindung auf. Zielvertrag und Abnahmekriterien stehen in
+  `docs/superpowers/specs/2026-08-25-staged-first-module-page-design.md`.
+- **Admin Settings fuer operative Institutsprofile (2026-08-26):** Ein
+  strukturierter, admin-only Settings-Screen verwaltet Stammdaten sowie
+  Mattermost-/Webhook-Kanaele, Shipment-Empfangscheckliste,
+  typabhaengige Shipment-Reception-Tests, Glue-Topfzeiten und den
+  Evidence-Mirror-Scope ohne Raw-JSON. Die API
+  validiert diese Profilwerte zentral, erhaelt ein bereits gespeichertes
+  Channel-Secret bei Rueckgabe des Maskenwerts `***` und auditiert nur
+  geaenderte Schluessel/Kanalnamen — nie URLs oder sonstige Secret-Werte.
+  Institutgebundene Admins bleiben auf ihr eigenes Profil beschraenkt; globale
+  Admins koennen das Zielinstitut waehlen. Die gemeinsame UI-/API-Verifikation
+  ist Teil der noch laufenden Gesamtabnahme.
 - Harte Sicherheitsregeln sind dokumentiert: keine produktive PDB in Dev/Tests,
   `references/zeuthenflow` nur lesen, keine Secrets, kein Institut-Hardcoding.
 - Backend-Basis: FastAPI-App, SQLAlchemy-Modelle fuer Institute, Komponenten,
@@ -64,11 +173,13 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   Institute-Komponentensyncs.
 - Frontend-Basis: Vite/React-Shell mit Navigation, Health-Anzeige,
   Komponentenliste mit Such-/Scan-Ergonomie, Detail-/Familienansicht und
-  Institute-Sync-Control, Outbox-Screen mit Statusuebergaengen/Demo-Fallback
-  und Dashboard-Summary.
-- Ingestion-Basis: lokale Inbox fuer Instrument-JSONs mit Hash, Auditspur und
-  Triage-UI; erkannte Dateien koennen einen `upload_test_run`-Draft mit
-  `dry_run_required` in der Outbox vorschlagen, aber noch keine PDB-Writes.
+  persistentem Component-/Evidence-Sync-Control, gruppiertem Staged-Screen,
+  read-only Ingest-Log und Dashboard-Summary.
+- Ingestion-Basis: lokale Inbox fuer Instrument-JSONs mit Hash und Auditspur.
+  Datei-Drop und schemaerzeugte manuelle Erfassung auf der Komponentendetailseite
+  koennen nach komponentengebundenem Dry-Run einen `upload_test_run`-Draft
+  stagen; das separate Ingest-Log bleibt read-only und kein Pfad schreibt
+  direkt in die PDB.
 - Ingestion-Parser: Registry in `app/ingestion.py` (`glue-weight-v1`,
   `iv-curve-v1`, `pull-test-v1`, `pdb-test-run-v1`, generischer Fallback)
   normalisiert Payloads zu einem Preview mit blockierenden Issues und
@@ -76,8 +187,8 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   aufgeloest. Testtyp-spezifische Dry-Run-Checks fangen abgeschnittene
   Instrument-Ausgaben (gepaarte VOLTAGE/CURRENT- bzw.
   PULL_STRENGTH/PULL_GRADE-Arrays, NUMBER_WIRES-Abgleich). `GET
-  /api/ingest/files/{id}/preview` liefert den Dry-Run (auch im Triage-UI),
-  und `propose-outbox` blockt bei Dry-Run-Issues mit 409.
+  /api/ingest/files/{id}/preview` liefert den Dry-Run auf der Detailseite und
+  im read-only Ingest-Log; `propose-outbox` blockt bei Dry-Run-Issues mit 409.
 - PDB-Upload-Converter (Phase-2/Worker-Schnitt): `app/pdb_upload.py` baut aus
   dem geprueften Ingest-Payload einen kanonischen `uploadTestRunResults`-Body.
   Der Worker revalidiert mit demselben Converter direkt vor dem Submit; der
@@ -136,13 +247,33 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 - **Stage-Farbsystem:** geordneter Ramp kuehl→gruen (Fortschritt); Gruen nur
   FINISHED, Rot nur FAILED/TRASHED (CVD-sicher, `ui.ts`/`app.css`).
 
-- **Jig-/Tool-Registry (Phase-3/4-Basis):** lokale Registry + Tools-Screen
-  stehen; `POST /api/sync/tools/{institute}` spiegelt bereits gesyncte
+- **Jig-/Tool-Registry + Assembly-Wizard (Phase 3/4, 2026-08-26):** Die lokale
+  Registry besitzt auditiertes strukturiertes CRUD, RFID/Code-Scan und
+  `active|flagged|blacklisted`-Verwaltung. `POST /api/sync/tools/{institute}` spiegelt bereits gesyncte
   PDB-`TOOLS`-Komponenten read-only in die Registry (Code=SN, Label=lokaler
   Name, kompatible Typen aus Profil-Regeln oder generischem R-Type-Parsing).
   Komponenten-Sync triggert diesen Registry-Refresh automatisch; lokale
   RFID-/Blacklist-Informationen werden nicht durch normale Syncs
-  heruntergestuft.
+  heruntergestuft. Der scanner-first Assembly-Wizard loest Parent/Child exakt
+  aus dem Mirror auf, bietet aktive typkompatible Tools und benutzbare
+  Glue-Batches als Quick-Select/Scan, zeigt den kanonischen Server-Dry-run und
+  staged `assemble_component`. Worker und Submitter revalidieren Zustand,
+  Snapshots, Glue-Ablauf/Topfzeit und beide Teilnehmer. Der PDB-Guard laeuft vor
+  Client-Aufbau: nur registrierte DUMMY-`MODULE|HYBRID`, nie Sensor/ASIC. Die
+  fokussierten Offline-Suites enthalten keine Live-PDB-Aufrufe.
+
+- **Phase-4-Backend fuer Glue-Batches, Shipments und Reminder (2026-08-26):**
+  lokale Glue-Batch-Registry mit profilbasierter Topfzeit und auditiertem
+  Komponentenverbrauch; read-only PDB-Shipment-Mirror fuer beide Richtungen
+  mit lokal fuehrender Empfangscheckliste; sowie wiederkehrende Reminder im
+  bestehenden Worker inklusive Mattermost-/generischem HTTPS-Webhook-Adapter
+  stehen. Webhook-URLs werden in Institute-Antworten immer redigiert und aus
+  Fehlern/Logs ferngehalten. Der fokussierte Offline-Schnitt ist mit 33 Tests
+  verifiziert. Nutzer-/Entwicklervertrag: `docs/11-logistics-operations.md`.
+  Die drei Produktscreens sind verdrahtet. Operative Profilwerte sind
+  zusaetzlich ueber den strukturierten Admin-Settings-Screen pflegbar;
+  Assembly-Quick-Select und Shipment-Reception-Test-Integration sind im
+  nachfolgenden Ausbau inzwischen umgesetzt.
 
 - **Auth End-to-End (docs/06, 2026-07-10):** Lokale Konten `viewer/operator/admin`
   vollstaendig — Login/Session/`create_admin`, serverseitige `user_id`-
@@ -216,11 +347,11 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   Attached"), institutsneutral, ITk-Akronyme (HV/QC/PWB…) bleiben gross;
   verdrahtet in Board-Spaltenkoepfe (Klartext + Rohcode-Unterzeile), Stage-Chips
   (Rohcode im `title`), Stage-Vorschlaege, Legende, Dashboard- und
-  Statistik-Balken sowie den Komponententyp-Filter (`roleLabel`). Triage/Outbox
-  benennen jetzt den Zwei-Schritt-Flow explizit („Step 1/2" Parsen+Validieren →
-  „Step 2/2" Review+Submit), und die Outbox-`Kind`-Spalte zeigt lesbare Labels
-  (Upload test run / Stage move / Register component). Rohcodes bleiben ueberall
-  als kanonische Referenz (Hover / Stammdaten-Feld). `tsc`+Build gruen. Siehe `docs/10`.
+  Statistik-Balken sowie den Komponententyp-Filter (`roleLabel`). Der damalige
+  Triage/Outbox-Schnitt benannte den Zwei-Schritt-Flow explizit; seit ADR 006
+  liegen Erfassung/Dry-Run auf der Detailseite und Review/Submit im
+  komponentengruppierten `Staged`-Screen. Rohcodes bleiben ueberall als
+  kanonische Referenz (Hover / Stammdaten-Feld). Siehe `docs/10`.
 
 ## Naechste Arbeitspakete
 
@@ -279,9 +410,21 @@ Details im jeweiligen Dokument:
   PDB-Verbindungen sind umgesetzt. Offen bleiben optionales OIDC/CERN-SSO,
   Demo-User-Policy und konfigurierbares 4-Augen-Prinzip.
 - **Jig-/Tool-Registry + typ-gefilterter Quick-Select** —
-  `docs/07-jig-tool-quickselect.md`. Basis-Registry, Tools-Screen und
-  PDB-`TOOLS`-Mirror-Import stehen (2026-07-08). Offen: Glue-Batches und die
-  direkte Einbindung in den Assembly-Wizard.
+  `docs/07-jig-tool-quickselect.md`. Registry, auditiertes CRUD/Statuspflege,
+  PDB-`TOOLS`-Mirror, Glue-Batch-Auswahl und direkte Einbindung in den
+  scanner-first Assembly-Wizard sind umgesetzt (2026-08-26). Verbleibend ist
+  nur die fachliche Bestaetigung exakter PDB-Property-Codes je Institut/Typ;
+  sie werden danach per `assembly_property_keys` konfiguriert.
+- **Logistik, Glue und Reminder** — `docs/11-logistics-operations.md`.
+  Backend-Modelle, API, Audit, Shipment-Read-Sync, Worker-Notifier und die
+  drei Produktscreens (Glue Batches, Shipments, Reminders; 2026-08-26) stehen.
+  Die profilgesteuerte Reception-Test-Verknuepfung samt Deep-Link, Done-Gate
+  und auditiertem Admin-Override ist umgesetzt. Die lokale admin-only
+  Betriebsansicht samt persistenten Worker-/Scheduler-Heartbeats, Queue-,
+  Reminder-, Sync- und Parser-Signalen steht ebenfalls. Offen bleiben weitere
+  Notification-Adapter/Eskalationen sowie das Phase-6-Row-/Query-Scoping.
+  Shipment-Erstellung und GLUE-Registrierung in der PDB bleiben ausserhalb des
+  aktuellen sicheren Schreibumfangs.
 - **Remote-Zugriff / Tunneling** — `docs/08-remote-access.md`. Zugriff von
   zuhause; Empfehlung Tailscale/WireGuard (spaeter Cloudflare Tunnel).
   **Abhaengigkeit:** erst nach dem Auth-Fundament scharf schalten.
@@ -349,8 +492,8 @@ anonymisierte Demo-/Testdaten.
 ### Phase 2 - Test-Ingestion und Upload-Queue
 
 **Ziel:** Instrument-JSONs landen nachvollziehbar in itkFlow, werden
-serverseitig geparst, validiert, triagiert und als gepruefte Outbox-Aktion fuer
-die PDB vorbereitet.
+serverseitig geparst und validiert und auf der Komponentendetailseite als
+gepruefte Staged-Action fuer die PDB vorbereitet.
 
 **Epics:**
 
@@ -358,9 +501,10 @@ die PDB vorbereitet.
 - Parser-Plugins fuer die wichtigsten Testtypen mit anonymisierten Fixtures.
 - Watched-Folder-Agent als duenner Client: beobachten, hochladen, Status
   melden; kein Fachparsing auf Instrument-PCs.
-- Triage-UI mit Vorschau, Validierungsfehlern, Pass/Fail-Signalen und
-  Freigabe in die Outbox.
-- Outbox-Dry-Run, Review/Audit und Retry-Regeln fuer Test-Uploads.
+- Komponentengebundene Datei-/Formularerfassung mit Vorschau,
+  Validierungsfehlern, Pass/Fail-Signalen und Freigabe nach Staged.
+- Read-only Ingest-Log sowie Staged-Review/Audit und Retry-Regeln fuer
+  Test-Uploads.
 
 **Done-Kriterien:**
 
@@ -417,6 +561,18 @@ itkFlow-Module.
 - Reminder und Notification-Adapter fuer E-Mail, Mattermost/Telegram oder
   institutspezifische Kanaele.
 - Health-/Betriebsansicht fuer Sync, Outbox, Agenten und Parser.
+
+**Teilstand (2026-08-26):** Glue-Batch-Registry und Produktscreen, read-only
+Shipment-Mirror mit lokalem Empfang, profilgesteuerten Reception-Tests und
+Produktscreen sowie Reminder/HTTPS-Notifier mit Produktscreen stehen. Der
+admin-only Settings-Screen pflegt Notification-Kanaele, Empfangscheckliste,
+Reception-Test-Mapping, Glue-Topfzeiten und Evidence-Scope strukturiert im
+Institutsprofil. Tool-CRUD/Statuspflege und die direkte Tool-/Glue-Integration
+im Assembly-Wizard samt Dry-run/Outbox/Worker-Revalidierung stehen ebenfalls.
+Die lokale Operations-Health-Ansicht samt Heartbeats und Deep-Links steht.
+Offen sind weitere Notification-Adapter/Eskalationen und das vollstaendige
+Mandanten-Scoping. Details in
+`docs/11-logistics-operations.md`.
 
 **Done-Kriterien:**
 

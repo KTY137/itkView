@@ -346,3 +346,205 @@ def test_instrument_data_keeps_its_suffix():
 def test_an_executable_suffix_is_still_refused():
     for name in ("payload.exe", "script.bat", "lib.dll", "run.ps1", "x.cmd"):
         assert storage_path("SN", "c", "application/octet-stream", name) == "SN/c", name
+
+
+# --- EOS and public share-link sources -------------------------------------
+
+
+class _PublicHeaders:
+    def __init__(self, content_type: str):
+        self._content_type = content_type
+
+    def get_content_type(self):
+        return self._content_type
+
+
+class _PublicResponse:
+    def __init__(self, url: str, data: bytes, content_type: str = "image/jpeg"):
+        self._url = url
+        self._data = data
+        self.headers = _PublicHeaders(content_type)
+
+    def read(self, limit: int):
+        return self._data[:limit]
+
+    def geturl(self):
+        return self._url
+
+    def close(self):
+        return None
+
+
+def _set_attachment_descriptor(session, evidence, descriptor):
+    row = session.scalar(select(TestRunEvidence).where(TestRunEvidence.external_ref == "RUN-1"))
+    row.payload = {"attachments": [descriptor]}
+    session.commit()
+
+
+def test_share_link_download_is_unauthenticated_and_indexed_by_source(
+    session, settings, evidence, monkeypatch
+):
+    url = "https://cernbox.cern.ch/s/public/photo.jpg"
+    _set_attachment_descriptor(
+        session,
+        evidence,
+        {
+            "code": "a" * 64,
+            "filename": "photo.jpg",
+            "content_type": None,
+            "title": "Visual inspection",
+            "type": "share_link",
+            "source": "share_link",
+            "url": url,
+        },
+    )
+    monkeypatch.setattr(
+        attachment_store,
+        "_open_public_url",
+        lambda requested, timeout: _PublicResponse(requested, JPEG),
+    )
+
+    # Public share links must not require or receive PDB credentials.
+    stats = download_attachments(
+        session,
+        _FakeGateway(configured=False),
+        settings,
+        "20USEM20000041",
+    )
+    session.commit()
+
+    row = session.scalar(select(TestRunAttachment))
+    assert stats.downloaded == 1
+    assert row.source == "share_link"
+    assert resolve_path(settings, row).read_bytes() == JPEG
+
+
+@pytest.mark.parametrize(
+    "payload,max_bytes",
+    [(HTML_ERROR_PAGE, 1024), (b"12345", 4)],
+)
+def test_share_link_refuses_html_and_oversized_payloads(
+    session, settings, evidence, monkeypatch, payload, max_bytes
+):
+    url = "https://cernbox.cern.ch/s/public/data"
+    _set_attachment_descriptor(
+        session,
+        evidence,
+        {
+            "code": "b" * 64,
+            "type": "share_link",
+            "source": "share_link",
+            "url": url,
+        },
+    )
+    settings.attachment_max_bytes = max_bytes
+    monkeypatch.setattr(
+        attachment_store,
+        "_open_public_url",
+        lambda requested, timeout: _PublicResponse(requested, payload, "text/plain"),
+    )
+
+    stats = download_attachments(session, _FakeGateway(), settings, "20USEM20000041")
+
+    assert stats.failed == 1
+    assert resolve_path(settings, session.scalar(select(TestRunAttachment))) is None
+
+
+def test_share_link_refuses_local_or_credential_bearing_urls(
+    session, settings, evidence, monkeypatch
+):
+    called = False
+
+    def should_not_open(url, timeout):
+        nonlocal called
+        called = True
+        raise AssertionError("unsafe URL must be rejected before opening")
+
+    monkeypatch.setattr(attachment_store, "_open_public_url", should_not_open)
+    for index, url in enumerate(
+        ("http://127.0.0.1/private", "https://user:password@example.org/file"),
+        start=1,
+    ):
+        _set_attachment_descriptor(
+            session,
+            evidence,
+            {
+                "code": str(index) * 64,
+                "type": "share_link",
+                "source": "share_link",
+                "url": url,
+            },
+        )
+        stats = download_attachments(session, _FakeGateway(), settings, "20USEM20000041")
+        assert stats.failed == 1
+    assert called is False
+
+
+class _EosClient:
+    def __init__(self):
+        self.detail_calls = 0
+        self.download_urls: list[str] = []
+
+    def get(self, action, json=None):
+        if action == "getTestRun":
+            self.detail_calls += 1
+            assert json == {"testRun": "RUN-1", "noEosToken": False}
+            return {
+                "attachments": [
+                    {
+                        "code": "eos-code",
+                        "type": "eos",
+                        "url": (
+                            "https://eosatlas.cern.ch/eos/photo.jpg"
+                            f"?fresh-signature={self.detail_calls}"
+                        ),
+                    }
+                ]
+            }
+        if isinstance(action, str) and action.startswith("https://eosatlas.cern.ch/"):
+            self.download_urls.append(action)
+
+            class _BinaryFile:
+                content = JPEG
+                mimetype = "image/jpeg"
+
+            return _BinaryFile()
+        raise AssertionError(f"unexpected EOS request: {action}")
+
+
+def test_eos_download_refreshes_the_signed_url_and_never_persists_it(session, settings, evidence):
+    _set_attachment_descriptor(
+        session,
+        evidence,
+        {
+            "code": "eos-code",
+            "filename": "photo.jpg",
+            "content_type": "image/jpeg",
+            "type": "eos",
+            "source": "pdb",
+            "url": "https://eosatlas.cern.ch/eos/photo.jpg",
+        },
+    )
+    client = _EosClient()
+    gateway = _FakeGateway(client)
+
+    first = download_attachments(session, gateway, settings, "20USEM20000041")
+    session.commit()
+    second = download_attachments(
+        session,
+        gateway,
+        settings,
+        "20USEM20000041",
+        force=True,
+    )
+    session.commit()
+
+    assert first.downloaded == second.downloaded == 1
+    assert client.detail_calls == 2
+    assert client.download_urls[0] != client.download_urls[1]
+    row = session.scalar(select(TestRunAttachment))
+    assert "fresh-signature" not in repr(vars(row))
+    mirrored = session.scalar(
+        select(TestRunEvidence).where(TestRunEvidence.external_ref == "RUN-1")
+    )
+    assert "fresh-signature" not in repr(mirrored.payload)

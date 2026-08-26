@@ -44,6 +44,52 @@ export type StageSuggestion = {
   blocking: RequirementCheck[];
 };
 
+export type PreviewRequirementCheck = {
+  stage: string;
+  test_type: string;
+  status: "passed" | "failed" | "missing" | "pending";
+};
+
+export type ComponentPreviewState = {
+  stage: string;
+  checks: PreviewRequirementCheck[];
+};
+
+export type ComponentPreviewAction = {
+  id: number;
+  kind: string;
+  status: OutboxStatus;
+  summary: string;
+  to_stage: string | null;
+  test_type: string | null;
+  created_by: string;
+  created_at: string;
+  submittable: boolean;
+  submittable_reason: string | null;
+};
+
+export type ComponentPreviewTest = {
+  test_type: string;
+  passed: boolean | null;
+  external_ref: string | null;
+  measured_at: string | null;
+  synced_at: string | null;
+  source: string;
+  run_number: string | number | null;
+  properties: Record<string, unknown>;
+  results: Record<string, unknown>;
+  result_meta: Record<string, { name?: string; data_type?: string; value_type?: string }>;
+  attachments: TestRunAttachment[];
+  ghost: boolean;
+  outbox_action_id: number | null;
+};
+
+export type ComponentPreview = {
+  current: ComponentPreviewState;
+  staged_actions: ComponentPreviewAction[];
+  projected: ComponentPreviewState & { tests: ComponentPreviewTest[] };
+};
+
 export type ComponentSyncResult = {
   institute_code: string;
   fetched: number;
@@ -53,6 +99,20 @@ export type ComponentSyncResult = {
   unchanged: number;
   stale: number;
   total: number;
+};
+
+export type EvidenceSyncJobResult = {
+  institute_code: string;
+  component_types: string[];
+  components_processed: number;
+  created: number;
+  updated: number;
+  unchanged: number;
+  total: number;
+  attachments_downloaded: number;
+  attachments_reused: number;
+  attachments_failed: number;
+  attachments_total: number;
 };
 
 export type SyncJobStatus =
@@ -71,6 +131,15 @@ export type ComponentSyncPhase =
   | "tools"
   | "committing"
   | "complete";
+
+export type EvidenceSyncPhase =
+  | "queued"
+  | "fetching"
+  | "attachments"
+  | "committing"
+  | "complete";
+
+export type SyncJobPhase = ComponentSyncPhase | EvidenceSyncPhase;
 
 /** Persisted progress for the read-only PDB -> local component-mirror job. */
 export type ComponentSyncJob = {
@@ -91,6 +160,68 @@ export type ComponentSyncJob = {
   finished_at: string | null;
 };
 
+/** Persisted progress for the detailed test-evidence and attachment mirror. */
+export type EvidenceSyncJob = {
+  id: number;
+  kind: "evidence";
+  institute_code: string;
+  status: SyncJobStatus;
+  phase: EvidenceSyncPhase;
+  current: number;
+  total: number | null;
+  percent: number | null;
+  message: string;
+  result: EvidenceSyncJobResult | null;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  updated_at: string;
+  finished_at: string | null;
+};
+
+export type SyncJob = ComponentSyncJob | EvidenceSyncJob;
+export type SyncJobKind = SyncJob["kind"];
+
+// ---- Local operations health -----------------------------------------------
+
+export type OpsHeartbeat = {
+  service: "outbox-worker" | "reminder-scheduler";
+  status: "healthy" | "stale" | "missing" | "error" | "disabled";
+  last_seen_at: string | null;
+  age_seconds: number | null;
+  stale_after_seconds: number;
+  detail: Record<string, unknown>;
+};
+
+export type OpsHealth = {
+  status: "healthy" | "warning" | "critical";
+  generated_at: string;
+  institute_code: string | null;
+  heartbeats: OpsHeartbeat[];
+  sync: { active: SyncJob[]; latest: SyncJob[]; stale_active: number };
+  outbox: {
+    backlog: number;
+    failed: number;
+    at_attempt_limit: number;
+    oldest_open_at: string | null;
+    oldest_open_age_seconds: number | null;
+  };
+  reminders: {
+    active: number;
+    open_occurrences: number;
+    failed_occurrences: number;
+    escalated_open: number;
+    overdue: number;
+  };
+  ingest: {
+    total: number;
+    triage: number;
+    failed: number;
+    parser_issues: number;
+    unassigned: number;
+  };
+};
+
 // ---- Institute shapes -------------------------------------------------------
 
 export type Institute = {
@@ -106,6 +237,13 @@ export type InstituteCreate = {
   code: string;
   name: string;
   local_name_prefix?: string;
+  settings?: Record<string, unknown>;
+};
+
+export type InstituteUpdate = {
+  name?: string;
+  local_name_prefix?: string;
+  /** Top-level keys are shallow-merged by the backend. */
   settings?: Record<string, unknown>;
 };
 
@@ -246,12 +384,60 @@ export type IngestFile = {
 export type IngestFileCreate = {
   filename: string;
   payload: Record<string, unknown>;
-  uploaded_by: string;
+  component_sn?: string;
+  test_type?: string;
+  parser?: "manual-entry";
 };
 
 export type IngestProposalCreate = {
-  created_by: string;
   institute_code?: string;
+};
+
+export type TestSchemaField = {
+  code?: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  dataType?: unknown;
+  data_type?: unknown;
+  type?: unknown;
+  valueType?: unknown;
+  value_type?: unknown;
+  required?: boolean;
+  default?: unknown;
+  defaultValue?: unknown;
+  [key: string]: unknown;
+};
+
+export type TestSchemaFieldCollection =
+  | Array<TestSchemaField | string>
+  | Record<string, TestSchemaField | string | null>;
+
+export type TestSchemaDefinition = {
+  properties?: TestSchemaFieldCollection;
+  results?: TestSchemaFieldCollection;
+  required?:
+    | string[]
+    | Record<string, string[] | Record<string, boolean> | boolean | undefined>;
+  [key: string]: unknown;
+};
+
+/** Local read-only snapshot of one PDB test-type definition. */
+export type TestTypeSchema = {
+  id: number;
+  component_type: string;
+  test_code: string;
+  name: string;
+  schema: TestSchemaDefinition;
+  synced_at: string;
+};
+
+export type TestTypeSchemaSyncResult = {
+  component_type: string;
+  created: number;
+  updated: number;
+  unchanged: number;
+  total: number;
 };
 
 export type IngestResultSummary = {
@@ -312,11 +498,30 @@ export type Tool = {
   rfid: string | null;
   compatible_types: string[];
   institute_id: number | null;
-  status: string;
+  status: ToolStatus;
   created_at: string;
 };
 
-export type ToolQuery = { kind?: string; fits?: string; status?: string };
+export type ToolStatus = "active" | "flagged" | "blacklisted";
+
+export type ToolQuery = {
+  kind?: string;
+  fits?: string;
+  status?: ToolStatus;
+  institute?: string;
+};
+
+export type ToolCreateBody = {
+  institute_code?: string;
+  kind: string;
+  code: string;
+  label?: string | null;
+  rfid?: string | null;
+  compatible_types: string[];
+  status?: ToolStatus;
+};
+
+export type ToolUpdateBody = Partial<Omit<ToolCreateBody, "institute_code">>;
 
 export type ToolSyncResult = {
   institute_code: string;
@@ -542,27 +747,14 @@ export function getComponent(sn: string, signal?: AbortSignal): Promise<Componen
   return request<ComponentDetail>(`/api/components/${encodeURIComponent(sn)}`, { signal });
 }
 
-export type ComponentImage = {
-  id: string;
-  title: string;
-  test_type: string | null;
-  /** The owning test run. The working download route needs it. */
-  test_run_ref: string | null;
-  filename: string | null;
-  content_type: string | null;
-};
-
-export function getComponentImages(sn: string, signal?: AbortSignal): Promise<ComponentImage[]> {
-  return request<ComponentImage[]>(`/api/components/${encodeURIComponent(sn)}/images`, { signal });
-}
-
-/** URL of one image's binary (streamed by the backend from the PDB).
- *
- * Passing the run reference matters: without it the backend can only try the
- * fallback route, which returns an error page rather than the file. */
-export function componentImageUrl(sn: string, id: string, testRunRef?: string | null): string {
-  const base = `/api/components/${encodeURIComponent(sn)}/images/${encodeURIComponent(id)}`;
-  return testRunRef ? `${base}?test_run_ref=${encodeURIComponent(testRunRef)}` : base;
+/** Local-only projection of open outbox actions over the component mirror. */
+export function getComponentPreview(
+  sn: string,
+  signal?: AbortSignal,
+): Promise<ComponentPreview> {
+  return request<ComponentPreview>(`/api/components/${encodeURIComponent(sn)}/preview`, {
+    signal,
+  });
 }
 
 export type TestRunAttachment = {
@@ -621,22 +813,6 @@ export function getComponentAttachments(
   );
 }
 
-export type AttachmentSyncResult = {
-  component_sn: string;
-  downloaded: number;
-  reused: number;
-  failed: number;
-  total: number;
-};
-
-/** Mirror this component's attachment bytes into the local attachment folder. */
-export function postComponentAttachmentSync(sn: string): Promise<AttachmentSyncResult> {
-  return request<AttachmentSyncResult>(
-    `/api/components/${encodeURIComponent(sn)}/attachments/sync`,
-    { method: "POST" },
-  );
-}
-
 /** URL of one locally mirrored attachment. 404 until it has been synced. */
 export function componentAttachmentUrl(sn: string, code: string): string {
   return `/api/components/${encodeURIComponent(sn)}/attachments/${encodeURIComponent(code)}`;
@@ -653,29 +829,78 @@ export type EvidenceSyncResult = {
   updated: number;
   unchanged: number;
   total: number;
+  attachments_downloaded: number;
+  attachments_reused: number;
+  attachments_failed: number;
+  attachments_total: number;
+};
+
+export type AssemblyDraft = {
+  parent_sn: string;
+  child_sn: string;
+  slot: string;
+  tool_id: number;
+  glue_batch_id?: number | null;
+};
+
+export type AssemblyIssue = { code: string; message: string };
+
+export type AssemblyComponent = Pick<
+  ComponentOut,
+  | "sn"
+  | "local_name"
+  | "component_type"
+  | "type_code"
+  | "stage"
+  | "location"
+  | "institute_code"
+  | "parent_sn"
+  | "is_dummy"
+  | "stale"
+  | "trashed"
+>;
+
+export type AssemblyTool = Pick<
+  Tool,
+  "id" | "kind" | "code" | "label" | "rfid" | "compatible_types" | "status"
+>;
+
+export type AssemblyGlueBatch = {
+  id: number;
+  glue_type: string;
+  batch_no: string;
+  pdb_sn: string | null;
+  status: string;
+  mixed_at: string | null;
+  pot_life_minutes: number | null;
+  pot_life_remaining_seconds: number | null;
+  pot_life_expired: boolean;
+};
+
+export type AssemblyPreview = {
+  valid: boolean;
+  submittable: boolean;
+  submittable_reason: string | null;
+  summary: string;
+  slot: string;
+  parent: AssemblyComponent | null;
+  child: AssemblyComponent | null;
+  tool: AssemblyTool | null;
+  glue_batch: AssemblyGlueBatch | null;
+  pdb_properties: Record<string, string>;
+  issues: AssemblyIssue[];
+  warnings: AssemblyIssue[];
+};
+
+export type AssemblyStageResult = {
+  preview: AssemblyPreview;
+  action: OutboxAction;
 };
 
 /** Mirror this component's PDB test-run results into local evidence. */
 export function postComponentSyncEvidence(sn: string): Promise<EvidenceSyncResult> {
   return request<EvidenceSyncResult>(
     `/api/components/${encodeURIComponent(sn)}/sync-evidence`,
-    { method: "POST" },
-  );
-}
-
-export type InstituteEvidenceSyncResult = {
-  institute_code: string;
-  components_processed: number;
-  created: number;
-  updated: number;
-  unchanged: number;
-  total: number;
-};
-
-/** Mirror PDB test-run evidence for every live component of an institute. */
-export function postInstituteEvidenceSync(code: string): Promise<InstituteEvidenceSyncResult> {
-  return request<InstituteEvidenceSyncResult>(
-    `/api/sync/evidence/${encodeURIComponent(code)}`,
     { method: "POST" },
   );
 }
@@ -735,18 +960,60 @@ export function startComponentSyncJob(instituteCode: string): Promise<ComponentS
   );
 }
 
-/** Poll one persisted sync job. */
-export function getSyncJob(id: number, signal?: AbortSignal): Promise<ComponentSyncJob> {
-  return request<ComponentSyncJob>(`/api/sync/jobs/${id}`, { signal });
+/** Start (or join) the single-flight background evidence/attachment sync. */
+export function startEvidenceSyncJob(instituteCode: string): Promise<EvidenceSyncJob> {
+  return request<EvidenceSyncJob>(
+    `/api/sync/jobs/evidence/${encodeURIComponent(instituteCode)}`,
+    { method: "POST" },
+  );
 }
 
-/** Recover a component sync after navigation/reload. No active job is a 204. */
+/** Poll one persisted sync job. */
+export function getSyncJob(id: number, signal?: AbortSignal): Promise<SyncJob> {
+  return request<SyncJob>(`/api/sync/jobs/${id}`, { signal });
+}
+
+/** Recover a sync after navigation/reload. No active job is a 204. */
+export async function getActiveSyncJob(
+  kind: SyncJobKind,
+  instituteCode?: string,
+  signal?: AbortSignal,
+): Promise<SyncJob | null> {
+  const query = new URLSearchParams({ kind });
+  if (instituteCode !== undefined) query.set("institute_code", instituteCode);
+  const response = await rawFetch(
+    `/api/sync/jobs/active?${query.toString()}`,
+    { signal },
+  );
+  if (response.status === 204) return null;
+  return (await response.json()) as SyncJob;
+}
+
+/** Recover the newest persisted job, including terminal success or failure. */
+export async function getLatestSyncJob(
+  kind: SyncJobKind,
+  instituteCode?: string,
+  signal?: AbortSignal,
+): Promise<SyncJob | null> {
+  const query = new URLSearchParams({ kind });
+  if (instituteCode !== undefined) query.set("institute_code", instituteCode);
+  const response = await rawFetch(`/api/sync/jobs/latest?${query.toString()}`, { signal });
+  if (response.status === 204) return null;
+  return (await response.json()) as SyncJob;
+}
+
 export async function getActiveComponentSyncJob(
   signal?: AbortSignal,
 ): Promise<ComponentSyncJob | null> {
-  const response = await rawFetch("/api/sync/jobs/active?kind=components", { signal });
-  if (response.status === 204) return null;
-  return (await response.json()) as ComponentSyncJob;
+  const job = await getActiveSyncJob("components", undefined, signal);
+  return job === null || job.kind === "components" ? job : null;
+}
+
+export async function getActiveEvidenceSyncJob(
+  signal?: AbortSignal,
+): Promise<EvidenceSyncJob | null> {
+  const job = await getActiveSyncJob("evidence", undefined, signal);
+  return job === null || job.kind === "evidence" ? job : null;
 }
 
 export function getInstitutes(signal?: AbortSignal): Promise<Institute[]> {
@@ -787,6 +1054,17 @@ export function getDashboardSummary(signal?: AbortSignal): Promise<DashboardSumm
   return request<DashboardSummary>("/api/dashboard/summary", { signal });
 }
 
+/** Admin-only local telemetry. Reading it never contacts the PDB. */
+export function getOpsHealth(
+  instituteCode?: string,
+  signal?: AbortSignal,
+): Promise<OpsHealth> {
+  return request<OpsHealth>(
+    `/api/ops/health${queryString({ institute_code: instituteCode })}`,
+    { signal },
+  );
+}
+
 export function getProductionStats(
   query: ProductionStatsQuery = {},
   signal?: AbortSignal,
@@ -803,8 +1081,32 @@ export function getTools(query: ToolQuery = {}, signal?: AbortSignal): Promise<T
 }
 
 /** Resolve a scanned RFID or printed code to a single tool (404 if unknown). */
-export function scanTool(code: string, signal?: AbortSignal): Promise<Tool> {
-  return request<Tool>(`/api/tools/scan${queryString({ code })}`, { signal });
+export function scanTool(
+  code: string,
+  institute?: string,
+  signal?: AbortSignal,
+): Promise<Tool> {
+  return request<Tool>(`/api/tools/scan${queryString({ code, institute })}`, { signal });
+}
+
+export function postTool(body: ToolCreateBody): Promise<Tool> {
+  return request<Tool>("/api/tools", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function patchTool(id: number, body: ToolUpdateBody): Promise<Tool> {
+  return request<Tool>(`/api/tools/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteTool(id: number): Promise<void> {
+  return requestVoid(`/api/tools/${id}`, { method: "DELETE" });
 }
 
 export function postToolSync(instituteCode: string): Promise<ToolSyncResult> {
@@ -817,12 +1119,70 @@ export function getOutboxContract(signal?: AbortSignal): Promise<OutboxContract>
   return request<OutboxContract>("/api/outbox/contract", { signal });
 }
 
+export function scanAssemblyComponent(
+  code: string,
+  signal?: AbortSignal,
+): Promise<ComponentOut> {
+  return request<ComponentOut>(`/api/assembly/scan-component${queryString({ code })}`, {
+    signal,
+  });
+}
+
+export function postAssemblyPreview(body: AssemblyDraft): Promise<AssemblyPreview> {
+  return request<AssemblyPreview>("/api/assembly/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function postAssemblyAction(body: AssemblyDraft): Promise<AssemblyStageResult> {
+  return request<AssemblyStageResult>("/api/assembly/actions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export function getOutbox(status?: string, signal?: AbortSignal): Promise<OutboxAction[]> {
   return request<OutboxAction[]>(`/api/outbox${queryString({ status })}`, { signal });
 }
 
+export function getAudit(limit = 100, signal?: AbortSignal): Promise<AuditEvent[]> {
+  return request<AuditEvent[]>(`/api/audit?limit=${encodeURIComponent(String(limit))}`, { signal });
+}
+
+/** Complete, chronologically ordered audit trail for one staged action. */
+export function getOutboxAudit(
+  actionId: number,
+  signal?: AbortSignal,
+): Promise<AuditEvent[]> {
+  return request<AuditEvent[]>(`/api/outbox/${actionId}/audit`, { signal });
+}
+
 export function getIngestFiles(status?: string, signal?: AbortSignal): Promise<IngestFile[]> {
   return request<IngestFile[]>(`/api/ingest/files${queryString({ status })}`, { signal });
+}
+
+/** Read the locally mirrored form schemas for one component type. */
+export function getTestTypeSchemas(
+  componentType: string,
+  signal?: AbortSignal,
+): Promise<TestTypeSchema[]> {
+  return request<TestTypeSchema[]>(
+    `/api/test-types${queryString({ component_type: componentType })}`,
+    { signal },
+  );
+}
+
+/** Refresh one component type's schema snapshot through the signed-in user's PDB account. */
+export function postTestTypeSchemaSync(
+  componentType: string,
+): Promise<TestTypeSchemaSyncResult> {
+  return request<TestTypeSchemaSyncResult>(
+    `/api/test-types/sync${queryString({ component_type: componentType })}`,
+    { method: "POST" },
+  );
 }
 
 export function postIngestFile(body: IngestFileCreate): Promise<IngestFile> {
@@ -876,6 +1236,24 @@ export function getMe(signal?: AbortSignal): Promise<MeOut> {
   return request<MeOut>("/api/auth/me", { signal });
 }
 
+export type SetupStatus = { needs_admin: boolean };
+
+export type SetupAdminBody = { email: string; display_name: string; password: string };
+
+/** First-run probe: `needs_admin` is true while no user account exists yet. */
+export function getSetupStatus(signal?: AbortSignal): Promise<SetupStatus> {
+  return request<SetupStatus>("/api/setup", { signal });
+}
+
+/** Create the very first admin account and sign it in. 409 once any user exists. */
+export function postSetupAdmin(body: SetupAdminBody): Promise<MeOut> {
+  return request<MeOut>("/api/setup/admin", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 /** End the current session (204). */
 export function postLogout(): Promise<void> {
   return requestVoid("/api/auth/logout", { method: "POST" });
@@ -907,4 +1285,356 @@ export function testPdbConnection(): Promise<PdbConnectionOut> {
 /** Remove only the signed-in user's saved PDB connection (204). */
 export function deletePdbConnection(): Promise<void> {
   return requestVoid("/api/account/pdb-connection", { method: "DELETE" });
+}
+
+
+// ---- Glue batches (Phase 4, docs/11) -----------------------------------------
+
+export type GlueBatchStatus = "new" | "in_use" | "expired" | "empty";
+
+export type GlueBatch = {
+  id: number;
+  glue_type: string;
+  batch_no: string;
+  pdb_sn: string | null;
+  status: GlueBatchStatus;
+  manufacturing_date: string | null;
+  expiry_date: string | null;
+  opening_date: string | null;
+  bipack_count: number | null;
+  note: string | null;
+  mixed_at: string | null;
+  pot_life_minutes: number | null;
+  institute_id: number | null;
+  created_at: string;
+  /** Server-computed snapshot; the screen ticks it down locally between loads. */
+  pot_life_remaining_seconds: number | null;
+  pot_life_expired: boolean;
+  usage_count: number;
+};
+
+export type GlueUsage = {
+  id: number;
+  glue_batch_id: number;
+  component_sn: string;
+  amount_mg: number | null;
+  note: string | null;
+  used_by: string;
+  used_at: string;
+};
+
+export type GlueBatchQuery = { status?: string; glue_type?: string; q?: string };
+
+export type GlueBatchCreateBody = {
+  glue_type: string;
+  batch_no: string;
+  pdb_sn?: string;
+  status?: GlueBatchStatus;
+  manufacturing_date?: string;
+  expiry_date?: string;
+  opening_date?: string;
+  bipack_count?: number;
+  note?: string;
+};
+
+export type GlueBatchUpdateBody = Partial<Omit<GlueBatchCreateBody, "glue_type">>;
+
+export function getGlueBatches(
+  query: GlueBatchQuery = {},
+  signal?: AbortSignal,
+): Promise<GlueBatch[]> {
+  return request<GlueBatch[]>(`/api/glue-batches${queryString(query)}`, { signal });
+}
+
+export function scanGlueBatch(code: string, signal?: AbortSignal): Promise<GlueBatch> {
+  return request<GlueBatch>(`/api/glue-batches/scan${queryString({ code })}`, { signal });
+}
+
+export function postGlueBatch(body: GlueBatchCreateBody): Promise<GlueBatch> {
+  return request<GlueBatch>("/api/glue-batches", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Admin-only institute profile update. Operational settings are validated server-side. */
+export function patchInstitute(code: string, body: InstituteUpdate): Promise<Institute> {
+  return request<Institute>(`/api/institutes/${encodeURIComponent(code)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function patchGlueBatch(id: number, body: GlueBatchUpdateBody): Promise<GlueBatch> {
+  return request<GlueBatch>(`/api/glue-batches/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Start the pot-life timer ("just mixed"); pot life falls back to the
+ * institute profile's per-type default when omitted. */
+export function postGlueBatchMix(
+  id: number,
+  potLifeMinutes?: number,
+): Promise<GlueBatch> {
+  return request<GlueBatch>(`/api/glue-batches/${id}/mix`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(potLifeMinutes ? { pot_life_minutes: potLifeMinutes } : {}),
+  });
+}
+
+export function getGlueUsage(id: number, signal?: AbortSignal): Promise<GlueUsage[]> {
+  return request<GlueUsage[]>(`/api/glue-batches/${id}/usage`, { signal });
+}
+
+export type GlueUsageCreateBody = { component_sn: string; amount_mg?: number; note?: string };
+
+export function postGlueUsage(id: number, body: GlueUsageCreateBody): Promise<GlueUsage> {
+  return request<GlueUsage>(`/api/glue-batches/${id}/usage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+// ---- Shipments (Phase 4, docs/11) --------------------------------------------
+
+export type ShipmentDirection = "incoming" | "outgoing" | "internal" | "unknown";
+
+export type ShipmentReceptionTestStatus = "missing" | "pending" | "passed" | "failed";
+
+export type ShipmentReceptionTest = {
+  test_type: string;
+  status: ShipmentReceptionTestStatus;
+};
+
+export type ShipmentItem = {
+  sn: string;
+  component_type?: string | null;
+  component_mirrored: boolean;
+  is_dummy: boolean;
+  submittable: boolean;
+  submittable_reason: string | null;
+  reception_tests_configured: boolean;
+  reception_test_status: ShipmentReceptionTestStatus;
+  reception_tests: ShipmentReceptionTest[];
+};
+
+export type ShipmentChecklistItem = { label: string; done: boolean };
+
+export type ShipmentReceptionItem = { sn: string; received: boolean; note?: string | null };
+
+export type Shipment = {
+  id: number;
+  pdb_id: string;
+  name: string | null;
+  sender_code: string;
+  recipient_code: string;
+  status: string;
+  direction: ShipmentDirection;
+  sent_at: string | null;
+  items: ShipmentItem[];
+  institute_id: number | null;
+  synced_at: string;
+  reception_status: "pending" | "in_progress" | "done";
+  reception_checklist: ShipmentChecklistItem[];
+  reception_items: ShipmentReceptionItem[];
+  reception_note: string | null;
+  reception_by: string | null;
+  reception_updated_at: string | null;
+  reception_tests_configured: boolean;
+  reception_test_status: ShipmentReceptionTestStatus;
+};
+
+export type ShipmentQuery = {
+  direction?: string;
+  status?: string;
+  reception?: string;
+  q?: string;
+};
+
+export function getShipments(
+  query: ShipmentQuery = {},
+  signal?: AbortSignal,
+): Promise<Shipment[]> {
+  return request<Shipment[]>(`/api/shipments${queryString(query)}`, { signal });
+}
+
+export function getShipment(id: number, signal?: AbortSignal): Promise<Shipment> {
+  return request<Shipment>(`/api/shipments/${id}`, { signal });
+}
+
+export type ShipmentSyncResult = {
+  institute_code: string;
+  created: number;
+  updated: number;
+  unchanged: number;
+  total: number;
+};
+
+export function postShipmentSync(instituteCode: string): Promise<ShipmentSyncResult> {
+  return request<ShipmentSyncResult>(
+    `/api/sync/shipments/${encodeURIComponent(instituteCode)}`,
+    { method: "POST" },
+  );
+}
+
+export type ShipmentReceptionBody = {
+  status?: "pending" | "in_progress" | "done";
+  checklist?: ShipmentChecklistItem[];
+  items?: ShipmentReceptionItem[];
+  note?: string;
+  test_override?: boolean;
+  test_override_reason?: string;
+};
+
+export function postShipmentReception(
+  id: number,
+  body: ShipmentReceptionBody,
+): Promise<Shipment> {
+  return request<Shipment>(`/api/shipments/${id}/reception`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+// ---- Reminders & notification channels (Phase 4, docs/11) --------------------
+
+export type ReminderScheduleKind = "once" | "daily" | "weekly" | "monthly";
+
+export type Reminder = {
+  id: number;
+  title: string;
+  note: string | null;
+  channel: string | null;
+  schedule_kind: ReminderScheduleKind;
+  next_due_at: string;
+  active: boolean;
+  last_fired_at: string | null;
+  last_error: string | null;
+  created_by: string;
+  institute_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AuditEvent = {
+  id: number;
+  ts: string;
+  actor: string;
+  user_id: number | null;
+  action: string;
+  subject: string;
+  detail: Record<string, unknown>;
+  outbox_action_id: number | null;
+};
+
+export function getReminders(active?: boolean, signal?: AbortSignal): Promise<Reminder[]> {
+  return request<Reminder[]>(
+    `/api/reminders${queryString({ active: active === undefined ? undefined : String(active) })}`,
+    { signal },
+  );
+}
+
+export type ReminderCreateBody = {
+  title: string;
+  note?: string;
+  channel?: string;
+  schedule_kind: ReminderScheduleKind;
+  next_due_at: string;
+};
+
+export function postReminder(body: ReminderCreateBody): Promise<Reminder> {
+  return request<Reminder>("/api/reminders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export type ReminderUpdateBody = {
+  title?: string;
+  note?: string;
+  /** An empty string clears the channel. */
+  channel?: string;
+  schedule_kind?: ReminderScheduleKind;
+  next_due_at?: string;
+  active?: boolean;
+};
+
+export function patchReminder(id: number, body: ReminderUpdateBody): Promise<Reminder> {
+  return request<Reminder>(`/api/reminders/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteReminder(id: number): Promise<void> {
+  return requestVoid(`/api/reminders/${id}`, { method: "DELETE" });
+}
+
+export type ReminderOccurrence = {
+  id: number;
+  reminder_id: number;
+  institute_id: number | null;
+  due_at: string;
+  fired_at: string;
+  delivery_status: "sent" | "audit_only" | "failed";
+  delivery_error: string | null;
+  escalation_due_at: string | null;
+  escalation_channel: string | null;
+  escalated_at: string | null;
+  escalation_error: string | null;
+  acknowledged_at: string | null;
+  acknowledged_by: string | null;
+};
+
+export function getReminderOccurrences(
+  openOnly = false,
+  reminderId?: number,
+  signal?: AbortSignal,
+): Promise<ReminderOccurrence[]> {
+  return request<ReminderOccurrence[]>(
+    `/api/reminder-occurrences${queryString({
+      open_only: String(openOnly),
+      reminder_id: reminderId === undefined ? undefined : String(reminderId),
+    })}`,
+    { signal },
+  );
+}
+
+export function acknowledgeReminderOccurrence(id: number): Promise<ReminderOccurrence> {
+  return request<ReminderOccurrence>(`/api/reminder-occurrences/${id}/ack`, {
+    method: "POST",
+  });
+}
+
+/** Names and kinds only — webhook URLs never reach the browser. */
+export type NotificationChannel = { name: string; kind: string };
+
+export function getNotificationChannels(signal?: AbortSignal): Promise<NotificationChannel[]> {
+  return request<NotificationChannel[]>("/api/notifications/channels", { signal });
+}
+
+export type NotificationTestResult = { channel: string; sent: boolean };
+
+export function postNotificationTest(
+  channel: string,
+  instituteCode?: string,
+): Promise<NotificationTestResult> {
+  return request<NotificationTestResult>("/api/notifications/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      channel,
+      ...(instituteCode === undefined ? {} : { institute_code: instituteCode }),
+    }),
+  });
 }

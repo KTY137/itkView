@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from app.config import ProductionAccessError, Settings
 from app.pdb_gateway import PdbGateway
@@ -47,9 +48,28 @@ def test_gateway_refuses_unconfigured_client():
         gateway.client()
 
 
+def test_gateway_never_falls_back_to_deployment_access_codes():
+    settings = make_settings(
+        itkdb_access_code1="legacy-global-code-1",
+        itkdb_access_code2="legacy-global-code-2",
+    )
+
+    gateway = PdbGateway(settings)
+
+    assert gateway.is_configured is False
+    with pytest.raises(ProductionAccessError, match="personal ITKDB access codes"):
+        gateway.client()
+
+
 def test_gateway_double_checks_the_production_guard():
     # Even a hand-built Settings object that bypassed validation is caught.
     settings = make_settings()
     object.__setattr__(settings, "pdb_instance", "production")
     with pytest.raises(ProductionAccessError):
         PdbGateway(settings)
+
+
+def test_ops_heartbeat_threshold_is_local_and_bounded():
+    assert make_settings(ops_heartbeat_stale_seconds=91).ops_heartbeat_stale_seconds == 91
+    with pytest.raises(ValidationError):
+        make_settings(ops_heartbeat_stale_seconds=0)

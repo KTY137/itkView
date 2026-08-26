@@ -8,7 +8,7 @@ These lock in the three guarantees added on top of the auth foundation:
 """
 
 import pytest
-from authutil import authenticate, create_account, login_as
+from authutil import authenticate, create_account, create_institute_profile, login_as
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 
@@ -19,11 +19,15 @@ from app.models import AuditEvent, IngestFile, OutboxAction
 # are valid so the only thing that can reject them is auth/role/CSRF.
 GATED_WRITES = [
     ("post", "/api/sync/components/TUDO", None),
+    ("post", "/api/sync/jobs/components/TUDO", None),
+    ("post", "/api/components/20USEM00000001/sync-evidence", None),
+    ("post", "/api/sync/evidence/TUDO", None),
     ("post", "/api/sync/tools/TUDO", None),
     ("post", "/api/outbox", {"institute_code": "TUDO", "kind": "stage_move"}),
     ("post", "/api/outbox/1/transition", {"to": "validated"}),
     ("post", "/api/ingest/files", {"filename": "x.json", "payload": {"data": {}}}),
     ("post", "/api/ingest/files/1/propose-outbox", {}),
+    ("post", "/api/test-types/sync?component_type=MODULE", None),
 ]
 
 
@@ -57,7 +61,7 @@ def test_gated_write_forbidden_for_viewer(client: TestClient, session_factory, m
 def test_operator_may_sync_components(client: TestClient, session_factory, tudo, as_operator):
     from app.pdb_sync import FetchResult
 
-    client.app.state.component_fetcher = lambda settings, institute: FetchResult(
+    client.app.state.component_fetcher = lambda settings, institute, codes, progress: FetchResult(
         records=[], skipped=0
     )
     assert client.post("/api/sync/components/TUDO").status_code == 200
@@ -73,6 +77,54 @@ def test_operator_may_create_outbox_and_transition(client: TestClient, tudo, as_
     action_id = created.json()["id"]
     moved = client.post(f"/api/outbox/{action_id}/transition", json={"to": "validated"})
     assert moved.status_code == 200, moved.text
+
+
+def test_institute_bound_operator_cannot_transition_foreign_actions(
+    client: TestClient, session_factory, tudo, as_operator
+):
+    foreign = create_institute_profile(
+        session_factory,
+        code="DESYZ",
+        name="DESY Zeuthen",
+        local_name_prefix="DESYZ-",
+    )
+    transitions = [
+        ("draft", "validated"),
+        ("draft", "cancelled"),
+        ("approved", "submitted"),
+        ("failed", "submitted"),
+    ]
+    action_ids: list[int] = []
+    with session_factory() as session:
+        institute_id = foreign["id"]
+        for status, _target in transitions:
+            action = OutboxAction(
+                institute_id=institute_id,
+                kind="stage_move",
+                payload={"sn": "20USEM00009999"},
+                status=status,
+                created_by="foreign@example.org",
+            )
+            session.add(action)
+            session.flush()
+            action_ids.append(action.id)
+        session.commit()
+
+    authenticate(
+        client,
+        session_factory,
+        role="operator",
+        institute_id=tudo["id"],
+        email="bound-transition@example.org",
+    )
+    for action_id, (status, target) in zip(action_ids, transitions, strict=True):
+        response = client.post(
+            f"/api/outbox/{action_id}/transition",
+            json={"to": target},
+        )
+        assert response.status_code == 403
+        with session_factory() as session:
+            assert session.get(OutboxAction, action_id).status == status
 
 
 def test_operator_may_upload_and_propose(client: TestClient, tudo, as_operator):
@@ -185,11 +237,33 @@ def test_csrf_exempts_safe_methods(client: TestClient, session_factory):
     assert client.get("/api/auth/me").status_code == 200
 
 
-def test_csrf_only_applies_once_a_session_exists(client: TestClient):
-    # No session at all: open write endpoints are not CSRF-gated (nothing to
-    # forge). Creating an institute is not role-gated and must still work.
+def test_institute_creation_requires_authentication(client: TestClient):
     resp = client.post("/api/institutes", json={"code": "ABC", "name": "A B C"})
-    assert resp.status_code == 201, resp.text
+    assert resp.status_code == 401
+
+
+def test_institute_creation_requires_global_admin(client: TestClient, session_factory, tudo):
+    authenticate(client, session_factory, role="viewer", email="tenant-viewer@example.org")
+    assert (
+        client.post("/api/institutes", json={"code": "VIEW", "name": "Viewer"}).status_code
+        == 403
+    )
+
+    authenticate(
+        client,
+        session_factory,
+        role="admin",
+        institute_id=tudo["id"],
+        email="tenant-admin@example.org",
+    )
+    assert (
+        client.post("/api/institutes", json={"code": "BOUND", "name": "Bound"}).status_code
+        == 403
+    )
+
+    authenticate(client, session_factory, role="admin", email="global-admin@example.org")
+    created = client.post("/api/institutes", json={"code": "GLOBAL", "name": "Global"})
+    assert created.status_code == 201, created.text
 
 
 # --------------------------------------------------------------------------

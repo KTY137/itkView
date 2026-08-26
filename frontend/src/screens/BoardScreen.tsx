@@ -28,7 +28,13 @@ function orderedStages(present: Set<string>): string[] {
 }
 
 /** The assembly board shows modules (the assembly units), grouped by stage. */
-export default function BoardScreen({ onOpen }: { onOpen: (sn: string) => void }) {
+export default function BoardScreen({
+  onOpen,
+  onAssemble,
+}: {
+  onOpen: (sn: string) => void;
+  onAssemble: () => void;
+}) {
   const [modules, setModules] = useState<ComponentOut[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -68,6 +74,9 @@ export default function BoardScreen({ onOpen }: { onOpen: (sn: string) => void }
         <h1>{t.nav.board}</h1>
         <span className="sub">{t.board.subtitle(modules.length)}</span>
         {demo && <span className="badge warn">{t.common.demoBadge}</span>}
+        <button type="button" className="btn primary cta" onClick={onAssemble}>
+          {t.assembly.start}
+        </button>
       </div>
       {error !== null ? (
         <div className="error-banner" role="alert">

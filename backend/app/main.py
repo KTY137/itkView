@@ -12,7 +12,9 @@ from app import __version__
 from app.api import router
 from app.config import Settings, get_settings
 from app.db import Base, ensure_phase0_sqlite_schema, make_engine, make_session_factory
+from app.notifications import make_notifier
 from app.pdb_sync import fetch_for_institute
+from app.reminders import ReminderScheduler
 from app.static_spa import mount_spa
 from app.sync_jobs import SyncJobManager, recover_interrupted_sync_jobs
 
@@ -34,6 +36,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # new job, which also releases the global single-flight lease.
     recover_interrupted_sync_jobs(app.state.session_factory)
     app.state.component_fetcher = fetch_for_institute
+    # Outbound notification seam (docs/11): the test-notification endpoint uses
+    # this; tests inject a fake the same way they fake the component fetcher.
+    app.state.notifier = make_notifier(settings)
+    # Who fires scheduled reminders depends on the deployment shape: Compose has
+    # a worker process, the desktop bundle and the dev launcher do not (docs/11).
+    if settings.reminder_scheduler == "app":
+        app.state.reminder_scheduler = ReminderScheduler(
+            app.state.session_factory, app.state.notifier, settings.reminder_poll_seconds
+        )
+        app.router.add_event_handler("startup", app.state.reminder_scheduler.start)
+        app.router.add_event_handler("shutdown", app.state.reminder_scheduler.stop)
+    else:
+        app.state.reminder_scheduler = None
     app.state.sync_job_manager = SyncJobManager(app.state.session_factory, settings)
     app.router.add_event_handler("shutdown", app.state.sync_job_manager.shutdown)
     # FastAPI/Starlette in this environment stores included routers lazily as

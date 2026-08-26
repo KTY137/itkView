@@ -14,7 +14,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # UI base URL of the PDB test instance (links shown to users).
@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     # person can open the folder and look at them directly. Unset falls back to
     # `attachments/` beside the application data.
     attachment_dir: str | None = None
+    # Bound unauthenticated share-link downloads and all mirrored payloads.
+    # A URL-valued PDB result is untrusted input; neither an endless response
+    # nor an unexpectedly large file may occupy the sync worker indefinitely.
+    attachment_download_timeout_seconds: int = 60
+    attachment_max_bytes: int = 100 * 1024 * 1024
 
     # --- PDB access -------------------------------------------------------
     pdb_instance: Literal["test", "production"] = "test"
@@ -96,6 +101,29 @@ class Settings(BaseSettings):
     # Base retry delay for transient PDB outages; the worker doubles it after
     # each unavailable attempt until worker_max_attempts is reached.
     worker_retry_backoff_seconds: int = 60
+
+    # --- Local operations telemetry --------------------------------------
+    # A worker/scheduler heartbeat remains healthy through this age.  The
+    # operations endpoint only reads this local telemetry; it never turns a
+    # dashboard refresh into a live PDB probe.
+    ops_heartbeat_stale_seconds: int = Field(default=180, ge=1, le=86_400)
+
+    # --- Notifications / reminders -----------------------------------------
+    # Timeout for one outbound notification webhook POST (Mattermost etc.).
+    # Small on purpose: a slow endpoint must not stall the worker's poll loop.
+    notify_timeout_seconds: int = 10
+    # Which process fires due reminders (docs/11):
+    #   "worker" — the standalone outbox worker ticks them (Compose runs one).
+    #   "app"    — the API process ticks them itself. The desktop bundle and the
+    #              dev launcher run no worker at all, so without this a
+    #              scheduled reminder would simply never fire there.
+    #   "off"    — nobody ticks (tests, or reminders managed elsewhere).
+    # Exactly one process should tick. A misconfiguration cannot double-send:
+    # each occurrence is claimed transactionally before it is delivered.
+    reminder_scheduler: Literal["worker", "app", "off"] = "worker"
+    # Seconds the in-app scheduler sleeps between reminder ticks. Reminders are
+    # due-time based, so this only bounds how late one may fire.
+    reminder_poll_seconds: int = 60
 
     @model_validator(mode="after")
     def _guard_production(self) -> "Settings":

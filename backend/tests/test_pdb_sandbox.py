@@ -14,6 +14,7 @@ Everything in here must stay strictly read-only.
 import pytest
 
 from app.config import Settings
+from app.pdb_credentials import PdbAccessCodes
 from app.pdb_gateway import PdbGateway
 
 pytestmark = pytest.mark.pdb_sandbox
@@ -29,7 +30,13 @@ def gateway() -> PdbGateway:
             "Production smoke needs ITKFLOW_PDB_INSTANCE=production and "
             "ITKFLOW_ALLOW_PRODUCTION=true (the test instance no longer exists)."
         )
-    return PdbGateway(settings)
+    return PdbGateway(
+        settings,
+        access_codes=PdbAccessCodes(
+            access_code1=settings.itkdb_access_code1,
+            access_code2=settings.itkdb_access_code2,
+        ),
+    )
 
 
 def test_read_only_connection(gateway: PdbGateway):

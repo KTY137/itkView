@@ -20,7 +20,7 @@ hinterlaesst bei Timeout/Absturz einen unklaren Zustand.
 
 Ein eigenstaendiger asynchroner Worker (`app/run_worker.py`, `worker`-Service in
 `deploy/docker-compose.yml`) ist der einzige Prozess, der reviewte Aktionen in
-die PDB-Testinstanz schreibt.
+die PDB schreibt. Produktionszugriff und DUMMY-Scope folgen ADR 003.
 
 - **Zustaendigkeit:** Der Worker beansprucht Aktionen in `approved` (frisch
   freigegeben) und `submitted` (Crash-Recovery oder manueller
@@ -29,10 +29,19 @@ die PDB-Testinstanz schreibt.
 - **Ablauf je Aktion** (`app/outbox_worker.py`): `approved → submitted`
   (attempts++) → Dry-Run erneut gegen den *aktuellen* Mirror pruefen → Submitter
   aufrufen → `confirmed` (mit `external_ref`) oder `failed`.
+- **Gebundene PDB-Identitaet (Ergaenzung 2026-08-24):** Beim menschlichen
+  Uebergang nach `approved` wird `OutboxPdbPrincipal` mit User-ID und Snapshot
+  der persoenlichen PDB-Identity angelegt. Der Worker laedt bei jedem Versuch
+  genau die aktuelle, verifizierte `PdbCredential` dieses Users, entschluesselt
+  sie kurzzeitig und vergleicht die Identity. Creator, anderer Approver und
+  Server-Env-Codes sind kein Fallback; damit behalten auch Retries dieselbe
+  handelnde PDB-Identitaet (ADR 004).
 - **Injizierter Submitter:** Der PDB-Write ist ein `Submitter`-Callable. Die
   Offline-Tests injizieren einen Fake; der reale `app/pdb_submit.py` ruft
-  `uploadTestRunResults` ueber den `PdbGateway` (Testinstanz-only, itkdb lazy)
-  und ist ohne konfigurierte Access-Codes inaktiv (`PdbSubmitUnavailable`).
+  `uploadTestRunResults` ueber einen operation-lokalen `PdbGateway` mit der
+  gebundenen persoenlichen Credential. Fehlt die Bindung, ist sie ungueltig
+  oder stimmt die Identity nicht mehr, scheitert die Aktion geschlossen mit
+  `PdbSubmitUnavailable`.
 - **Idempotenz:** `OutboxAction.external_ref` haelt die PDB-Run-ID. Eine Aktion
   mit gesetztem `external_ref` gilt als *bereits geschrieben* und wird ohne
   zweiten Submit auf `confirmed` gesetzt (deckt Crash-nach-Write ab).
@@ -46,11 +55,9 @@ die PDB-Testinstanz schreibt.
 - Nichts schreibt in die PDB ausser dem Worker ueber einen `Submitter`.
 - Der HTTP-Pfad bleibt frei von PDB-Latenz; Ausfaelle sind sichtbar und
   wiederaufnehmbar statt „vielleicht passiert".
-- Offene Punkte fuer den naechsten Schritt: automatischer Retry mit Backoff fuer
-  transiente Fehler (heute nur manuell via `failed → submitted`), ein
-  Max-Attempts-Cap durchsetzen (`worker_max_attempts` existiert, wird noch nicht
-  erzwungen), und die reale Idempotenz-Pruefung gegen die PDB, bevor der
-  `submitted`-Recovery-Pfad gegen die Testinstanz scharf geschaltet wird.
-- Der reale Submitter ist bewusst noch nicht gegen die Sandbox verifiziert
-  (Test-URL aufloesbar + Tokens noetig); er bleibt bis dahin ueber die
-  fehlende Konfiguration inaktiv.
+- Automatischer Retry mit exponentiellem Backoff und Max-Attempts-Cap ist
+  umgesetzt. Offen bleibt die reale Idempotenz-Pruefung gegen die PDB fuer den
+  Crash-nach-Write-Fall.
+- Raw-Upstream-Exceptions duerfen nicht in Action-Fehler oder Logs gelangen:
+  `itkdb` kann Auth-Requests inklusive Access-Codes rendern. Der reale Submitter
+  verwendet deshalb feste, sanitierte Fehlermeldungen.
