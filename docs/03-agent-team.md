@@ -1,10 +1,22 @@
 # Das itkFlow-Agenten-Team
 
+> - **Besitzt:** das Agenten-Roster — welcher Subagent welche Rolle, welche
+>   Werkzeuge und welches Modell hat, inklusive der beiden Doku-Wächter.
+> - **Für wen:** alle, die Arbeit an Subagenten verteilen oder wissen wollen,
+>   wer eine bestimmte Aufgabe übernimmt.
+> - **Verwandt:** [`00-doc-map.md`](00-doc-map.md) (was die Wächter pflegen),
+>   [`04-roadmap.md`](04-roadmap.md) (woran sie arbeiten),
+>   [`../CLAUDE.md`](../CLAUDE.md) (die Regeln, die jeder Agent lädt),
+>   [`README.md`](README.md) (Lesepfade).
+
 12 Subagenten in `.claude/agents/` (Projekt-Scope, im Repo versioniert). Claude Code wählt
 anhand der `description` automatisch den passenden Agenten; explizit anfordern geht immer
 ("nutze den code-reviewer für …"). Alle Agenten laden `CLAUDE.md` — dort stehen die harten
-Regeln (zeuthenflow nie ausführen, nur PDB-Testinstanz, keine Secrets, kein Institut-Hardcoding).
-Vor Planung oder Implementierung lesen alle Agenten zusätzlich `docs/04-roadmap.md` und ordnen
+Regeln (zeuthenflow nie ausführen; PDB-Schutzmodell — Offline-Default und Writes nur auf
+DUMMY-Komponenten, **eine Testinstanz gibt es nicht mehr**; keine Secrets; kein
+Institut-Hardcoding). Maßgeblich ist [`../CLAUDE.md`](../CLAUDE.md); diese Zeile ist nur
+eine Erinnerung und wurde am 2026-08-27 korrigiert, weil sie noch eine Testinstanz behauptete.
+Vor Planung oder Implementierung lesen alle Agenten zusätzlich [`04-roadmap.md`](04-roadmap.md) und ordnen
 ihre Arbeit dem nächsten passenden Meilenstein zu, sofern der Nutzer nichts anderes vorgibt.
 
 | # | Agent | Rolle | Werkzeuge | Besonderheit |
@@ -38,6 +50,6 @@ ihre Arbeit dem nächsten passenden Meilenstein zu, sofern der Nutzer nichts and
 - Nicht alles braucht einen Agenten: kleine Fixes macht die Hauptsession direkt; Agenten lohnen
   sich für abgegrenzte Pakete, deren Zwischenschritte den Hauptkontext fluten würden.
 - **Dokumentationsdisziplin** ist über CLAUDE.md-Regel #6 verankert: Verhaltensänderungen ziehen
-  im selben Change das zuständige Doc (`docs/00-doc-map.md`) + „Aktueller Stand" nach. Die
+  im selben Change das zuständige Doc ([`00-doc-map.md`](00-doc-map.md)) + „Aktueller Stand" nach. Die
   Haiku-Wächter `yatagarasu` (Audit) und `tenjin` (Sync) sowie der `Stop`-Hook
   `.claude/hooks/doc-guard.ps1` erzwingen das; `/sync-docs` startet Audit + Fix in einem Rutsch.

@@ -11,7 +11,7 @@ werden darf, aber nicht *wer* den tatsaechlichen Schreib-Call ausfuehrt. Bisher
 setzte der `submitted`-Uebergang nur den Status; es fand kein PDB-Write statt.
 
 Zwei Muster standen zur Wahl: synchroner Write im Request-Handler oder ein
-asynchroner Hintergrund-Worker. Der Revamp-Plan (`docs/02-revamp-plan.md`)
+asynchroner Hintergrund-Worker. Der Revamp-Plan ([`docs/02-revamp-plan.md`](../02-revamp-plan.md))
 nennt Outbox/Queue mit Retry als Kernidee und sieht einen `worker`-Container
 vor. Ein synchroner Write koppelt den HTTP-Request an die PDB-Latenz und
 hinterlaesst bei Timeout/Absturz einen unklaren Zustand.
@@ -20,7 +20,10 @@ hinterlaesst bei Timeout/Absturz einen unklaren Zustand.
 
 Ein eigenstaendiger asynchroner Worker (`app/run_worker.py`, `worker`-Service in
 `deploy/docker-compose.yml`) ist der einzige Prozess, der reviewte Aktionen in
-die PDB schreibt. Produktionszugriff und DUMMY-Scope folgen ADR 003.
+die PDB schreibt. Produktionszugriff und DUMMY-Scope folgen
+[ADR 003](003-pdb-dummy-write-scope.md). Welcher Prozess in welcher
+Betriebsart tatsaechlich draint, steht in
+[`docs/11-logistics-operations.md`](../11-logistics-operations.md).
 
 - **Zustaendigkeit:** Der Worker beansprucht Aktionen in `approved` (frisch
   freigegeben) und `submitted` (Crash-Recovery oder manueller

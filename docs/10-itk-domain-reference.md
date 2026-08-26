@@ -8,6 +8,21 @@
 >
 > Legende: ✓ = im Repo/Mirror-Daten verifiziert · ⚠ = ITk-Allgemeinwissen, gegen
 > Live-PDB zu bestaetigen.
+>
+> - **Besitzt:** die ITk-Domain-Sprache — Komponentenhierarchie, `component_type`
+>   und `type_code`, welche Teile Sensoren/ASICs sind, den Produktionsablauf
+>   Ende zu Ende und (§7) den Abgleich des Stage-Profils mit echten Daten.
+> - **Fuer wen:** alle, die Labels, Stages, Pflichttests oder Assembly-Regeln
+>   anfassen — und jeden, der die „weird labels" im UI zum ersten Mal sieht.
+> - **Verwandt:** [`09-pdb-production-strategy.md`](09-pdb-production-strategy.md)
+>   (warum Sensoren/ASICs nie registriert werden),
+>   [`05-ui-design-reference.md`](05-ui-design-reference.md) (wie diese Begriffe
+>   im Produkt erscheinen),
+>   [`07-jig-tool-quickselect.md`](07-jig-tool-quickselect.md) (Tools haengen am
+>   R-Type), [`../backend/app/domain/stages.py`](../backend/app/domain/stages.py)
+>   (der Stage-Vertrag im Code),
+>   [`01-ist-analyse-zeuthenflow.md`](01-ist-analyse-zeuthenflow.md) (dieselbe
+>   Domaene aus Sheet-Sicht), [`README.md`](README.md) (Lesepfade).
 
 ## 1. Woraus ein Modul besteht (Hierarchie)
 
@@ -48,7 +63,9 @@ Der Mirror speichert zwei Felder (`backend/app/pdb_sync.py`) ✓:
 **Warum „registrierbar" so wichtig ist:** `pdb_dummy_component_types =
 ["MODULE", "HYBRID"]` (`backend/app/config.py`) ✓. Sensoren und ASICs haben
 keinen Dummy-Mechanismus; sie zu registrieren korrumpiert die
-Kollaborations-Seriennummern (harte Regel #2, `docs/09`, ADR 003). Eine
+Kollaborations-Seriennummern (harte Regel #2,
+[`docs/09`](09-pdb-production-strategy.md),
+[ADR 003](adr/003-pdb-dummy-write-scope.md)). Eine
 Create-Module-Funktion **muss** den Typ gegen diese Liste pruefen.
 
 ### type_code entschluesseln (das eigentliche „weird label")
@@ -529,7 +546,8 @@ zFlow-Ablauf nur naeherungsweise nachbilden.
 - **Test, den viele aufzeichnen und den nichts fordert:** `MODULE_IV_AMAC`
   (129 Laeufe auf 44 Modulen) — der Ausloeser dieser Analyse. Ebenfalls
   ungefordert: `VISUAL_INSPECTION_RECEPTION` (3 Laeufe, 1 Modul); der gehoert
-  fachlich in `shipment_reception_tests` (docs/11), nicht in die Stage-Regeln.
+  fachlich in `shipment_reception_tests`
+  ([docs/11](11-logistics-operations.md)), nicht in die Stage-Regeln.
 - **`MODULE_METROLOGY` faellt systematisch durch**, aber ungleich verteilt:
   R5M1 15/28 bestanden, R2 3/36, R5M0 1/29. Die Payload-Struktur ist bei
   bestandenen und durchgefallenen Laeufen identisch (`HYBRID_POSITION`,
@@ -573,7 +591,10 @@ zFlow-Ablauf nur naeherungsweise nachbilden.
 ## Roadmap-Einordnung
 
 Domain-Grundlage fuer **Phase 3** (Assembly-Wizards, Registrierung,
-Stage-Vorschlaege) und `docs/07` (Jig-Quick-Select). Siehe `docs/04-roadmap.md`.
+Stage-Vorschlaege) und [`docs/07`](07-jig-tool-quickselect.md)
+(Jig-Quick-Select). Siehe [`04-roadmap.md`](04-roadmap.md).
 §7 gehoert zum Arbeitspaket „Stage-Move-Strecke schliessen" und ist die
-Datengrundlage fuer den Profil-Editor; die dort empfohlenen Werte werden vom
-Owner gesetzt, nicht vom Code.
+Datengrundlage fuer den Profil-Editor (GUI in
+[`05-ui-design-reference.md`](05-ui-design-reference.md), „Admin Settings →
+Production stages"); die dort empfohlenen Werte werden vom Owner gesetzt, nicht
+vom Code.

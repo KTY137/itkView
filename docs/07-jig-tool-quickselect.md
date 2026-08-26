@@ -4,6 +4,22 @@
 > (Jigs, Pickup-Tools, Glue-Batches) im Assembly-Wizard **abhaengig vom
 > Modultyp per Quick-Select** ausgewaehlt werden statt per Handeingabe.
 >
+> - **Besitzt:** die lokale `Tool`-Registry (Datenmodell, CRUD, Status, RFID),
+>   den PDB-`TOOLS`-Mirror, die Typ-Kompatibilitaet, die kombinierten
+>   Tool-Slots (`assembly_tool_slots`) und die Pflicht-Property-Pruefung beim
+>   Upload.
+> - **Fuer wen:** alle, die am Assembly-Wizard, an der Tool-Registry oder an
+>   institutsabhaengigen Property-Keys arbeiten.
+> - **Verwandt:** [`05-ui-design-reference.md`](05-ui-design-reference.md)
+>   (wie Slots und Scan-Target im Wizard aussehen),
+>   [`11-logistics-operations.md`](11-logistics-operations.md) (Glue-Batches als
+>   zweite Ressource im selben Schritt),
+>   [`10-itk-domain-reference.md`](10-itk-domain-reference.md) (R-Types, an denen
+>   die Kompatibilitaet haengt),
+>   [`superpowers/research/2026-08-26-zflow-sheet-transcription.md`](superpowers/research/2026-08-26-zflow-sheet-transcription.md)
+>   (die Sheet-Spalten, aus denen die Slots stammen),
+>   [`README.md`](README.md) (Lesepfade).
+>
 > Stand 2026-08-26: Vollstaendig umgesetzt. Die lokale `Tool`-Registry besitzt
 > auditiertes strukturiertes Create/Edit/Delete und explizite
 > `active|flagged|blacklisted`-Pflege; der Tools-Screen bietet Scanner,
@@ -149,5 +165,7 @@ Registry-Aktionen. Kein Test ruft die Live-PDB auf.
 
 Gehoert zu **Phase 3** (Assembly-Wizards mit Attachment-Properties,
 Stage-Vorschlaege) und **Phase 4** (Tool-/Jig-Registry inkl. RFID-Mapping).
-Baut auf der bestehenden Domain-Schicht (`glue.py`, `stages.py`) und der Outbox
-auf. Siehe `docs/04-roadmap.md`.
+Baut auf der bestehenden Domain-Schicht
+([`glue.py`](../backend/app/domain/glue.py),
+[`stages.py`](../backend/app/domain/stages.py)) und der Outbox auf. Siehe
+[`04-roadmap.md`](04-roadmap.md).

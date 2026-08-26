@@ -2,7 +2,10 @@
 
 ## Status
 
-Angenommen am 2026-08-24. Ergaenzt ADR 002 und ADR 003.
+Angenommen am 2026-08-24. Ergaenzt [ADR 002](002-async-outbox-worker.md) und
+[ADR 003](003-pdb-dummy-write-scope.md). Produktseite und Rollen:
+[`docs/06-users-roles-audit.md`](../06-users-roles-audit.md); Betrieb und
+Env-Setup: [`docs/09-pdb-production-strategy.md`](../09-pdb-production-strategy.md).
 
 ## Kontext
 

@@ -4,8 +4,10 @@ Status: akzeptiert und in M1–M4 umgesetzt (2026-08-26)
 
 Die Architekturentscheidung und ihr zusammenhaengender Produktschnitt sind im
 Arbeitsbaum umgesetzt. Die abschliessende gemeinsame Regression/Abnahme wird
-weiterhin separat in `docs/04-roadmap.md` verfolgt; dieser ADR ersetzt keinen
-Testnachweis.
+weiterhin separat in [`docs/04-roadmap.md`](../04-roadmap.md) verfolgt; dieser
+ADR ersetzt keinen Testnachweis. Zielvertrag:
+[Spec „Staged-First-Modulseite + Auto-Mirror"](../superpowers/specs/2026-08-25-staged-first-module-page-design.md);
+UI-Darstellung: [`docs/05-ui-design-reference.md`](../05-ui-design-reference.md).
 
 ## Kontext
 
@@ -58,7 +60,9 @@ den naechsten Komponentenzustand erscheinen.
    `evidence_component_types`-Profilwert bestimmt den Scope; der Seed-Default
    ist `MODULE` und kann institutsspezifisch im strukturierten Admin-Settings-
    Screen ersetzt werden.
-6. **Drei Attachment-Quellen werden gleich sicher behandelt.**
+6. **Drei Attachment-Quellen werden gleich sicher behandelt.** Der ausfuehrliche
+   Vertrag von Attachment-Store, Bildern und Galerie steht in
+   [`docs/12-attachments-and-images.md`](../12-attachments-and-images.md).
 
    - Binary-Store-Dateien kommen ueber `getTestRunAttachment` mit ihrer
      Test-Run-Referenz.

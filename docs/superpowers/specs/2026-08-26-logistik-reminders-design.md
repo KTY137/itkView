@@ -1,9 +1,15 @@
 # Design: Glue-Batches, Shipments, Reminders (Phase 4)
 
-> Spec fuer die drei Phase-4-Features aus `docs/04-roadmap.md` ("Logistik und
+> Spec fuer die drei Phase-4-Features aus
+> [`docs/04-roadmap.md`](../../04-roadmap.md) ("Logistik und
 > Betrieb"). Autonome Session 2026-08-25; Entscheidungen folgen den bestehenden
-> Planungsdokumenten (docs/02 §2/§3, docs/07) und den Code-Konventionen
+> Planungsdokumenten ([docs/02](../../02-revamp-plan.md) §2/§3,
+> [docs/07](../../07-jig-tool-quickselect.md)) und den Code-Konventionen
 > (Tool-Registry als Vorlage). Produkt-Facing bleibt Englisch.
+>
+> Umgesetzt; der geltende Vertrag ist inzwischen
+> [`docs/11-logistics-operations.md`](../../11-logistics-operations.md) — diese
+> Spec bleibt die Begruendung dahinter.
 
 ## Ziel
 
