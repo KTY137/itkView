@@ -532,7 +532,14 @@ def _is_transient_page_error(error: Exception) -> bool:
         if status is None:
             status = getattr(current, "status_code", None)
         if isinstance(status, int):
-            return status in {408, 429} or 500 <= status < 600
+            # 501/505 state that the server does not implement something, so
+            # a retry cannot change the answer. Same rule as the attachment
+            # mirror (`app.attachment_store._PERMANENT_5XX_STATUSES`), kept in
+            # step deliberately: one classification drifting from the other is
+            # how a permanent answer starts being retried forever.
+            if status in {408, 429}:
+                return True
+            return 500 <= status < 600 and status not in {501, 505}
 
         name = type(current).__name__.lower()
         detail = str(current).lower()

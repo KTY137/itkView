@@ -31,6 +31,20 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-27)
 
+- **Sync brach immer bei Step 2 ab (2026-08-27, gegen den echten Spiegel
+  diagnostiziert).** Zweimal exakt bei 489/3839 Dateien — deterministisch,
+  kein Netzausfall. Ab Position 487 zeigen **87 aufeinanderfolgende**
+  CERNBox-Links in **eine** Ordner-Freigabe; CERNBox antwortet dort mit
+  **HTTP 501**, unser Klassifikator hielt jedes 5xx fuer voruebergehend, und
+  fuenf Fehlschlaege in Folge liessen den Outage-Breaker den **ganzen Job**
+  abreissen — bei einwandfrei antwortender PDB. Behoben: (1) 501/505 sind
+  dauerhafte Antworten, kein Retry-Fall (`app/pdb_sync.py` gleichgezogen);
+  (2) der Breaker zaehlt **pro Remote** — ein totes Share-Host wird
+  uebersprungen, nur ein PDB-Ausfall laesst den Sweep scheitern. **Keine
+  CERN-Zugangsdaten noetig**, cernbox ist anonym erreichbar. Offen und
+  bewusst getrennt: die 87 Bilder liegen als **tar-Archiv** hinter einer
+  Ordner-Freigabe; sie zu spiegeln ist ein eigener Schnitt. Details docs/09.
+
 - **Stiller Verlust des Evidence-Retrys behoben (2026-08-27).** Ein
   Zeitstempel-Gleichstand (Windows-Uhr ~15,6 ms) liess das Retry-Verdikt eines
   transient gescheiterten Evidence-Nachlaufs ungeschrieben; ein fehlender
