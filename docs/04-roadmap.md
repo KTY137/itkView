@@ -31,6 +31,16 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-27)
 
+- **Stiller Verlust des Evidence-Retrys behoben (2026-08-27).** Ein
+  Zeitstempel-Gleichstand (Windows-Uhr ~15,6 ms) liess das Retry-Verdikt eines
+  transient gescheiterten Evidence-Nachlaufs ungeschrieben; ein fehlender
+  Schluessel ist weder `due` noch `blocked`, also wurde **kein** Retry geplant
+  und der Nachlauf verschwand bis zum naechsten Handsync. Ursache: ein Helfer,
+  der fuer die Abdeckungsfrage korrekt strikt vergleicht, entschied auch ueber
+  das Schreiben des Verdikts, wo die sichere Richtung die umgekehrte ist.
+  Gefunden als vermeintlich flakiger Test — die Testvorbedingung haengt jetzt
+  nicht mehr an der Uhraufloesung. Details docs/09.
+
 - **Nicht darstellbare Bildformate (2026-08-27):** `is_image` beantwortet
   „ist das ein Bild?“, die Galerie braucht „malt ein Browser das?“. Die
   Content-Type-Reparatur hätte zwei 36-MB-TIFFs wahrheitsgemäß auf
