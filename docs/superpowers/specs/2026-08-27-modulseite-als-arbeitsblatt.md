@@ -412,6 +412,19 @@ Konflikt zwischen Payload-Institut und expliziter Auswahl scheitert geschlossen.
 **Bewusst offen:** `worksheet.children[].rows[]` bekommt **kein** `derived`
 (eigenes Schema, nicht in §9); und die Worksheet-Ableitung liest nur
 gespiegelte Läufe — ein gestagter, noch nicht gepushter Upload meldet
-`no_run`, sein Urteil steht im Dry-Run. Der PDB-Schreibpfad
-(`pdb_submit`/`pdb_upload`) mischt `derived_results` noch nicht in das
-hochgeladene Dokument; das ist die eine verbleibende Naht (E3).
+`no_run`, sein Urteil steht im Dry-Run. Die fruehere PDB-Schreibnaht ist
+geschlossen: `derived_results` und die vollstaendige Menge
+`derived_result_codes` werden beim Worker erneut aus Ingest, Institutsprofil
+und exaktem Modultyp verifiziert. Alle kontrollierten Codes werden aus einer
+Kopie der Upload-`results` entfernt, danach werden nur vorhandene Ableitungen
+autoritativ eingesetzt; so ueberlebt bei fehlendem Input kein alter Rohwert.
+Der Ingest bleibt unveraendert.
+
+Weiter offen in E3 sind zwei im Live-Sheet flaechendeckende Vorformeln:
+`GW_HYBRID1 = GW_HYBRID1T - GW_T1` und
+`GW_HYBRID2 = GW_HYBRID2T - GW_T2` (Zeilen 17/20, je 290/290 Formelzellen).
+Der aktuelle Vertrag kann nur `measured - subtract` fuer das eigentliche
+Klebegewicht aus bereits fertigen Ohne-Tab-Werten ausdruecken. Ebenfalls offen
+ist die fachliche Bindung zwischen den zwei Glue-Urteilen und dem einzelnen
+PDB-`passed`-Bit; bis zu einer ausdruecklichen Override-/Audit-Regel darf das
+nicht stillschweigend aus einem Browserwert abgeleitet werden.

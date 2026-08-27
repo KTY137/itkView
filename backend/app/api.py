@@ -32,7 +32,7 @@ from app.auth import (
 from app.config import ProductionAccessError, Settings
 from app.domain.glue import pot_life_state
 from app.domain.stages import DEFAULT_STAGE_ORDER
-from app.glue_service import derivation_payload, derived_result_grams
+from app.glue_service import derivation_payload, derived_result_codes, derived_result_grams
 from app.ingestion import (
     ParsedTestRun,
     derive_glue_results,
@@ -3187,6 +3187,16 @@ def propose_ingest_outbox_action(
             # the uploaded document keeps matching the sha256 it was received
             # under while the write intent still carries the derived values.
             "derived_results": derived_result_grams(derivation),
+            # Includes output codes whose value is absent because an input is
+            # missing. Those codes are still server-owned and must be removed
+            # from raw results rather than allowing a stale formula value to
+            # pass through unchanged.
+            "derived_result_codes": derived_result_codes(derivation),
+            # The complete reviewed server decision is part of the immutable
+            # write intent too. The worker recomputes it immediately before
+            # submission, so a later target/tolerance change requires a fresh
+            # operator review even when the numeric upload values are equal.
+            "derived": derivation_payload(derivation),
         },
     )
     db.add(action)

@@ -49,6 +49,7 @@ __all__ = [
     "derivation_payload",
     "derive_evidence",
     "derive_for_component",
+    "derived_result_codes",
     "derived_result_grams",
     "glue_model_from_settings",
     "institute_glue_model",
@@ -176,3 +177,20 @@ def derived_result_grams(derivation: GlueDerivation | None) -> dict[str, float]:
         for step in derivation.steps
         if step.result_code is not None and step.measured_mg is not None
     }
+
+
+def derived_result_codes(derivation: GlueDerivation | None) -> list[str]:
+    """Every PDB result code controlled by the selected server formula.
+
+    This is deliberately broader than :func:`derived_result_grams`: a step
+    with a missing scale reading has no value to upload, but its output code is
+    still server-owned and any stale/raw value under that code must be removed
+    from the PDB document rather than slipping through unchanged.
+    """
+    if derivation is None:
+        return []
+    return list(
+        dict.fromkeys(
+            step.result_code for step in derivation.steps if step.result_code is not None
+        )
+    )

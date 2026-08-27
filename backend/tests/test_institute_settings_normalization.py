@@ -229,6 +229,18 @@ def test_authenticated_email_can_remove_credentials_without_reusing_password():
         },
         {"assembly_tool_slots": [{"key": "top", "label": "Top", "property_key": "1_INVALID"}]},
         {"assembly_tool_slots": [{"key": "top", "label": "Top", "property_key": "A" * 65}]},
+        {"test_tool_fields": []},
+        {"test_tool_fields": {"BAD TYPE": [{"code": "JIG"}]}},
+        {"test_tool_fields": {"MODULE_BOW": {"code": "JIG"}}},
+        # An empty list is rejected rather than dropped: an admin must not
+        # watch a key they typed disappear on save without being told why.
+        {"test_tool_fields": {"MODULE_BOW": []}},
+        {"test_tool_fields": {"MODULE_BOW": ["JIG"]}},
+        {"test_tool_fields": {"MODULE_BOW": [{"code": "not a code"}]}},
+        {"test_tool_fields": {"MODULE_BOW": [{"code": "JIG", "label": "Jig"}]}},
+        {"test_tool_fields": {"MODULE_BOW": [{"code": "JIG"}, {"code": "jig"}]}},
+        {"test_tool_fields": {"MODULE_BOW": [{"code": "JIG", "kinds": "jig"}]}},
+        {"test_tool_fields": {"MODULE_BOW": [{"code": "JIG", "kinds": [42]}]}},
     ],
 )
 def test_rejects_invalid_operational_settings_without_echoing_values(patch):
@@ -344,3 +356,37 @@ def test_assembly_tool_slots_reject_duplicate_property_keys():
                 ]
             },
         )
+
+
+def test_normalizes_test_tool_fields_and_uppercases_codes():
+    """Which test-type fields hold a jig is institute business, not a literal.
+
+    A PDB definition says `dataType: string` for a jig field, so the generated
+    form renders free text and the mirror fills up with spellings — one
+    institute's 28 MODULE_BOW runs carry three names for the same jig. Naming
+    the field here is what turns it into a picker over the tool registry.
+    """
+    assert normalize_institute_settings_update(
+        {},
+        {
+            "test_tool_fields": {
+                " module_bow ": [
+                    {"code": " jig ", "kinds": [" JIG ", "pickup_tool", "jig"]},
+                    {"code": "used_setup"},
+                ]
+            }
+        },
+    ) == {
+        "test_tool_fields": {
+            "MODULE_BOW": [
+                {"code": "JIG", "kinds": ["jig", "pickup_tool"]},
+                {"code": "USED_SETUP"},
+            ]
+        }
+    }
+
+
+def test_test_tool_fields_none_clears_the_mapping():
+    assert normalize_institute_settings_update({}, {"test_tool_fields": None}) == {
+        "test_tool_fields": None
+    }

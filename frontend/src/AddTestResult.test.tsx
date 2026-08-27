@@ -1,9 +1,19 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { IngestFile, IngestPreview, OutboxAction } from "./api";
+import type {
+  IngestFile,
+  IngestPreview,
+  Institute,
+  OutboxAction,
+  TestTypeSchema,
+  Tool,
+  WorksheetDerived,
+} from "./api";
 import {
   getIngestPreview,
+  getInstitutes,
+  getTools,
   postIngestFile,
   postIngestOutboxProposal,
 } from "./api";
@@ -14,6 +24,8 @@ vi.mock("./api", () => ({
   getIngestPreview: vi.fn(),
   postIngestFile: vi.fn(),
   postIngestOutboxProposal: vi.fn(),
+  getInstitutes: vi.fn(async () => []),
+  getTools: vi.fn(async () => []),
 }));
 
 const labels: AddTestResultLabels = {
@@ -70,6 +82,18 @@ const labels: AddTestResultLabels = {
   staged: (id) => `Staged as ${id}`,
   stageFailed: (error) => `Stage failed: ${error}`,
   reset: "Reset result",
+  toolSectionTitle: "Tooling",
+  toolField: {
+    choose: "Choose a tool",
+    unknownValue: (value) => `${value} — not in the tool registry`,
+    scanLabel: (field) => `Scan a tool for ${field}`,
+    scanPlaceholder: "Scan tool barcode or RFID",
+    scan: "Scan",
+    scanNoMatch: (value) => `No tool offered for this field matches ${value}.`,
+    noCandidates: "No registered tool fits this component type and field yet.",
+    registryError: (error) => `Could not load the tool registry: ${error}`,
+    required: "Choose a tool for this field.",
+  },
   testForm: {
     runNumber: "Run number",
     date: "Measured at",
@@ -125,6 +149,28 @@ const preview: IngestPreview = {
   results: [{ name: "BOW", kind: "scalar", value: "0.12" }],
   issues: [],
   warnings: ["Review the fixture identifier."],
+};
+
+const glueDerivation: WorksheetDerived = {
+  kind: "glue_weight",
+  process: "TRUE_BLUE",
+  process_source: "profile_default",
+  steps: [
+    {
+      key: "hybrids",
+      label: "Hybrid glue",
+      measured_mg: 137.4,
+      target_mg: 151,
+      tolerance_mg: 22,
+      verdict: "ok",
+      reason: null,
+      result_code: "GW_GLUE_H1",
+      inputs: [
+        { code: "GW_SENSOR", name: "Sensor", value: 7.0162 },
+        { code: "GW_MODULE_H1", name: "Module after hybrid", value: 9.3866 },
+      ],
+    },
+  ],
 };
 
 const action: OutboxAction = {
@@ -220,6 +266,39 @@ describe("AddTestResult", () => {
       status: "proposed",
       outbox_action_id: 92,
     }, preview));
+  });
+
+  it("shows the server-derived glue judgement in the dry-run before staging", async () => {
+    vi.mocked(getIngestPreview).mockResolvedValueOnce({
+      ...preview,
+      test_type: "GLUE_WEIGHT",
+      derived: glueDerivation,
+    });
+    const user = userEvent.setup();
+    const { container } = render(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[]}
+        instituteCode="EXAMPLE"
+      />,
+    );
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]') as HTMLInputElement,
+      new File(
+        [JSON.stringify({ component: "20USEM00000001", testType: "GLUE_WEIGHT" })],
+        "glue.json",
+        { type: "application/json" },
+      ),
+    );
+
+    expect(await screen.findByText("Derived by the server")).toBeInTheDocument();
+    expect(screen.getByText("Hybrid glue")).toBeInTheDocument();
+    expect(screen.getByText("137.4 mg")).toBeInTheDocument();
+    expect(screen.getByText("151 mg")).toBeInTheDocument();
+    expect(screen.getByText("± 22 mg")).toBeInTheDocument();
+    expect(screen.getByText(/values checked just now/i)).toBeInTheDocument();
   });
 
   it("opens on the pinned reception test and sends both server-side pins", async () => {
@@ -474,5 +553,227 @@ describe("AddTestResult", () => {
 
     expect(screen.queryByLabelText("Test type")).not.toBeInTheDocument();
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Tool fields (the sheet's data-validation dropdowns).
+ *
+ * The production sheet never lets an operator type a jig serial: every
+ * tooling row is a dropdown. Where itkFlow left one as free text, the mirror
+ * shows the result — the same jig recorded under three spellings across 28
+ * MODULE_BOW runs. These cover the picker itself: the registry populates it,
+ * the kind filter narrows it, the keyboard reaches it, and the scanner-first
+ * path is still there for the operator holding the tool.
+ */
+describe("AddTestResult tool fields", () => {
+  const bowSchema: TestTypeSchema = {
+    id: 9,
+    component_type: "MODULE",
+    test_code: "MODULE_BOW",
+    name: "Module bow",
+    synced_at: "2026-08-27T09:00:00Z",
+    schema: {
+      code: "MODULE_BOW",
+      parameters: [
+        { code: "BOW", name: "Bow [mm]", dataType: "float", valueType: "single" },
+      ],
+      properties: [
+        { code: "JIG", name: "Jig", dataType: "string", valueType: "single", required: true },
+        {
+          code: "SCRIPT_VERSION",
+          name: "Script version",
+          dataType: "string",
+          valueType: "single",
+        },
+      ],
+    },
+  };
+
+  const institute: Institute = {
+    id: 3,
+    code: "EXAMPLE",
+    name: "Example Institute",
+    local_name_prefix: "EX",
+    settings: { test_tool_fields: { MODULE_BOW: [{ code: "JIG", kinds: ["jig"] }] } },
+    created_at: "2026-08-01T00:00:00Z",
+  };
+
+  function registryTool(overrides: Partial<Tool> & Pick<Tool, "id" | "code">): Tool {
+    return {
+      kind: "jig",
+      label: null,
+      rfid: null,
+      compatible_types: [],
+      institute_id: 3,
+      status: "active",
+      created_at: "2026-08-01T00:00:00Z",
+      ...overrides,
+    } as Tool;
+  }
+
+  const moduleJig = registryTool({
+    id: 11,
+    code: "20USERT0510703",
+    label: "Module jig 3",
+    rfid: "E2801160600002111C6B8584",
+  });
+  const pickupTool = registryTool({
+    id: 12,
+    code: "20USERT0510203",
+    label: "Pickup tool 3",
+    kind: "pickup_tool",
+  });
+  const wrongModuleJig = registryTool({
+    id: 13,
+    code: "20USERT0510799",
+    label: "R2-only module jig",
+    compatible_types: ["R2"],
+  });
+
+  beforeEach(() => {
+    vi.mocked(postIngestFile).mockResolvedValue(ingestFile);
+    vi.mocked(getIngestPreview).mockResolvedValue(preview);
+    vi.mocked(postIngestOutboxProposal).mockResolvedValue(action);
+    vi.mocked(getInstitutes).mockResolvedValue([institute]);
+    vi.mocked(getTools).mockResolvedValue([moduleJig, pickupTool, wrongModuleJig]);
+  });
+
+  async function openBowForm() {
+    const user = userEvent.setup();
+    render(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        componentTypeCode="R5M0_HALFMODULE"
+        labels={labels}
+        schemas={[bowSchema]}
+        instituteCode="EXAMPLE"
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Record test" }));
+    await user.selectOptions(screen.getByLabelText("Test type"), "9");
+    return user;
+  }
+
+  it("offers the registry — human label first, serial second — and only the configured kind", async () => {
+    await openBowForm();
+
+    const select = await screen.findByLabelText("Jig *");
+    expect(getTools).toHaveBeenCalledWith(
+      {
+        status: "active",
+        institute: "EXAMPLE",
+      },
+      expect.any(AbortSignal),
+    );
+    expect(select.tagName).toBe("SELECT");
+    const options = within(select as HTMLSelectElement)
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+    expect(options).toEqual(["Choose a tool", "Module jig 3 · 20USERT0510703"]);
+    expect(options.join(" ")).not.toContain("R2-only module jig");
+    // A pickup tool is a tool, but not a jig: the kind filter is the whole
+    // point of naming `kinds` in the profile.
+    expect(options.join(" ")).not.toContain("Pickup tool 3");
+
+    // The field is gone from the generated form, so there is no second,
+    // free-text way to record the same jig.
+    expect(screen.queryByRole("textbox", { name: /^Jig/u })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Script version")).toBeInTheDocument();
+  });
+
+  it("does not expose a configured tool as free text while its profile is loading", async () => {
+    const pendingInstitutes = deferred<Institute[]>();
+    vi.mocked(getInstitutes).mockReturnValueOnce(pendingInstitutes.promise);
+    const user = userEvent.setup();
+    render(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        componentTypeCode="R5M0_HALFMODULE"
+        labels={labels}
+        schemas={[bowSchema]}
+        instituteCode="EXAMPLE"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Record test" }));
+    await user.selectOptions(screen.getByLabelText("Test type"), "9");
+    expect(screen.queryByLabelText("Jig *")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Script version")).not.toBeInTheDocument();
+
+    pendingInstitutes.resolve([institute]);
+    expect((await screen.findByLabelText("Jig *")).tagName).toBe("SELECT");
+  });
+
+  it("is reachable and operable from the keyboard alone", async () => {
+    const user = await openBowForm();
+    const select = (await screen.findByLabelText("Jig *")) as HTMLSelectElement;
+
+    select.focus();
+    expect(document.activeElement).toBe(select);
+    await user.selectOptions(select, "20USERT0510703");
+    expect(select.value).toBe("20USERT0510703");
+
+    // Tab reaches the scan box next to it — the dropdown never becomes a
+    // mouse-only trap in front of the scanner path.
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByLabelText("Scan a tool for Jig"));
+  });
+
+  it("still accepts a scan: a wedge read plus Enter selects the tool", async () => {
+    const user = await openBowForm();
+    const scan = await screen.findByLabelText("Scan a tool for Jig");
+
+    // RFID, as a keyboard-wedge reader delivers it: characters then Enter.
+    await user.type(scan, "E2801160600002111C6B8584{Enter}");
+
+    const select = screen.getByLabelText("Jig *") as HTMLSelectElement;
+    expect(select.value).toBe("20USERT0510703");
+    expect((scan as HTMLInputElement).value).toBe("");
+  });
+
+  it("says so when a scan matches nothing, instead of silently doing nothing", async () => {
+    const user = await openBowForm();
+    const scan = await screen.findByLabelText("Scan a tool for Jig");
+
+    await user.type(scan, "20USERT9999999{Enter}");
+
+    expect(
+      await screen.findByText("No tool offered for this field matches 20USERT9999999."),
+    ).toBeInTheDocument();
+    expect((screen.getByLabelText("Jig *") as HTMLSelectElement).value).toBe("");
+  });
+
+  it("submits the chosen serial under the schema's own property code", async () => {
+    const user = await openBowForm();
+
+    await user.selectOptions(await screen.findByLabelText("Jig *"), "20USERT0510703");
+    await user.type(screen.getByLabelText(/^Run number/u), "1");
+    await user.type(screen.getByLabelText(/^Measured at/u), "2026-08-27T09:30");
+    await user.type(screen.getByLabelText(/^Bow/u), "0.12");
+    await user.click(screen.getByRole("button", { name: "Dry-run manual result" }));
+
+    await waitFor(() => expect(postIngestFile).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(postIngestFile).mock.calls[0]?.[0]?.payload as Record<
+      string,
+      unknown
+    >;
+    expect((payload.properties as Record<string, unknown>).JIG).toBe("20USERT0510703");
+  });
+
+  it("blocks a required tool field instead of staging a run without it", async () => {
+    const user = await openBowForm();
+
+    await screen.findByLabelText("Jig *");
+    await user.type(screen.getByLabelText(/^Run number/u), "1");
+    await user.type(screen.getByLabelText(/^Measured at/u), "2026-08-27T09:30");
+    await user.type(screen.getByLabelText(/^Bow/u), "0.12");
+    await user.click(screen.getByRole("button", { name: "Dry-run manual result" }));
+
+    // TestForm cannot enforce a field it never saw, so the panel does.
+    expect(await screen.findByText("Choose a tool for this field.")).toBeInTheDocument();
+    expect(postIngestFile).not.toHaveBeenCalled();
   });
 });

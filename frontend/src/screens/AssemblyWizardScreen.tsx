@@ -21,6 +21,7 @@ import type {
   Tool,
 } from "../api";
 import { useAuth } from "../auth";
+import { toolOptionLabel } from "../fieldLayout";
 import {
   makeDemoAssemblyPreview,
   makeDemoGlueBatches,
@@ -43,9 +44,11 @@ function componentName(component: ComponentOut): string {
   return component.local_name ?? component.sn;
 }
 
-function toolName(tool: Tool): string {
-  return `${tool.label ?? tool.code} · ${tool.code}`;
-}
+/** One naming rule for a tool, shared with the test-form tool pickers
+ * (`fieldLayout.toolOptionLabel`): the shop-floor label leads, the serial
+ * follows. A jig that reads one way in the wizard and another in a test form
+ * is a jig an operator has to re-identify. */
+const toolName = toolOptionLabel;
 
 function glueName(batch: GlueBatch): string {
   return `${batch.batch_no} · ${batch.glue_type}`;

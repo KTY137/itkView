@@ -31,6 +31,154 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-27)
 
+- **Die 87 Bilder hinter der Ordner-Freigabe sind erreichbar — sie lagen in
+  einem Tar (2026-08-27).** Live und anonym gegen die Share-Links des Owners
+  gemessen (nur GET, keine Zugangsdaten, kein PDB-Kontakt). **Ein einziger**
+  CERNBox-Ordner-Token trägt 87 Deskriptoren auf 76 Powerboards, zusammengefasst
+  20 Attachment-Zeilen, von denen **null** je gespeichert waren. Die DAV-Route
+  antwortet dort **501 Not Implemented** — eine Aussage über Fähigkeit, die
+  kein Login ändert; deshalb war „CERNBox-Anmeldefeld" die falsche Antwort.
+  `/s/<token>/download?files=<Eintrag>` antwortet dagegen mit einem POSIX-**Tar**
+  (nicht ZIP, wie docs/12 bisher behauptete), und der „Dateiname" des
+  Deskriptors ist gar keine Datei, sondern ein **Ordner** mit zwei JPEGs, zwei
+  32-MB-Canon-Rohdateien und einer Notiz. Neu: itkFlow packt **genau ein**
+  Mitglied **im Speicher** aus und übergibt dessen Bytes dem bestehenden
+  Ablageweg. Die Auswahl ist eine reine Funktion des Archivinhalts —
+  `(Rang, Pfad)` mit Rang 0 = der benannte Eintrag, 1 = darstellbares Bild,
+  2 = sonst speicherbar, 3 = Rest —, sodass die Streaming-Reihenfolge eines
+  Hosts nie ändern kann, welche Datei ein Operator bekommt. Nennt die URL
+  keinen Eintrag, wird nur ein Archiv mit genau einem Kandidaten akzeptiert.
+  **Sicherheit ist hier die Sache, nicht die Fußnote:** nie `extractall` (per
+  AST-Test am geparsten Modul festgenagelt), nur reguläre Dateien (Symlinks,
+  Hardlinks, Geräte, FIFOs, Verzeichnisse, GNU-Sparse am Typ abgelehnt),
+  Namensprüfung gegen `..`, absolute Pfade, Backslash, Laufwerksbuchstaben und
+  Steuerzeichen, Scope-Prüfung gegen den benannten Eintrag (die gemessene
+  „ganze Freigabe"-Antwort wählt damit **nichts**), die **deklarierte** Größe
+  entscheidet vor dem Lesen, vier Deckel (komprimierte Draht-Bytes,
+  dekomprimierter Tar-Strom inklusive GNU-/PAX-Metadaten, Summe der
+  deklarierten Bytes, Mitgliederzahl 2048), alle aus
+  `attachment_max_bytes` abgeleitet, und nie mehr als **ein** Mitglied im
+  Speicher. Tar und gzip-Tar, sonst nichts; ein gzip-Strom gilt erst als
+  Archiv, wenn die `ustar`-Magic im **dekomprimierten** Präfix steht.
+  HTML-Abwehr, Größenlimit und Content-Sniffing laufen unverändert über die
+  extrahierten Bytes; der `content_type` kommt aus den Magic Bytes vor der
+  Endung, sonst landete die Datei endungslos und bliebe unsichtbar. Die 16
+  funktionierenden Datei-Freigaben sind unberührt (eigener Test: ein Payload
+  jenseits des Sniff-Fensters kommt byteweise identisch an). **Kein Cache**,
+  begründet gemessen: 87 Deskriptoren fallen über `(source, code)` ohnehin auf
+  20 Abrufe zusammen, und jeder Code ist ein eigener Ordner — ein LRU über
+  80-MB-Archive kostete hunderte MB und spart null Abrufe. Gemerkt wird nur das
+  **Verdikt**: pro Sweep die `(source, code)` mit endgültigem Fehlschlag
+  (gedeckelt, ohne Bytes), sonst würde dieselbe abgelehnte Freigabe bis zu
+  neunmal geholt; transiente Fehlschläge nie, und nichts überlebt den Sweep —
+  ein DB-Flag hätte genau die Zeilen eingefroren, die dieser Schnitt repariert.
+  Am echten Archiv nachgemessen: gewählt `20USED50000029_2.JPG`, 8 845 759 B,
+  gesnifft `image/jpeg`. Preis, bewusst akzeptiert: 79 MB Archiv je Bild,
+  einmalig ~1,5 GB für die 20 Zeilen — nur eine Auflistung der Freigabe könnte
+  das vermeiden, und genau die verweigert die 501. 119 Attachment-Tests
+  (Basis 82); die Schutzregeln sind einzeln als fehlschlagbar nachgewiesen,
+  einschliesslich GNU-longname/PAX und Log-Privacy. Details
+  [`12`](12-attachments-and-images.md) §1, §2.3, §2.3a,
+  §3.4, §8.1, §9.
+
+- **Live-Sheet-Korrektheitsaudit und E3-Uploadnaht (2026-08-27).** Der
+  Modulkleber-Kern ist gegen alle relativ fortgeschriebenen Live-Formeln
+  abgeglichen: Hybrid- und Powerboard-Arithmetik, TrueBlue-Ziele (inklusive
+  R2), inklusive Toleranzgrenzen und Gramm↔Milligramm stimmen. Urteil wird auf
+  dem ungerundeten Formelwert gebildet; nicht-endliche Waagenwerte gelten als
+  fehlend. `result_code`-Felder sind keine editierbaren Doppelwerte mehr,
+  sondern ausschliesslich Serverausgabe. Beim PDB-Write werden die auf der
+  Action gestagten Werte erneut aus unveraendertem Ingest, aktuellem Profil und
+  exaktem `type_code` berechnet; Werte **und** die vollstaendige Menge
+  serverkontrollierter Outputcodes muessen exakt uebereinstimmen. Diese Codes
+  werden zuerst aus einer Kopie der Roh-`results` entfernt und nur tatsaechlich
+  berechnete Werte wieder eingesetzt. Damit kann auch bei fehlender
+  Waagenablesung kein alter/fremder Formelwert durchrutschen. Freie Injection
+  und kollidierende Outputcodes scheitern geschlossen. Frontend-seitig sind
+  `by_type_code`, der
+  echte PDB-Typ fuer Tool-Fits, leere Kompatibilitaetslisten und der
+  Profil-Lade-Race korrigiert. **Noch offen:** die im Live-Sheet in 290/290
+  Spalten aktiven Vorformeln `GW_HYBRID1T-GW_T1 -> GW_HYBRID1` und analog H2;
+  ein gespeichertes TUDO-Profil (der auditierte Stand war `{}`); die explizite
+  Regel fuer zwei Glue-Urteile gegen ein PDB-`passed`-Bit; sowie der lokale
+  Glue-Werkzeugnachweis aus E5. `GW_METHOD`/`GLUE_METHOD_V_*` sind keine
+  Tool-Slots. Mischungsrechner, Line-Speed-Korrektur und die historische
+  einseitige Hybrid-ASIC-Regel gehoeren zu eigenen, noch nicht implementierten
+  Spreadsheet-Schnitten und duerfen nicht als Teil dieses Modul-E3 gelten.
+
+- **Erfassungspanels folgen dem Blatt: Reihenfolge, Baender, Tool-Dropdowns
+  (2026-08-27).** Gegen den Live-Export des Blattes „Production Overview
+  TU Dortmund" gearbeitet, nicht gegen die Abschrift. Drei Befunde, alle
+  behoben. (1) **Die Feldreihenfolge war keine.** Die PDB listet `GLUE_WEIGHT`
+  als `GW_SENSOR, GW_GLUE_H2, GW_HYBRID1, GW_GLUE_PB, …` — jedes abgeleitete
+  Klebegewicht zwischen den Waagenwerten — und setzt **jedes `order`-Feld auf
+  1**, es gab also nichts zu sortieren. Das Blatt fuehrt dieselben Felder als
+  „erst die Teile, dann die Baugruppe, dann die Ableitung" (Zeilen 10/17/21/24
+  bzw. 35/40/43). Genau das steht schon im Institutsprofil: `glue_weight_inputs`
+  nennt je Schritt `subtract`, `measured` und `result_code`. Die neue reine
+  Einheit `frontend/src/fieldLayout.ts` **liest die Reihenfolge aus der Formel**
+  — kein Feldcode und kein Modultyp als Literal (harte Regel 4), und die
+  Reihenfolge kann der Arithmetik nie widersprechen. Aktive `result_code`s
+  werden dabei als berechnete Serverausgabe aus dem Formular entfernt. Ein
+  Code, den zwei Schritte nennen, erscheint einmal, im messenden Band. Ohne
+  Profil bleibt alles wie vorher. (2) **Echte PDB-Tool-Felder waren Freitext.** Eine
+  PDB-Definition kann `MODULE_BOW.JIG` nicht von beliebigem
+  `dataType: "string"` unterscheiden, und der Spiegel
+  zeigt den Preis: dieselbe Jig in **28 `MODULE_BOW`-Laeufen unter drei**
+  Schreibweisen, eine Bondmaschine in **17 Laeufen unter vier**. Neuer
+  validierter Profilschluessel `test_tool_fields`
+  (`{"<TEST_TYPE>": [{"code", "kinds", "step"}]}`, `app/institute_settings.py`,
+  `null` loescht, leere Liste wird mit Begruendung abgelehnt): die genannten
+  Felder verlassen das generierte Formular und werden zur Auswahl ueber die
+  bestehende Tool-Registry, clientseitig gefiltert nach `Tool.kind` und
+  `compatible_types`,
+  Label vorn und Seriennummer hinten (dieselbe Regel wie im Assembly-Wizard,
+  jetzt eine gemeinsame Funktion). `step` haengt das Feld an ein
+  `glue_weight_inputs`-Band. Das ist Infrastruktur, keine Glue-PDB-Zuordnung:
+  das reale `GLUE_WEIGHT`-Schema hat kein Jig-/Pickup-Feld; `GW_METHOD` ist die
+  Auftragstechnik und `GLUE_METHOD_V_*` sind Programmversionen. Die
+  Sheet-Toolzeilen 28/29 sind Serienlisten, 30/38 dagegen nur teilweise bzw.
+  kombinierter Freitext und brauchen fuer E5 lokalen Nachbarspeicher.
+  **Der Scanpfad bleibt** — Enter-terminiertes Wedge-Feld neben jeder Auswahl,
+  lokal aufgeloest; das native `<select>` ist ohne Maus bedienbar. Ein
+  gespeicherter Wert, den die Registry nicht kennt, bleibt **ausgewaehlt und
+  gekennzeichnet** statt still zu verschwinden; ein Pflicht-Tool-Feld
+  blockiert das Staging mit Begruendung, weil `TestForm` ein Feld nicht
+  pruefen kann, das es nie gesehen hat. (3) **Der Edit-Strip oeffnete leer
+  ueber einem erfassten Lauf.** Er belegte nur `definition.results` vor —
+  keine gespiegelte MODULE-Definition hat diesen Schluessel, die Messfelder
+  liegen unter `parameters`. Jetzt dieselbe Praezedenz wie
+  `TestForm.measurementFields`.
+  **Offene Naht, bewusst:** Ueberschriften **zwischen** den generierten
+  Messfeldern kann nur `TestForm` zeichnen (eine `groups`-Prop); heute stehen
+  die Baender ueber der Tooling-Sektion. Ebenso offen: ein Admin-Settings-
+  Abschnitt fuer `test_tool_fields` — der Schluessel ist heute nur ueber die
+  Settings-API setzbar. Ebenfalls offen sind die Live-Sheet-Vorformeln fuer
+  Hybridgewichte ohne Tabs. Verifiziert: `tsc` und die fokussierten Frontend-
+  und Backend-Suiten sauber. Details docs/05.
+
+- **Kein Testtyp war erfassbar — Messfelder liegen unter `parameters`
+  (2026-08-27).** `TestForm` baute seine Felder aus `definition.properties`
+  und `definition.results`. Keine der 14 gespiegelten PDB-Definitionen hat
+  einen `results`-Schluessel: die Messfelder stehen unter **`parameters`**
+  (GLUE_WEIGHT 19, VISUAL_INSPECTION 18, MODULE_WIRE_BONDING 22,
+  HYBRID_TESTS_SUMMARY 36). Das Formular rendert also nur die
+  Bedingungsfelder und verweigerte zugleich das Absenden ohne Messwert —
+  ein Totalblocker fuer jeden Testtyp, ausgeliefert und zweimal beim Owner
+  aufgeschlagen. `TestForm.measurementCollection()` entscheidet den Vorrang
+  jetzt an einer Stelle: `results` gewinnt, solange es Felder traegt, sonst
+  `parameters`; genau ein Block wird gerendert. Am Live-Spiegel nachgemessen:
+  11 der 14 Definitionen sind vollstaendig erfassbar, MODULE_METROLOGY zu 1
+  von 6 (fuenf `object`-Positionskarten), HYBRID_TESTS_SUMMARY und MODULE_TC
+  zu 0 — die beiden letzten sagen das jetzt als Hinweis, statt eine fehlende
+  Eingabe zu behaupten. Ursache der Blindheit: **jede** bisherige Fixture war
+  `results`-foermig, eine Form, die die PDB nie liefert; die neuen Fixtures in
+  `frontend/src/test/pdbTestTypeSchemas.ts` sind wortgleich aus dem
+  Live-Spiegel kopiert. Server-seitig war nichts anzupassen — der Dry-Run
+  validiert Wertformen je Testtyp (`ingestion.py`) und nie Codes gegen das
+  Schema, es gibt also keine zweite Liste, die auseinanderlaufen koennte.
+  Doku: [`05`](05-ui-design-reference.md) „Testerfassung".
+
 - **Sync brach immer bei Step 2 ab (2026-08-27, gegen den echten Spiegel
   diagnostiziert).** Zweimal exakt bei 489/3839 Dateien — deterministisch,
   kein Netzausfall. Ab Position 487 zeigen **87 aufeinanderfolgende**
@@ -222,9 +370,12 @@ vom Design-Ziel abdriftet.
   TypeScript sauber. Gegen den Echtbestand reproduziert die Rechnung die
   gespeicherten Werte auf 1 mg genau in 25 von 31 vollständigen Hybrid- und 13
   von 18 Powerboard-Sätzen; die übrigen 11 Läufe widersprechen ihren eigenen
-  Waagenwerten. **Offene E3-Naht:** `pdb_submit`/`pdb_upload` mischen die auf der
-  Outbox-Action gestagten `derived_results` noch nicht in das hochgeladene
-  Dokument.
+  Waagenwerten. **E3-Uploadnaht geschlossen:** `pdb_submit`/`pdb_upload`
+  entfernen die erneut verifizierten `derived_result_codes` aus den
+  Rohwerten und mischen nur serverseitig erneut verifizierte
+  `derived_results` autoritativ in das hochgeladene Dokument. Offen bleiben
+  die Vorformeln fuer
+  Hybridgewichte ohne Tabs und die fachliche `passed`-Bindung.
 - **Zwei Falschaussagen der Modulseite behoben (2026-08-27, Etappe E1 aus
   [`superpowers/specs/2026-08-27-modulseite-als-arbeitsblatt.md`](superpowers/specs/2026-08-27-modulseite-als-arbeitsblatt.md)
   §1; beide gegen den echten TUDO-Spiegel gemessen).**

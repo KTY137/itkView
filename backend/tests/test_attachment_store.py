@@ -1,5 +1,12 @@
 """Local attachment mirror: path safety, idempotency, partial failure."""
 
+import ast
+import gzip
+import inspect
+import io
+import tarfile
+from urllib.error import HTTPError
+
 import pytest
 from sqlalchemy import select
 
@@ -360,13 +367,27 @@ class _PublicHeaders:
 
 
 class _PublicResponse:
+    """A stand-in for `http.client.HTTPResponse`: reads *consume* the body.
+
+    Deliberately not a slice of a fixed buffer. The mirror now sniffs the
+    leading bytes of a share response before deciding whether it is a file or
+    an archive, and a double whose `read` returns the same prefix forever
+    would make that sniff invisible — and would hide a double-read bug behind
+    a test that passes.
+    """
+
     def __init__(self, url: str, data: bytes, content_type: str = "image/jpeg"):
         self._url = url
         self._data = data
+        self._offset = 0
         self.headers = _PublicHeaders(content_type)
 
-    def read(self, limit: int):
-        return self._data[:limit]
+    def read(self, limit: int = -1):
+        if limit is None or limit < 0:
+            limit = len(self._data) - self._offset
+        chunk = self._data[self._offset : self._offset + limit]
+        self._offset += len(chunk)
+        return chunk
 
     def geturl(self):
         return self._url
@@ -889,13 +910,22 @@ def test_the_web_ui_share_url_maps_onto_the_dav_route():
     host = "https://cernbox.cern.ch"
 
     # A folder share plus the file's own path inside it: the path is carried
-    # over to the DAV route. `/s/<token>/download` is deliberately absent — on
-    # a folder share it answers with the whole folder as a zip, which would be
-    # stored under this attachment's code.
+    # over to the DAV route first, because that is the route that serves plain
+    # bytes wherever it works. It does not work here — measured live, a folder
+    # share answers `501 Not Implemented`, which no credential changes — so the
+    # archive route follows it, naming the entry. A *bare*
+    # `/s/<token>/download` is deliberately absent: on a folder share it
+    # answers with the whole share, and storing part of that under one
+    # attachment's code is the failure a missing file is preferable to.
     assert candidates(f"{host}/files/link/public/tok/20USED20000062") == [
         f"{host}/remote.php/dav/public-files/tok/20USED20000062",
+        f"{host}/s/tok/download?files=20USED20000062",
         f"{host}/files/link/public/tok/20USED20000062",
     ]
+    # A nested entry keeps its whole path in the query, url-encoded once.
+    assert candidates(f"{host}/files/link/public/tok/2026/vis/front%20left.jpg")[1] == (
+        f"{host}/s/tok/download?files=2026%2Fvis%2Ffront+left.jpg"
+    )
     # A bare token addresses a single shared file, so the older routes remain.
     assert candidates(f"{host}/files/link/public/tok") == [
         f"{host}/remote.php/dav/public-files/tok",
@@ -1700,3 +1730,1032 @@ def test_a_501_is_a_permanent_answer_not_an_outage():
     for _ in range(5):
         breaker.record_failure(transient=False)
     assert breaker.sweep_is_doomed is False
+
+
+# --- folder shares answer with an archive ------------------------------------
+#
+# Measured live and anonymously against the owner's own share links on
+# 2026-08-27. One CERNBox *folder* share backs 87 attachment descriptors on 76
+# powerboards, collapsing to 20 rows, and none of them was fetchable:
+#
+#   /files/link/public/<token>/<entry>          200 text/html (the web app)
+#   /remote.php/dav/public-files/<token>/<...>  501 Not Implemented
+#   /s/<token>/download?files=<entry>           200, a POSIX **ustar** archive
+#   /s/<token>/download?path=/&files=<entry>    500 Internal Server Error
+#
+# The archive really does hold the entry and its contents:
+#
+#   20USED50000029/                                        directory
+#   20USED50000029/20USED50000029_2.JPG                     8 845 759 bytes
+#   20USED50000029/20USED50000029_4.JPG                     6 951 643 bytes
+#   20USED50000029/20USED50000029_2025_09_08_pics1-4.txt          104 bytes
+#   20USED50000029/20USED50000029_1.CR2                    32 642 645 bytes
+#   20USED50000029/20USED50000029_3.CR2                    30 617 214 bytes
+#
+# So the descriptor names a *folder*, several members could plausibly be "the
+# picture", and the bytes come from a remote host. Every test below pins one
+# rule that keeps that from turning into a wrong or a dangerous file on an
+# operator's disk.
+
+FOLDER_TOKEN = "4NM0Or4I05ztJUA"
+FOLDER_ENTRY = "20USED50000029"
+FOLDER_SHARE_URL = (
+    f"https://cernbox.cern.ch/files/link/public/{FOLDER_TOKEN}/{FOLDER_ENTRY}"
+)
+FOLDER_DAV_URL = (
+    f"https://cernbox.cern.ch/remote.php/dav/public-files/{FOLDER_TOKEN}/{FOLDER_ENTRY}"
+)
+FOLDER_ARCHIVE_URL = (
+    f"https://cernbox.cern.ch/s/{FOLDER_TOKEN}/download?files={FOLDER_ENTRY}"
+)
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"itkflow-test-png"
+
+
+def _entry(name, payload=b"", *, kind=tarfile.REGTYPE, declared=None, link=""):
+    """One archive member, ready to be assembled by hand.
+
+    Built through `TarInfo.tobuf` rather than `TarFile.addfile` on purpose:
+    `addfile` refuses to write a header that disagrees with the bytes it is
+    given, and a header that lies about its member is precisely what has to
+    be tested here.
+    """
+    info = tarfile.TarInfo(name)
+    info.type = kind
+    info.linkname = link
+    info.size = len(payload) if declared is None else declared
+    return info, payload
+
+
+def _tar(entries, *, compress=False, tail=True, archive_format=tarfile.GNU_FORMAT) -> bytes:
+    blob = b""
+    for info, payload in entries:
+        blob += info.tobuf(format=archive_format)
+        if payload:
+            blob += payload + b"\x00" * (-len(payload) % 512)
+    if tail:
+        blob += b"\x00" * 1024
+    return gzip.compress(blob) if compress else blob
+
+
+def _folder_archive(*, compress=False, entry=FOLDER_ENTRY) -> bytes:
+    """The shape the live share really returns, with tiny payloads."""
+    return _tar(
+        [
+            _entry(f"{entry}/", kind=tarfile.DIRTYPE),
+            _entry(f"{entry}/{entry}_2.JPG", JPEG),
+            _entry(f"{entry}/{entry}_4.JPG", b"\xff\xd8\xff\xe0second-picture"),
+            _entry(f"{entry}/{entry}_2025_09_08_pics1-4.txt", b"pictures 1-4\n"),
+            _entry(f"{entry}/{entry}_1.CR2", b"raw-canon-bytes"),
+            _entry(f"{entry}/{entry}_3.CR2", b"raw-canon-bytes-too"),
+        ],
+        compress=compress,
+    )
+
+
+def _share_opener(opens, *, archive: bytes | None = None, dav_status: int = 501):
+    """Serve the routes exactly as the live host does."""
+
+    def _open(url, timeout):
+        opens.append(url)
+        if "/remote.php/dav/public-files/" in url:
+            raise HTTPError(url, dav_status, "Not Implemented", None, None)
+        if "/download?files=" in url and archive is not None:
+            return _PublicResponse(url, archive, "application/octet-stream")
+        return _PublicResponse(url, HTML_ERROR_PAGE, "text/html")
+
+    return _open
+
+
+def _stage_folder_descriptor(session, evidence, code="ar" * 32, url=FOLDER_SHARE_URL):
+    _set_attachment_descriptor(
+        session,
+        evidence,
+        {
+            "code": code,
+            # As the mirror really records it: the folder name, no extension.
+            "filename": FOLDER_ENTRY,
+            "content_type": None,
+            "title": "Link to Picture",
+            "type": "share_link",
+            "source": "share_link",
+            "url": url,
+        },
+    )
+
+
+def test_no_archive_member_is_ever_written_out_by_name():
+    """The one line that would undo every guard below.
+
+    `extractall` (and `extract`) write members to disk under their *own*
+    names, which is the whole class of failure this section exists to prevent.
+    Asserted against the parsed module rather than its text, so that the
+    prose explaining the rule does not count as breaking it — and so that no
+    spelling of the call slips through.
+    """
+    forbidden = {"extractall", "extract", "extractfile_to", "makefile"}
+    called: set[str] = set()
+    for node in ast.walk(ast.parse(inspect.getsource(attachment_store))):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            called.add(node.func.attr)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            called.add(node.func.id)
+    assert called & forbidden == set()
+    # Reading one member in memory is the only sanctioned way in.
+    assert "extractfile" in called
+
+
+def test_a_folder_share_archive_yields_the_entry_the_descriptor_named(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    opens: list[str] = []
+    monkeypatch.setattr(
+        attachment_store,
+        "_open_public_url",
+        _share_opener(opens, archive=_folder_archive()),
+    )
+    _stage_folder_descriptor(session, evidence)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.downloaded == 1 and stats.failed == 0
+    # The plain-bytes route keeps priority; the archive route is what answers.
+    assert opens == [FOLDER_DAV_URL, FOLDER_ARCHIVE_URL]
+    # A 501 is a capability answer, so it must not cost a retry ladder either.
+    assert no_sleep == []
+    row = session.scalar(select(TestRunAttachment))
+    assert resolve_path(settings, row).read_bytes() == JPEG
+    # The descriptor's own name carries no extension; without a type taken
+    # from the member the file would land extension-less with `is_image`
+    # false, and the gallery would stay as empty as it was before the fix.
+    assert row.content_type == "image/jpeg"
+    assert row.is_image is True
+    assert row.relative_path.endswith(".jpg")
+
+
+def test_the_stored_archive_member_is_the_one_the_rule_names(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    """Which of five plausible members is picked, and why it cannot drift.
+
+    The live folder holds two JPEGs, two Canon raws and a note. The rule is:
+    the exactly-named entry, else an image the mirror can store, else anything
+    else it can name, else nothing - ties broken by path. That makes the
+    choice a pure function of the archive's *content*, so the order a host
+    streams members in cannot change which file an operator ends up with.
+    """
+    shuffled = _tar(
+        [
+            _entry(f"{FOLDER_ENTRY}/{FOLDER_ENTRY}_1.CR2", b"raw-canon-bytes"),
+            _entry(f"{FOLDER_ENTRY}/{FOLDER_ENTRY}_4.JPG", b"\xff\xd8\xff\xe0second"),
+            _entry(f"{FOLDER_ENTRY}/", kind=tarfile.DIRTYPE),
+            _entry(f"{FOLDER_ENTRY}/{FOLDER_ENTRY}_2025_09_08_pics1-4.txt", b"note\n"),
+            _entry(f"{FOLDER_ENTRY}/{FOLDER_ENTRY}_2.JPG", JPEG),
+        ]
+    )
+    monkeypatch.setattr(
+        attachment_store, "_open_public_url", _share_opener([], archive=shuffled)
+    )
+    _stage_folder_descriptor(session, evidence)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.downloaded == 1
+    row = session.scalar(select(TestRunAttachment))
+    # `_2.JPG`: not the note that sorts between the two pictures, not the raw
+    # that is larger, and not `_4.JPG` that arrived earlier in the stream.
+    assert resolve_path(settings, row).read_bytes() == JPEG
+
+
+def test_the_exactly_named_entry_beats_every_other_member():
+    """When the descriptor names a file rather than a folder, that file wins
+    even against an image sitting next to it."""
+    rank = attachment_store._member_rank
+    assert rank("photo", "photo") < rank("shiny.png", "photo")
+    assert rank("shiny.png", "photo") < rank("readme.txt", "photo")
+    assert rank("readme.txt", "photo") < rank("scan.cr2", "photo")
+    # Without a named entry there is no exact match to prefer.
+    assert rank("photo", "") == rank("photo.cr2", "")
+
+
+def test_a_member_escaping_its_directory_is_refused():
+    """`..` in any position, in any of the shapes a tar can carry it."""
+    for hostile in (
+        "../escape.jpg",
+        "a/../../escape.jpg",
+        f"{FOLDER_ENTRY}/../../escape.jpg",
+        "..",
+        "./../escape.jpg",
+    ):
+        info, _ = _entry(hostile, JPEG)
+        assert attachment_store.safe_archive_member_name(info) is None, hostile
+
+
+def test_an_absolute_or_windows_member_path_is_refused():
+    for hostile in (
+        "/etc/passwd",
+        "/tmp/x.jpg",
+        "C:\\Windows\\win.ini",
+        "dir\\file.jpg",
+        "C:/Windows/win.ini",
+        "file.jpg:stream",
+    ):
+        info, _ = _entry(hostile, JPEG)
+        assert attachment_store.safe_archive_member_name(info) is None, hostile
+
+
+def test_a_control_character_in_a_member_name_is_refused():
+    for hostile in ("photo\nINFO fake log line.jpg", "photo\x00.jpg", "photo\x7f.jpg"):
+        info, _ = _entry(hostile, JPEG)
+        assert attachment_store.safe_archive_member_name(info) is None, repr(hostile)
+
+
+def test_only_regular_files_are_ever_eligible():
+    """Symlinks, hardlinks, devices, fifos, directories and GNU sparse.
+
+    A symlink is the classic one: written out, it would point the stored name
+    at a file elsewhere on the operator's disk. It is refused on *type*,
+    before its name or its target is considered at all.
+    """
+    for kind in (
+        tarfile.SYMTYPE,
+        tarfile.LNKTYPE,
+        tarfile.CHRTYPE,
+        tarfile.BLKTYPE,
+        tarfile.FIFOTYPE,
+        tarfile.DIRTYPE,
+        tarfile.GNUTYPE_SPARSE,
+    ):
+        info, _ = _entry("harmless.jpg", kind=kind, link="/etc/passwd")
+        assert attachment_store.safe_archive_member_name(info) is None, kind
+    ordinary, _ = _entry("harmless.jpg", JPEG)
+    assert attachment_store.safe_archive_member_name(ordinary) == "harmless.jpg"
+
+
+def test_a_symlink_member_is_not_stored_even_when_it_is_the_named_entry(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    archive = _tar(
+        [
+            _entry(FOLDER_ENTRY, kind=tarfile.SYMTYPE, link="/etc/passwd"),
+            _entry("../escape.jpg", JPEG),
+            _entry("/etc/passwd", b"root:x:0:0"),
+        ]
+    )
+    monkeypatch.setattr(
+        attachment_store, "_open_public_url", _share_opener([], archive=archive)
+    )
+    _stage_folder_descriptor(session, evidence)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.failed == 1 and stats.downloaded == 0
+    assert resolve_path(settings, session.scalar(select(TestRunAttachment))) is None
+
+
+def test_a_member_outside_the_requested_entry_is_never_stored(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    """The measured whole-share answer, which must select nothing.
+
+    `/s/<token>/download?path=/<entry>` really does answer with the entire
+    share rooted at the token instead of with the entry. Every member in it is
+    a perfectly ordinary regular file with a perfectly ordinary name - and
+    none of them is the file this attachment code stands for.
+    """
+    archive = _tar(
+        [
+            _entry(f"{FOLDER_TOKEN}/20USED20000062/20USED20000062_10.JPG", JPEG),
+            _entry(f"{FOLDER_TOKEN}/20USED50000038/20USED50000038_1.JPG", PNG),
+        ]
+    )
+    monkeypatch.setattr(
+        attachment_store, "_open_public_url", _share_opener([], archive=archive)
+    )
+    _stage_folder_descriptor(session, evidence)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.failed == 1 and stats.downloaded == 0
+    assert resolve_path(settings, session.scalar(select(TestRunAttachment))) is None
+
+
+def test_an_unnamed_entry_needs_an_archive_with_exactly_one_candidate(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    """A share URL with no path inside it says nothing about which member is
+    meant, so only a single-candidate archive is unambiguous."""
+    bare = f"https://cernbox.cern.ch/s/{FOLDER_TOKEN}"
+
+    def _serve(archive):
+        def _open(url, timeout):
+            if url.endswith("/download"):
+                return _PublicResponse(url, archive, "application/octet-stream")
+            raise HTTPError(url, 501, "Not Implemented", None, None)
+
+        return _open
+
+    monkeypatch.setattr(
+        attachment_store,
+        "_open_public_url",
+        _serve(_tar([_entry("a/one.jpg", JPEG), _entry("a/two.jpg", PNG)])),
+    )
+    _stage_folder_descriptor(session, evidence, code="c1" * 32, url=bare)
+    ambiguous = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+    assert ambiguous.failed == 1 and ambiguous.downloaded == 0
+
+    monkeypatch.setattr(
+        attachment_store, "_open_public_url", _serve(_tar([_entry("a/one.jpg", JPEG)]))
+    )
+    _stage_folder_descriptor(session, evidence, code="c2" * 32, url=bare)
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+    assert stats.downloaded == 1
+    row = session.scalar(
+        select(TestRunAttachment).where(TestRunAttachment.pdb_code == "c2" * 32)
+    )
+    assert resolve_path(settings, row).read_bytes() == JPEG
+
+
+def test_the_declared_size_decides_whether_a_member_is_read_at_all():
+    """A member whose header is already over the limit is never read.
+
+    A remote host can put any number in a tar header. Reading first and
+    measuring afterwards is how a sweep ends up holding bytes it knew from the
+    header it would refuse — and the header is the cheapest possible place to
+    say no.
+    """
+    oversized = _tar([_entry(f"{FOLDER_ENTRY}/big.jpg", b"\xff\xd8\xff" + b"x" * 8189)])
+    stream = attachment_store._CappedStream(
+        _PublicResponse("https://share.example.org/x", oversized, "application/octet-stream"),
+        1024**2,
+    )
+    assert (
+        attachment_store._archive_member(
+            stream, mode="r|", wanted=FOLDER_ENTRY, max_bytes=4096, budget=1024**2
+        )
+        is None
+    )
+
+
+def test_a_member_declaring_a_huge_size_never_reaches_memory(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    served: list[int] = []
+
+    class _CountingResponse(_PublicResponse):
+        def read(self, limit=-1):
+            chunk = super().read(limit)
+            served.append(len(chunk))
+            return chunk
+
+    archive = _tar(
+        [_entry(f"{FOLDER_ENTRY}/{FOLDER_ENTRY}_2.JPG", JPEG, declared=10 * 1024**3)]
+    )
+
+    def _open(url, timeout):
+        if "/download?files=" in url:
+            return _CountingResponse(url, archive, "application/octet-stream")
+        raise HTTPError(url, 501, "Not Implemented", None, None)
+
+    monkeypatch.setattr(attachment_store, "_open_public_url", _open)
+    _stage_folder_descriptor(session, evidence)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.failed == 1 and stats.downloaded == 0
+    assert sum(served) < 64 * 1024
+
+
+def test_a_member_over_the_attachment_limit_loses_to_a_smaller_sibling(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    settings.attachment_max_bytes = 4096
+    archive = _tar(
+        [
+            # Ranks first by path, but no single attachment may be this big.
+            _entry(f"{FOLDER_ENTRY}/{FOLDER_ENTRY}_1.JPG", b"\xff\xd8\xff" + b"x" * 8192),
+            _entry(f"{FOLDER_ENTRY}/{FOLDER_ENTRY}_2.JPG", JPEG),
+        ]
+    )
+    monkeypatch.setattr(
+        attachment_store, "_open_public_url", _share_opener([], archive=archive)
+    )
+    _stage_folder_descriptor(session, evidence)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.downloaded == 1
+    row = session.scalar(select(TestRunAttachment))
+    assert resolve_path(settings, row).read_bytes() == JPEG
+
+
+def test_a_truncated_or_lying_archive_is_refused_as_a_verdict_not_an_error():
+    """A header that promises more than the archive contains.
+
+    Measured behaviour of the streaming reader: it raises rather than handing
+    back a short member. That has to become an explicit refusal — logged, and
+    unambiguously final — instead of an anonymous exception that the network
+    error classifier then has to guess about.
+    """
+    truncated = _tar(
+        [_entry(f"{FOLDER_ENTRY}/a.JPG", JPEG, declared=len(JPEG) + 4096)], tail=False
+    )
+    stream = attachment_store._CappedStream(
+        _PublicResponse("https://share.example.org/x", truncated, "application/octet-stream"),
+        1024**2,
+    )
+    with pytest.raises(attachment_store._ArchiveRefused):
+        attachment_store._archive_member(
+            stream, mode="r|", wanted=FOLDER_ENTRY, max_bytes=1024**2, budget=1024**2
+        )
+
+
+def test_a_short_member_is_refused_even_by_a_reader_that_tolerates_it():
+    """Declared and delivered must agree, whoever is doing the reading.
+
+    Python's streaming tar reader raises on a short member, so on this path
+    the check is defence in depth — but it is the line that decides what
+    happens if a reader ever hands back less than the header promised, and a
+    half-delivered picture stored under a right code is a lie that never gets
+    corrected. Driven directly, because the stdlib reader cannot produce the
+    situation.
+    """
+    info, _ = _entry(f"{FOLDER_ENTRY}/a.JPG", JPEG, declared=len(JPEG) + 4096)
+
+    class _TolerantReader:
+        def __iter__(self):
+            return iter([info])
+
+        def extractfile(self, member):
+            return io.BytesIO(JPEG)
+
+    with pytest.raises(attachment_store._ArchiveRefused):
+        attachment_store._walk_archive(
+            _TolerantReader(), wanted=FOLDER_ENTRY, max_bytes=1024**2, budget=1024**2
+        )
+
+
+def test_a_lying_archive_stores_nothing(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    archive = _tar(
+        [_entry(f"{FOLDER_ENTRY}/{FOLDER_ENTRY}_2.JPG", JPEG, declared=len(JPEG) + 4096)],
+        tail=False,
+    )
+    monkeypatch.setattr(
+        attachment_store, "_open_public_url", _share_opener([], archive=archive)
+    )
+    _stage_folder_descriptor(session, evidence)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.failed == 1 and stats.downloaded == 0
+    assert resolve_path(settings, session.scalar(select(TestRunAttachment))) is None
+
+
+def test_an_archive_with_thousands_of_members_is_refused():
+    crowd = _tar(
+        [
+            _entry(f"{FOLDER_ENTRY}/{index:05d}.jpg", JPEG)
+            for index in range(attachment_store.ARCHIVE_MEMBER_LIMIT + 8)
+        ]
+    )
+    stream = attachment_store._CappedStream(
+        _PublicResponse("https://share.example.org/x", crowd, "application/octet-stream"),
+        len(crowd) * 2,
+    )
+    with pytest.raises(attachment_store._ArchiveRefused):
+        attachment_store._archive_member(
+            stream,
+            mode="r|",
+            wanted=FOLDER_ENTRY,
+            max_bytes=1024 * 1024,
+            budget=len(crowd) * 2,
+        )
+
+
+def test_the_declared_member_bytes_are_capped_as_well_as_the_stream():
+    """An archive that *promises* far more than it ships.
+
+    Neither byte cap can see this coming: a few hundred bytes arrive on the
+    wire and a few hundred come out of the decompressor, and only the header
+    says that sixty-four megabytes are supposed to follow. Summing the
+    declared sizes is what turns that into a refusal at the very first header,
+    before a single byte of payload is inflated or skipped.
+
+    The refusal *reason* is asserted, not merely the refusal. Without this
+    check the archive is still refused — the reader runs off the end of it —
+    but only after the whole promised length has been chased, which is exactly
+    the work the check exists to avoid.
+    """
+    bomb = _tar(
+        [
+            _entry(f"{FOLDER_ENTRY}/{index}.jpg", b"", declared=64 * 1024**2)
+            for index in range(64)
+        ],
+        compress=True,
+    )
+    assert len(bomb) < 1024**2, "the bomb must be small on the wire to test the right cap"
+    stream = attachment_store._CappedStream(
+        _PublicResponse("https://share.example.org/x", bomb, "application/octet-stream"),
+        4 * 1024**2,
+    )
+    with pytest.raises(attachment_store._ArchiveRefused, match="declare more bytes"):
+        attachment_store._archive_member(
+            stream,
+            mode="r|gz",
+            wanted=FOLDER_ENTRY,
+            max_bytes=2 * 1024**2,
+            budget=4 * 1024**2,
+        )
+
+
+@pytest.mark.parametrize("archive_format", [tarfile.GNU_FORMAT, tarfile.PAX_FORMAT])
+def test_gzipped_extended_metadata_counts_towards_the_decompressed_budget(
+    archive_format,
+):
+    """GNU longname/PAX data is consumed before tarfile yields a TarInfo.
+
+    It therefore never reaches the declared-member-byte accounting below.
+    Repetitive metadata compresses to almost nothing, so only a cap around the
+    *decompressed* tar stream prevents it from becoming an unbounded allocation.
+    """
+    budget = 64 * 1024
+    private_long_name = f"{FOLDER_ENTRY}/" + "private-person-name-" * 16_384 + ".jpg"
+    bomb = _tar(
+        [_entry(private_long_name, JPEG)],
+        compress=True,
+        archive_format=archive_format,
+    )
+    assert len(bomb) < budget, "metadata must be small on the wire to test decompression"
+    stream = attachment_store._CappedStream(
+        _PublicResponse("https://share.example.org/x", bomb, "application/octet-stream"),
+        budget,
+    )
+
+    with pytest.raises(attachment_store._ArchiveRefused, match="decompressed archive"):
+        attachment_store._archive_member(
+            stream,
+            mode="r|gz",
+            wanted=FOLDER_ENTRY,
+            max_bytes=budget,
+            budget=budget,
+        )
+
+
+def test_an_endless_response_is_cut_off_at_the_archive_budget(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    """A host that never stops sending must not be able to run a sweep out of
+    time or memory.
+
+    Deliberately an *endless well-formed* archive: every member is a valid,
+    empty, in-scope regular file, so neither the member-count limit nor the
+    declared-byte limit is what stops it. Only the cap on the bytes taken off
+    the wire can.
+    """
+    settings.attachment_max_bytes = 64 * 1024
+    budget = 64 * 1024 * attachment_store.ARCHIVE_SIZE_BUDGET_FACTOR
+    sent: list[int] = []
+
+    class _Endless:
+        """Emits header after header. Stops at 4x the budget so that removing
+        the cap fails the test instead of hanging it."""
+
+        headers = _PublicHeaders("application/octet-stream")
+
+        def __init__(self, url):
+            self._url = url
+            self._index = 0
+
+        def read(self, limit=-1):
+            if sum(sent) >= budget * 4:
+                return b""
+            size = 32 * 1024 if limit is None or limit < 0 else min(limit, 32 * 1024)
+            chunk = b""
+            while len(chunk) < size:
+                header = tarfile.TarInfo(f"{FOLDER_ENTRY}/{self._index:08d}.dat")
+                header.size = 0
+                self._index += 1
+                chunk += header.tobuf(format=tarfile.GNU_FORMAT)
+            chunk = chunk[:size]
+            sent.append(len(chunk))
+            return chunk
+
+        def geturl(self):
+            return self._url
+
+        def close(self):
+            return None
+
+    def _open(url, timeout):
+        if "/download?files=" in url:
+            return _Endless(url)
+        raise HTTPError(url, 501, "Not Implemented", None, None)
+
+    monkeypatch.setattr(attachment_store, "_open_public_url", _open)
+    _stage_folder_descriptor(session, evidence)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.failed == 1 and stats.downloaded == 0
+    assert sum(sent) <= budget + 32 * 1024
+
+
+def test_an_archive_whose_member_is_an_html_error_page_is_refused(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    """An archive is a new transport, not a new trust level.
+
+    The guard that made these misses visible in the first place - a sign-in
+    page stored under an image's name renders as a broken tile forever - has
+    to run on bytes that arrive inside an archive too.
+    """
+    archive = _tar([_entry(f"{FOLDER_ENTRY}/{FOLDER_ENTRY}_2.JPG", HTML_ERROR_PAGE)])
+    monkeypatch.setattr(
+        attachment_store, "_open_public_url", _share_opener([], archive=archive)
+    )
+    _stage_folder_descriptor(session, evidence)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.failed == 1 and stats.downloaded == 0
+    assert resolve_path(settings, session.scalar(select(TestRunAttachment))) is None
+
+
+def test_a_gzip_compressed_archive_is_unpacked_too(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    monkeypatch.setattr(
+        attachment_store,
+        "_open_public_url",
+        _share_opener([], archive=_folder_archive(compress=True)),
+    )
+    _stage_folder_descriptor(session, evidence)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.downloaded == 1
+    row = session.scalar(select(TestRunAttachment))
+    assert resolve_path(settings, row).read_bytes() == JPEG
+    assert row.content_type == "image/jpeg"
+
+
+def test_archive_success_log_never_contains_the_remote_member_name(
+    session, settings, evidence, monkeypatch, no_sleep, caplog
+):
+    private_member = f"{FOLDER_ENTRY}/alice-private-inspection.JPG"
+    monkeypatch.setattr(
+        attachment_store,
+        "_open_public_url",
+        _share_opener([], archive=_tar([_entry(private_member, JPEG)])),
+    )
+    _stage_folder_descriptor(session, evidence)
+
+    with caplog.at_level("INFO", logger="app.attachment_store"):
+        stats = download_attachments(
+            session, _FakeGateway(configured=False), settings, "20USEM20000041"
+        )
+    session.commit()
+
+    assert stats.downloaded == 1
+    assert "unpacked from an archive" in caplog.text
+    assert private_member not in caplog.text
+    assert "alice-private-inspection" not in caplog.text
+
+
+def test_only_tar_and_gzipped_tar_count_as_archives():
+    """bzip2 and xz are refused by omission, and a gzipped *file* is not an
+    archive at all - it must stay on the ordinary download path rather than be
+    swallowed by a tar reader that cannot open it."""
+    mode = attachment_store._archive_stream_mode
+    assert mode(_folder_archive()[:512]) == "r|"
+    assert mode(_folder_archive(compress=True)[:512]) == "r|gz"
+    assert mode(gzip.compress(JPEG * 200)[:512]) is None
+    assert mode(JPEG + b"\x00" * 512) is None
+    assert mode(b"PK\x03\x04" + b"\x00" * 512) is None
+    assert mode(b"\xfd7zXZ\x00" + b"\x00" * 512) is None
+    assert mode(b"BZh9" + b"\x00" * 512) is None
+
+
+def test_a_plain_share_file_survives_the_archive_sniff_byte_for_byte(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    """The share links that already work must keep working exactly.
+
+    Sniffing reads the first bytes of every share response; if they were not
+    handed back, every stored file would silently lose its first 512 bytes - a
+    corruption that only shows on a payload longer than the sniff window.
+    """
+    picture = JPEG + bytes(range(256)) * 32
+    assert len(picture) > 512
+    monkeypatch.setattr(
+        attachment_store,
+        "_open_public_url",
+        lambda url, timeout: _PublicResponse(url, picture, "image/jpeg"),
+    )
+    _stage_share_descriptor(session, evidence, "f0" * 32)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.downloaded == 1
+    row = session.scalar(select(TestRunAttachment))
+    assert resolve_path(settings, row).read_bytes() == picture
+    assert row.size_bytes == len(picture)
+
+
+def test_the_stored_type_comes_from_the_bytes_before_the_member_name(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    """The member name is part of what the remote host chose; the bytes are
+    what gets stored. A `.txt` holding a PNG is stored as a PNG."""
+    archive = _tar([_entry(f"{FOLDER_ENTRY}/readme.txt", PNG)])
+    monkeypatch.setattr(
+        attachment_store, "_open_public_url", _share_opener([], archive=archive)
+    )
+    _stage_folder_descriptor(session, evidence)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.downloaded == 1
+    row = session.scalar(select(TestRunAttachment))
+    assert row.content_type == "image/png"
+    assert row.relative_path.endswith(".png")
+
+
+def test_an_unsniffable_member_falls_back_to_its_extension(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    archive = _tar([_entry(f"{FOLDER_ENTRY}/notes.csv", b"sn,value\n20USED1,3\n")])
+    monkeypatch.setattr(
+        attachment_store, "_open_public_url", _share_opener([], archive=archive)
+    )
+    _stage_folder_descriptor(session, evidence)
+
+    download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    row = session.scalar(select(TestRunAttachment))
+    assert row.content_type == "text/csv"
+    assert row.relative_path.endswith(".csv")
+
+
+def test_the_two_extension_tables_cannot_drift_apart():
+    """`_CONTENT_TYPE_BY_EXTENSION` is written out by hand so the ambiguous
+    pairs resolve deliberately; this is what keeps it complete."""
+    for extension in set(attachment_store._EXTENSION_BY_CONTENT_TYPE.values()):
+        assert extension in attachment_store._CONTENT_TYPE_BY_EXTENSION, extension
+    for content_type in attachment_store._CONTENT_TYPE_BY_EXTENSION.values():
+        assert content_type in attachment_store._EXTENSION_BY_CONTENT_TYPE, content_type
+
+
+def test_the_archive_budget_is_derived_from_the_configured_attachment_limit(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    """One knob, not two: an operator who lowers the attachment limit also
+    lowers what a share host is allowed to stream at them."""
+    settings.attachment_max_bytes = 2048
+    budget = 2048 * attachment_store.ARCHIVE_SIZE_BUDGET_FACTOR
+    padding = b"\xff\xd8\xff" + b"p" * 1600
+    oversized = _tar(
+        [_entry(f"{FOLDER_ENTRY}/{index}.jpg", padding) for index in range(8)]
+    )
+    assert len(oversized) > budget
+    monkeypatch.setattr(
+        attachment_store, "_open_public_url", _share_opener([], archive=oversized)
+    )
+    _stage_folder_descriptor(session, evidence)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.failed == 1 and stats.downloaded == 0
+
+
+def _folder_descriptor(component_sn: str, code: str) -> dict:
+    """One row of the shape the mirror really holds: many components, one code."""
+    return {
+        "component_sn": component_sn,
+        "test_type": "PICTURE",
+        "test_run_ref": f"RUN-{component_sn}",
+        "code": code,
+        "filename": FOLDER_ENTRY,
+        "content_type": None,
+        "title": "Link to Picture",
+        "type": "share_link",
+        "url": FOLDER_SHARE_URL,
+        "source": "share_link",
+    }
+
+
+def test_one_folder_share_is_asked_once_per_sweep_not_once_per_component(
+    session, settings, monkeypatch, no_sleep
+):
+    """The measured cost of the owner's mirror: 87 descriptors, 76 components,
+    20 distinct attachment codes, one shared folder.
+
+    A *stored* file needs no memo - the next component finds it on disk
+    through the `(source, code)` key and reuses it. A permanently refused one
+    has nothing on disk, so without a memo the same multi-megabyte archive is
+    fetched and thrown away once per referring component; in the live mirror
+    that is up to nine times for a single folder.
+    """
+    opens: list[str] = []
+    # Nothing inside the entry the descriptor names, so the archive is refused.
+    archive = _tar([_entry("some-other-folder/one.jpg", JPEG)])
+    monkeypatch.setattr(
+        attachment_store, "_open_public_url", _share_opener(opens, archive=archive)
+    )
+
+    breaker = attachment_store.OutageCircuitBreaker()
+    for component_sn in ("20USEP27010572", "20USEP27011071", "20USEP27012213"):
+        download_attachments(
+            session,
+            _FakeGateway(configured=False),
+            settings,
+            component_sn,
+            descriptors=[_folder_descriptor(component_sn, "shared" * 4)],
+            breaker=breaker,
+        )
+        session.commit()
+
+    # Refused once, and asked for exactly once - not once per component.
+    assert opens == [FOLDER_DAV_URL, FOLDER_ARCHIVE_URL, FOLDER_SHARE_URL]
+    assert breaker.has_permanent_miss(("share_link", "shared" * 4)) is True
+    # The memo is a remembered verdict, not a fresh outage observation.
+    assert breaker.sweep_is_doomed is False
+
+
+def test_a_shared_folder_that_works_is_fetched_once_and_then_reused(
+    session, settings, monkeypatch, no_sleep
+):
+    """The reason no archive is ever cached in memory: the natural key does
+    the work. 87 descriptors collapse to 20 `(source, code)` rows, and once
+    one component has stored the file every other component reuses it."""
+    opens: list[str] = []
+    monkeypatch.setattr(
+        attachment_store,
+        "_open_public_url",
+        _share_opener(opens, archive=_folder_archive()),
+    )
+
+    totals = []
+    breaker = attachment_store.OutageCircuitBreaker()
+    for component_sn in ("20USEP27010572", "20USEP27011071", "20USEP27012213"):
+        totals.append(
+            download_attachments(
+                session,
+                _FakeGateway(configured=False),
+                settings,
+                component_sn,
+                descriptors=[_folder_descriptor(component_sn, "works" * 4)],
+                breaker=breaker,
+            )
+        )
+        session.commit()
+
+    assert [stats.downloaded for stats in totals] == [1, 0, 0]
+    assert [stats.reused for stats in totals] == [0, 1, 1]
+    assert opens == [FOLDER_DAV_URL, FOLDER_ARCHIVE_URL]
+
+
+def test_a_transient_share_failure_is_never_memoised(
+    session, settings, monkeypatch, no_sleep
+):
+    """Only *final* answers may be remembered. A file that failed because the
+    line dropped has to stay reachable for the next component in the sweep."""
+    opens: list[str] = []
+
+    def _down(url, timeout):
+        opens.append(url)
+        raise TimeoutError("connection timed out")
+
+    monkeypatch.setattr(attachment_store, "_open_public_url", _down)
+
+    breaker = attachment_store.OutageCircuitBreaker(threshold=99)
+    for component_sn in ("20USEP27010572", "20USEP27011071"):
+        download_attachments(
+            session,
+            _FakeGateway(configured=False),
+            settings,
+            component_sn,
+            descriptors=[_folder_descriptor(component_sn, "flaky" * 4)],
+            breaker=breaker,
+        )
+        session.commit()
+
+    assert breaker.has_permanent_miss(("share_link", "flaky" * 4)) is False
+    # Both components really tried, each burning its own retry ladder.
+    assert len(opens) > 3
+
+
+def test_the_permanent_miss_memo_is_bounded():
+    """It lives as long as a sweep and a mirror holds tens of thousands of
+    attachments, so it must not be able to grow without limit."""
+    breaker = attachment_store.OutageCircuitBreaker()
+    limit = attachment_store.OutageCircuitBreaker.PERMANENT_MISS_MEMO_LIMIT
+    for index in range(limit + 100):
+        breaker.note_permanent_miss(("pdb", f"code-{index}"))
+    assert len(breaker._permanent_misses) == limit
+    # The oldest verdicts are the ones dropped, and dropping one only means it
+    # gets asked again - never that something wrong is served.
+    assert breaker.has_permanent_miss(("pdb", "code-0")) is False
+    assert breaker.has_permanent_miss(("pdb", f"code-{limit + 99}")) is True
+
+
+def test_a_refused_archive_is_retried_by_the_next_sweep(
+    session, settings, evidence, monkeypatch, no_sleep
+):
+    """No verdict is ever persisted. A refusal costs this sweep only, so that
+    a later code change - or a repaired share - brings the file back into
+    reach without anyone having to clear a flag. A durable "permanently
+    failed" column was considered and rejected for exactly this reason: it
+    would have frozen the 20 folder rows this change repairs.
+    """
+    monkeypatch.setattr(
+        attachment_store,
+        "_open_public_url",
+        _share_opener([], archive=_tar([_entry("elsewhere/other.jpg", JPEG)])),
+    )
+    _stage_folder_descriptor(session, evidence)
+    first = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+    assert first.failed == 1
+
+    monkeypatch.setattr(
+        attachment_store,
+        "_open_public_url",
+        _share_opener([], archive=_folder_archive()),
+    )
+    second = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert second.downloaded == 1
+    row = session.scalar(select(TestRunAttachment))
+    assert resolve_path(settings, row).read_bytes() == JPEG
+
+
+def test_the_share_member_path_is_decoded_before_it_is_matched():
+    """Member names in a tar are plain text; the URL is percent-encoded. If
+    the two were compared as-is, every share entry with a space or a non-ASCII
+    character in its name would silently match nothing."""
+    member_path = attachment_store._share_member_path
+    host = "https://cernbox.cern.ch"
+    assert member_path(f"{host}/files/link/public/tok/front%20left.jpg") == (
+        "front left.jpg"
+    )
+    assert member_path(f"{host}/files/link/public/tok/2026/vis/a.jpg") == "2026/vis/a.jpg"
+    # A share that names no entry has no path inside it to match against.
+    assert member_path(f"{host}/files/link/public/tok") == ""
+    assert member_path(f"{host}/s/tok") == ""
+    assert member_path(f"{host}/index.php/s/tok") == ""

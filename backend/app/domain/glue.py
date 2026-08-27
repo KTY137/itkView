@@ -10,6 +10,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 
@@ -60,18 +61,33 @@ def mg_to_grams(value_mg: float) -> float:
     return value_mg / MG_PER_GRAM
 
 
+def _raw_glue_weight_from_readings_mg(
+    measured_g: float, subtracted_g: Sequence[float]
+) -> float | None:
+    # JSON/PDB readings are decimal scale values. Rebuilding that decimal from
+    # `str(float)` keeps algebraically equivalent sheet chains equivalent too;
+    # binary subtraction order otherwise turns an exact inclusive boundary
+    # into 58.9999999999993 mg in one rearrangement and 59.0000000000006 mg in
+    # another.
+    remainder = Decimal(str(measured_g))
+    for part in subtracted_g:
+        remainder -= Decimal(str(part))
+    numeric = float(remainder * Decimal(str(MG_PER_GRAM)))
+    return numeric if math.isfinite(numeric) else None
+
+
 def glue_weight_from_readings_mg(measured_g: float, subtracted_g: Sequence[float]) -> float:
-    """Glue weight in mg: the weighed assembly minus everything already on it.
+    """Displayed/uploaded glue weight in mg, rounded to the scale precision.
 
     The PDB holds every `GW_` reading in grams while targets and tolerances are
     stated in milligrams, so this is the one place the two units meet. Which
     readings make up `measured_g` and `subtracted_g` is profile data
     (`glue_weight_inputs`), never a fixed chain of codes.
     """
-    remainder = measured_g
-    for part in subtracted_g:
-        remainder -= part
-    return round(grams_to_mg(remainder), 1)
+    raw = _raw_glue_weight_from_readings_mg(measured_g, subtracted_g)
+    if raw is None:
+        raise ValueError("Glue-weight arithmetic must produce a finite value.")
+    return round(raw, 1)
 
 
 def glue_weight_mg(weight_before_g: float, parts_weight_g: float, weight_after_g: float) -> float:
@@ -80,9 +96,15 @@ def glue_weight_mg(weight_before_g: float, parts_weight_g: float, weight_after_g
 
 
 def evaluate_glue_weight(measured_mg: float, target: GlueTarget) -> GlueVerdict:
-    if measured_mg < target.low_mg:
+    # Profile targets are decimal quantities too. Comparing against binary
+    # float bounds makes an exact boundary such as 100.4 - 0.3 become
+    # 100.10000000000001 and incorrectly rejects a 100.1 mg measurement.
+    measured = Decimal(str(measured_mg))
+    target_value = Decimal(str(target.target_mg))
+    tolerance = Decimal(str(target.tolerance_mg))
+    if measured < target_value - tolerance:
         return GlueVerdict.TOO_LITTLE
-    if measured_mg > target.high_mg:
+    if measured > target_value + tolerance:
         return GlueVerdict.TOO_MUCH
     return GlueVerdict.OK
 
@@ -137,15 +159,37 @@ def pot_life_state(
 
 
 # Reference values per module type. Runtime profiles opt in explicitly.
-# "hybrids" = all hybrids glued in one step; "powerboard" absent where the
-# module type carries no powerboard (M1 half-modules).
+# "hybrids" = all hybrids glued in one step; "powerboard" and its combined
+# "total" are absent where the module type carries no powerboard (M1
+# half-modules). Total targets are sums of the two independently audited
+# targets/tolerances, not the production sheet's mistyped R2 total tolerance.
 DEFAULT_MODULE_GLUE_TARGETS: dict[str, dict[str, GlueTarget]] = {
-    "R0": {"hybrids": GlueTarget(230, 35), "powerboard": GlueTarget(84, 13)},
-    "R1": {"hybrids": GlueTarget(311, 46), "powerboard": GlueTarget(84, 13)},
-    "R2": {"hybrids": GlueTarget(164, 25), "powerboard": GlueTarget(70, 11)},
-    "R3M0": {"hybrids": GlueTarget(198, 30), "powerboard": GlueTarget(157, 23)},
+    "R0": {
+        "hybrids": GlueTarget(230, 35),
+        "powerboard": GlueTarget(84, 13),
+        "total": GlueTarget(314, 48),
+    },
+    "R1": {
+        "hybrids": GlueTarget(311, 46),
+        "powerboard": GlueTarget(84, 13),
+        "total": GlueTarget(395, 59),
+    },
+    "R2": {
+        "hybrids": GlueTarget(164, 25),
+        "powerboard": GlueTarget(70, 11),
+        "total": GlueTarget(234, 36),
+    },
+    "R3M0": {
+        "hybrids": GlueTarget(198, 30),
+        "powerboard": GlueTarget(157, 23),
+        "total": GlueTarget(355, 53),
+    },
     "R3M1": {"hybrids": GlueTarget(231, 35)},
-    "R5M0": {"hybrids": GlueTarget(135, 20), "powerboard": GlueTarget(103, 16)},
+    "R5M0": {
+        "hybrids": GlueTarget(135, 20),
+        "powerboard": GlueTarget(103, 16),
+        "total": GlueTarget(238, 36),
+    },
     "R5M1": {"hybrids": GlueTarget(151, 22)},
 }
 
@@ -321,7 +365,11 @@ def select_glue_rule(
 def _numeric(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return None
+    return numeric if math.isfinite(numeric) else None
 
 
 def _result_name(result_meta: Mapping[str, Any], code: str) -> str:
@@ -360,9 +408,17 @@ def evaluate_glue_step(
             values.append(raw)
         inputs.append(GlueInput(code=code, name=_result_name(result_meta, code), value=raw))
 
-    measured_mg = (
-        None if missing else glue_weight_from_readings_mg(values[0], tuple(values[1:]))
+    raw_measured_mg = (
+        None
+        if missing
+        else _raw_glue_weight_from_readings_mg(values[0], tuple(values[1:]))
     )
+    # Individually finite inputs can still overflow when they are combined.
+    # Treat such an unrepresentable reading chain like any other invalid input;
+    # it must never reach a JSON response or PDB payload as Infinity.
+    if raw_measured_mg is None:
+        missing = True
+    measured_mg = None if raw_measured_mg is None else round(raw_measured_mg, 1)
     if results is None:
         verdict, reason = GlueVerdict.UNKNOWN, GlueUnknownReason.NO_RUN
     elif missing:
@@ -370,7 +426,10 @@ def evaluate_glue_step(
     elif target is None:
         verdict, reason = GlueVerdict.UNKNOWN, GlueUnknownReason.NO_TARGET
     else:
-        verdict, reason = evaluate_glue_weight(measured_mg, target), None
+        # Google Sheets compares the formula's unformatted value. Judge that
+        # value too; rounding first turns 114.96 mg into the inclusive 115.0
+        # boundary and incorrectly changes `too_little` to `ok`.
+        verdict, reason = evaluate_glue_weight(raw_measured_mg, target), None
     return GlueStepEvaluation(
         key=spec.key,
         label=spec.label,
@@ -453,6 +512,14 @@ DEFAULT_GLUE_WEIGHT_INPUTS: tuple[GlueStepSpec, ...] = (
         measured="GW_MODULE_H1PB",
         subtract=("GW_MODULE_H1", "GW_PB"),
         result_code="GW_GLUE_PB",
+    ),
+    GlueStepSpec(
+        key="total",
+        label="Hybrids + powerboard",
+        test_type=DEFAULT_GLUE_TEST_TYPE,
+        measured="GW_MODULE_H1PB",
+        subtract=("GW_SENSOR", "GW_HYBRID1", "GW_PB"),
+        result_code="GW_GLUE_H1PB",
     ),
 )
 
@@ -569,7 +636,39 @@ def glue_weight_inputs_from_settings(settings: Mapping | None) -> tuple[GlueStep
         if spec is None:
             return ()
         specs.append(spec)
+    if not _glue_result_codes_are_unique(specs):
+        # Legacy/directly patched settings bypass the write validator. Fail
+        # closed here rather than letting `derived_result_grams` silently keep
+        # the last of two values for the same PDB result code.
+        return ()
     return tuple(specs)
+
+
+def _glue_result_codes_are_unique(specs: Sequence[GlueStepSpec]) -> bool:
+    type_codes: set[str | None] = {None}
+    for spec in specs:
+        type_codes.update(spec.by_type_code)
+    for type_code in type_codes:
+        outputs_by_test: dict[str, set[str]] = {}
+        inputs_by_test: dict[str, set[str]] = {}
+        for spec in specs:
+            effective = spec.for_type_code(type_code)
+            inputs_by_test.setdefault(effective.test_type, set()).update(effective.input_codes)
+            if effective.result_code is None:
+                continue
+            outputs = outputs_by_test.setdefault(effective.test_type, set())
+            if effective.result_code in outputs:
+                return False
+            outputs.add(effective.result_code)
+        if any(
+            outputs & inputs_by_test.get(test_type, set())
+            for test_type, outputs in outputs_by_test.items()
+        ):
+            # The current engine evaluates every step from immutable raw
+            # results; it is not a dependency graph. An output/input collision
+            # would delete or overwrite a genuine scale reading at upload.
+            return False
+    return True
 
 
 def _default_step_label(key: str) -> str:

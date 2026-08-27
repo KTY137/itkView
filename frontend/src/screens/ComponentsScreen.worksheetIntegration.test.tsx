@@ -327,7 +327,9 @@ describe("staging an in-row edit", () => {
     // field → generated control.
     expect(screen.getByLabelText(/Bias voltage/u)).toHaveValue(IV_VOLTAGES.join("\n"));
     expect(screen.getByLabelText(/Leakage current/u)).toHaveValue(IV_CURRENTS.join("\n"));
-    expect(screen.getByLabelText(/Humidity/u)).toHaveValue(31.4);
+    // Floats render as text inputs on purpose (see TestForm): a numeric
+    // input would swallow the comma decimal separator this lab types.
+    expect(screen.getByLabelText(/Humidity/u)).toHaveValue("31.4");
     expect(screen.getByLabelText(/Assembly jig/u)).toHaveValue("JIG-07");
 
     fillRunHeader();

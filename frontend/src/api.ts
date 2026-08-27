@@ -612,9 +612,21 @@ export type TestSchemaFieldCollection =
   | Array<TestSchemaField | string>
   | Record<string, TestSchemaField | string | null>;
 
+/**
+ * One PDB test-type definition, mirrored raw (`getTestTypeByCode` is stored
+ * unmodified, so this describes the PDB's own vocabulary, not itkFlow's).
+ *
+ * The measurement fields arrive under `parameters`: every mirrored MODULE
+ * definition carries no `results` key at all. `results` stays declared because
+ * it is itkFlow's own name for the same block — the `uploadTestRunResults`
+ * payload key, and the shape callers produce when they rewrite a definition
+ * before rendering it. `TestForm.measurementFields()` owns the precedence
+ * between the two.
+ */
 export type TestSchemaDefinition = {
   properties?: TestSchemaFieldCollection;
   results?: TestSchemaFieldCollection;
+  parameters?: TestSchemaFieldCollection;
   required?:
     | string[]
     | Record<string, string[] | Record<string, boolean> | boolean | undefined>;

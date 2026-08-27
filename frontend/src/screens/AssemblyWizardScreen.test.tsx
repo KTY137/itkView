@@ -13,6 +13,7 @@ import {
   scanTool,
 } from "../api";
 import { resetDemoTools } from "../demoData";
+import { toolOptionLabel } from "../fieldLayout";
 import AssemblyWizardScreen from "./AssemblyWizardScreen";
 
 const authState = vi.hoisted(() => ({
@@ -715,5 +716,38 @@ describe("AssemblyWizardScreen", () => {
     expect(
       screen.queryByText("No active compatible tool is available for Hybrid glue jig, bottom."),
     ).not.toBeInTheDocument();
+  });
+
+  it("names a tool the same way the test-form tool pickers do, and stays keyboard operable", async () => {
+    // One naming rule across the app (`fieldLayout.toolOptionLabel`): the
+    // shop-floor label leads, the serial follows. The production sheet names
+    // jigs by their sticker ("#3 (orange)") and keeps serials in a separate
+    // inventory tab, so an operator recognises the label but has to be able
+    // to check the serial that will reach the PDB without leaving the field.
+    authState.current = { canWrite: true, demo: false, showToast: vi.fn() };
+    vi.mocked(scanAssemblyComponent).mockResolvedValue(parent);
+    vi.mocked(getInstitutes).mockResolvedValue([slotProfile]);
+    vi.mocked(getTools).mockResolvedValue([jigBottom, jigTop]);
+    vi.mocked(getGlueBatches).mockResolvedValue([]);
+    const user = userEvent.setup();
+    render(<AssemblyWizardScreen onBack={vi.fn()} onStaged={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("Parent component"), `${parent.sn}{enter}`);
+
+    const quickSelect = (await screen.findByLabelText(
+      "Add a tool to Hybrid glue jig, bottom",
+    )) as HTMLSelectElement;
+    expect(toolOptionLabel(jigBottom)).toBe("Bottom glue jig · JIG-BOT");
+    expect(
+      within(quickSelect).getByRole("option", { name: toolOptionLabel(jigBottom) }),
+    ).toBeInTheDocument();
+
+    // No mouse: focus the native select and choose by value.
+    quickSelect.focus();
+    expect(document.activeElement).toBe(quickSelect);
+    await user.selectOptions(quickSelect, String(jigBottom.id));
+    expect(
+      within(slotChips("Hybrid glue jig, bottom")).getByText(toolOptionLabel(jigBottom)),
+    ).toBeInTheDocument();
   });
 });

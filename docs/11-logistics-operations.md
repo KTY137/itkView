@@ -314,11 +314,30 @@ prefix or the sole configured process.
 **Derivation in the dry-run.** `GET /api/ingest/files/{id}/preview` derives from
 the uploaded payload before anything is staged, so the operator sees the verdict
 while the file can still be rejected. `POST /api/ingest/files/{id}/propose-outbox`
-stores the computed values as `derived_results` (result code to grams) on the
-outbox action payload. They ride on the write intent, not on the ingest file:
+stores the computed values as `derived_results` (result code to grams) plus the
+complete server-owned output set as `derived_result_codes` on the outbox action
+payload. They ride on the write intent, not on the ingest file:
 the received document keeps matching the `sha256` it was recorded under. A step
 without a computed value contributes nothing — an upload never carries a
 fabricated zero.
+
+At worker revalidation, those staged values and controlled codes are recomputed from the immutable
+ingest payload, the action's current institute profile and the mirrored PDB
+type code. Missing, malformed, injected or stale values block submission and
+must be restaged. The upload converter then copies the ingest `results`, removes
+every verified controlled code, and merges the verified derived map over that
+copy. Thus a server result wins any same-code raw value, while an output with no
+computed value (for example because a scale reading is missing) cannot leak
+through as a stale raw value. The received evidence and its SHA-256 remain
+unchanged.
+
+The production sheet also derives each hybrid's weight without tabs from its
+with-tabs and tab readings. That upstream C17/C20 chain is not yet represented
+by `glue_weight_inputs`; the current module-glue formula requires the
+`GW_HYBRID1`/`GW_HYBRID2` readings to be present already. The relationship
+between the two derived step verdicts and the PDB run's single `passed` bit is
+also intentionally unresolved until an explicit override and audit contract
+is specified.
 
 For an unmirrored component, the preview may receive `?institute_code=…` and
 returns the profile code it actually used. Proposal validation and derivation

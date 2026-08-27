@@ -23,6 +23,12 @@
 1. Ein Attachment kommt aus einer von drei Quellen: **PDB-Binary-Store**,
    **EOS**, oder **öffentlicher Share-Link in einem Result-Feld**. Welche es
    ist, steht im gespiegelten Evidence-Payload (`type` / `source`).
+   Sonderfall seit 2026-08-27: eine **Ordner**-Freigabe antwortet mit einem
+   **Tar-Archiv** statt mit der Datei (live gemessen). itkFlow packt genau
+   **ein** Mitglied im Speicher aus, nach einer festen Auswahlregel und hinter
+   einem vollständigen Satz Schutzregeln — Abschnitt 2.3a. `extractall` gibt
+   es nirgends, und kein Mitglied wird je unter seinem eigenen Namen
+   geschrieben.
 2. Der Sync lädt die Bytes in einen **lokalen Ordner** (`attachment_dir`), ein
    Unterverzeichnis je Seriennummer. Die Datenbankzeile ist nur der Index.
 3. Die UI rendert Bilder **ausschließlich** aus diesem Ordner. Kein Bild wird
@@ -172,19 +178,153 @@ Attachments, sondern als öffentliche Links **im Wert eines Result-Feldes**.
   CERNBox adressiert dieselbe öffentliche Freigabe als
   `/files/link/public/<token>[/<Pfad in der Freigabe>]`, und aus dem Browser
   kopierte Links tragen genau diese Form. Im Live-Spiegel sind das **20
-  Attachment-Zeilen** (87 Vorkommen auf 76 `PWB`-Komponenten, Titel „Link to
-  Picture" — eine Ordner-Freigabe, deren letztes Segment der Dateiname ist).
-  Sie wurden bisher **nicht** umgeschrieben, bekamen die Single-Page-App als
-  HTML, wurden von der HTML-Abwehr korrekt abgelehnt und waren deshalb **nie**
-  gespeichert. Neue Regel:
+  Attachment-Zeilen** (87 Deskriptoren auf 76 `PWB`-Komponenten, Titel „Link
+  to Picture", **ein einziger Share-Token**). Sie wurden bisher **nicht**
+  umgeschrieben, bekamen die Single-Page-App als HTML, wurden von der
+  HTML-Abwehr korrekt abgelehnt und waren deshalb **nie** gespeichert. Regel:
   1. `https://<host>/remote.php/dav/public-files/<token>[/<Pfad>]`,
-  2. `https://<host>/s/<token>/download` **nur bei leerem Pfad**,
+  2. bei nicht-leerem Pfad `https://<host>/s/<token>/download?files=<Pfad>`
+     (Archiv-Route, siehe 2.3a), bei leerem Pfad
+     `https://<host>/s/<token>/download`,
   3. die Original-URL als letzte Möglichkeit.
 
-  Der Verzicht auf (2) bei nicht-leerem Pfad ist Absicht: auf einer
-  Ordner-Freigabe liefert `/download` den **ganzen Ordner als ZIP**, und der
-  läge dann unter dem Code eines Bildes im Spiegel. Eine falsche Datei, die
-  aussieht wie eine gespeicherte, ist schlimmer als eine fehlende.
+  Ein **nacktes** `/s/<token>/download` wird bei nicht-leerem Pfad bewusst nie
+  erzeugt: es liefert die **ganze Freigabe**, und ein beliebiger Teil davon
+  unter dem Code eines Bildes ist genau der Fehler, gegen den eine fehlende
+  Datei vorzuziehen ist.
+
+### 2.3a Ordner-Freigaben antworten mit einem Archiv (2026-08-27)
+
+Am 2026-08-27 **live und anonym** gegen die Share-Links des Owners gemessen
+(keine Zugangsdaten, nur GET, nur Lesen). Für den Ordner-Token der 87
+Deskriptoren:
+
+| Route | Antwort |
+|---|---|
+| `/files/link/public/<token>/<Eintrag>` | 200 `text/html`, 9566 B (die Single-Page-App) |
+| `/remote.php/dav/public-files/<token>/<Eintrag>` | **501 Not Implemented** |
+| `/remote.php/dav/public-files/<token>` | **501 Not Implemented** |
+| `/s/<token>/download?files=<Eintrag>` | 200 `application/octet-stream`, chunked, **POSIX-`ustar`-Tar** |
+| `/s/<token>/download?path=%2F&files=<Eintrag>` | **500 Internal Server Error** |
+| `/s/<token>/download?path=%2F<Eintrag>` | 200, aber das Archiv der **ganzen Freigabe** |
+| `/s/<token>/download` | 200, die ganze Freigabe (Minuten, nie benutzt) |
+
+Zum Vergleich, dieselbe Messung an den funktionierenden Datei-Freigaben:
+`/remote.php/dav/public-files/<token>` antwortet 200 `image/jpeg` mit
+Content-Length, `/s/<token>/download` 200 `image/jpeg` chunked, `/s/<token>`
+dieselbe HTML-Seite. **Diese Routen bleiben unverändert** — die 501 ist eine
+Aussage über die *Ordner*-Freigabe, nicht über die Route.
+
+Drei Befunde, die die Planung korrigieren:
+
+1. **Es ist kein ZIP, sondern ein Tar** (`ustar` an Byte 257). Die frühere
+   Notiz in 2.3 war falsch.
+2. **Der „Dateiname" des Deskriptors ist ein Ordner.** `filename` ist z. B.
+   `20USED50000029` — ohne Endung, und im Archiv ein Verzeichnis:
+
+   ```text
+   20USED50000029/                                        (Verzeichnis)
+   20USED50000029/20USED50000029_2.JPG                     8 845 759 B
+   20USED50000029/20USED50000029_4.JPG                     6 951 643 B
+   20USED50000029/20USED50000029_2025_09_08_pics1-4.txt          104 B
+   20USED50000029/20USED50000029_1.CR2                    32 642 645 B
+   20USED50000029/20USED50000029_3.CR2                    30 617 214 B
+   ```
+
+   Es gibt also **kein** „das eine Mitglied": mehrere Dateien kommen infrage.
+3. **Das Archiv ist groß.** 79 063 040 Byte für ein 8,8-MB-Bild, ~25 s. Der
+   Erstabruf der 20 Zeilen kostet einmalig rund 1,5 GB Netzverkehr.
+
+**Auswahlregel (deterministisch, dokumentiert, geloggt).** Betrachtet werden
+ausschließlich Mitglieder, die *reguläre Dateien* sind, deren Name jede
+Prüfung besteht und die **innerhalb des benannten Eintrags** liegen
+(`name == Eintrag` oder `name.startswith(Eintrag + "/")`). Unter diesen
+gewinnt der kleinste Schlüssel `(Rang, Pfad)`:
+
+| Rang | Bedeutung |
+|---:|---|
+| 0 | genau der benannte Eintrag |
+| 1 | ein Bildformat, das der Spiegel speichern und ein Browser malen kann |
+| 2 | ein anderes Format, für das der Spiegel eine Endung schreibt |
+| 3 | alles übrige (landet endungslos, also unbenutzbar) |
+
+Gleichstand wird über den Pfad gebrochen. Damit ist die Auswahl eine reine
+Funktion des **Inhalts** — die Reihenfolge, in der ein Host die Mitglieder
+streamt, kann nie ändern, welche Datei ein Operator bekommt. Für das Beispiel
+oben gewinnt `20USED50000029_2.JPG`: die `.CR2` sind Rang 3, die `.txt` Rang 2,
+und von den beiden JPEGs sortiert `_2` vor `_4`. **Live nachgemessen** mit dem
+echten Code gegen das echte Archiv: ausgewählt `20USED50000029_2.JPG`,
+8 845 759 B, gesnifft `image/jpeg`, Ablage `<SN>/<code>.jpg`.
+
+Nennt die URL **keinen** Eintrag (`/s/<token>` ohne Pfad), wird nur ein Archiv
+mit **genau einem** infrage kommenden Mitglied akzeptiert; sonst wird
+abgelehnt. Raten ist genau der Weg, auf dem eine falsche Datei unter einem
+richtigen Code landet.
+
+**Sicherheitsregeln beim Auspacken** — der gefährlichste Vorgang im ganzen
+Modul, weil hier Bytes eines fremden Hosts auf der Platte eines Operators
+landen. Alle in `backend/app/attachment_store.py`, jede mit einem Test, dessen
+Rotwerden bei Entfernen der Regel nachgewiesen wurde:
+
+- **Nie `extractall`, nie `extract`.** Genau ein Mitglied wird ausgewählt und
+  **im Speicher** gelesen; die Bytes gehen anschließend durch denselben
+  Ablageweg wie jede andere Datei, dessen Dateiname aus dem PDB-Code plus
+  Endungs-Allowlist entsteht. Ein Testfall prüft den **geparsten** Modulbaum
+  auf diese Aufrufe.
+- **Nur reguläre Dateien.** Symlinks, Hardlinks, Zeichen-/Blockgeräte, FIFOs,
+  Verzeichnisse und GNU-Sparse-Einträge werden am **Typ** abgelehnt, bevor
+  Name oder Ziel überhaupt betrachtet werden.
+- **Namensprüfung.** Abgelehnt werden `..` in jeder Position, führendes `/`,
+  Backslash (Windows-Trenner), Doppelpunkt (Laufwerksbuchstabe, NTFS-Stream),
+  NUL und jedes weitere Steuerzeichen. `./`-Präfixe werden normalisiert.
+- **Zwei Größenprüfungen.** Die **deklarierte** Größe im Header entscheidet,
+  ob ein Mitglied überhaupt gelesen wird (`> attachment_max_bytes` → nie
+  gelesen); die tatsächlich gelesenen Bytes müssen der Deklaration
+  entsprechen. Ein abgeschnittenes oder widersprüchliches Archiv wird als
+  Verdikt abgelehnt, nicht als Netzwerkfehler durchgereicht.
+- **Vier Deckel gegen Bomben.** (a) die komprimierten Bytes **vom Draht**,
+  (b) bei gzip zusätzlich der komplette **dekomprimierte Tar-Strom** inklusive
+  Headern, Padding sowie GNU-longname-/PAX-Metadaten, (c) die Summe der
+  **deklarierten** Mitgliedsgrößen und (d) die **Mitgliederzahl**
+  (`ARCHIVE_MEMBER_LIMIT = 2048`). (a), (b) und (c) sind
+  `ARCHIVE_SIZE_BUDGET_FACTOR = 4` mal `attachment_max_bytes`: bewusst
+  abgeleitet, damit ein Institut, das sein Attachment-Limit senkt, auch senkt,
+  was ein fremder Host ihm schicken oder dekomprimieren lassen darf. Die
+  getrennte Dekompressionsgrenze ist nötig, weil `tarfile` GNU-/PAX-Metadaten
+  verarbeitet, bevor sie als normale Mitglieder sichtbar würden.
+- **Streamen statt Materialisieren.** Das Archiv wird in einem Vorwärtsdurchlauf
+  direkt vom Socket gelesen; im Speicher liegt nie mehr als **ein** Mitglied.
+  Der bisher beste Kandidat wird freigegeben, *bevor* ein besserer gelesen wird.
+- **Nur Tar und gzip-Tar.** bzip2 und xz sind durch Weglassen abgelehnt (nie
+  beobachtet, und die extremsten Kompressionsraten). Ein gzip-Strom wird erst
+  akzeptiert, wenn die `ustar`-Magic im **dekomprimierten** Präfix steht —
+  sonst würde eine gzip-komprimierte *einzelne Datei* fälschlich als Archiv
+  gelesen und verloren gehen. ZIP wird nicht versucht: CERNBox liefert keines.
+- **Dieselben Prüfungen wie zuvor.** HTML-Abwehr, Größenlimit und
+  Content-Sniffing laufen auf den **extrahierten** Bytes weiter. Ein Archiv ist
+  ein neuer Transportweg, keine neue Vertrauensstufe.
+- **Content-Type aus den Bytes.** Der `content_type` kommt zuerst aus den
+  Magic Bytes des Mitglieds und erst danach aus seiner Endung — der Name
+  stammt vom fremden Host, die Bytes sind das, was gespeichert wird. Ohne
+  diesen Schritt landete die Datei endungslos mit `is_image = false` und
+  bliebe in der Galerie genauso unsichtbar wie vorher.
+- **Logs.** Geloggt werden nur der Attachment-Code, Größe, Content-Type und ein
+  statischer Ablehnungsgrund. **Weder Mitgliedsname noch URL** gelangen ins
+  Log: beide stammen aus der fremden Freigabe und können personenbezogene
+  Angaben bzw. einen unauthentifizierten Zugriffsweg enthalten.
+
+**Python-Hinweis:** Die Extraktions-*Filter* von `tarfile`
+(`tarfile.data_filter`) werden **nicht** verwendet. Sie bereinigen einen Baum,
+der auf die Platte geschrieben wird — dieser Code schreibt keinen Baum —, und
+das Laufzeit-Python dieses Repos ist 3.10.11, wo es sie gar nicht gibt
+(eingeführt in 3.10.12/3.11.4/3.12). Die äquivalenten Prüfungen stehen oben
+und sind einzeln getestet.
+
+**Restrisiko, bewusst benannt:** Ein Header, der die Länge einer echten Datei
+*überschätzt*, ist von keinem Tar-Leser erkennbar — der Überhang ist die
+Polsterung des Archivs selbst. Die Folge wären angehängte Nullbytes an einer
+sonst gültigen Datei; deshalb laufen HTML-Abwehr, Größenlimit und Sniffing
+weiterhin über die extrahierten Bytes.
 - **Keine öffentliche Freigabe → gar kein Request:** Pfade der Form
   `[index.php/]apps/files/…` und `files/spaces/…` sind die **Dateibrowser**
   einer angemeldeten Sitzung, kein Share. `_share_link_candidates` liefert
@@ -322,6 +462,13 @@ Alle drei Quellen laufen durch dieselben Schutzmechanismen (ADR 006, Punkt 6):
 - **Größenlimit.** `attachment_max_bytes`, Default 100 MiB. Share-Links werden
   mit `read(max_bytes + 1)` gelesen, damit eine endlose Antwort den
   Sync-Worker nicht blockiert; `_valid_payload` verwirft alles darüber.
+- **Archiv-Auspacken.** Antwortet eine Freigabe mit einem Tar statt mit der
+  Datei, gilt zusätzlich der vollständige Regelsatz aus Abschnitt 2.3a: nie
+  `extractall`, nur reguläre Dateien, Namensprüfung gegen Traversal und
+  absolute Pfade, Deckel auf komprimierte Draht-Bytes, den dekomprimierten
+  Tar-Strom, deklarierte Bytes und Mitgliederzahl sowie ein einziges Mitglied
+  im Speicher. Die drei Prüfungen oben laufen
+  danach unverändert über die extrahierten Bytes.
 - **Timeout.** `attachment_download_timeout_seconds`, Default 60 s.
 - **Atomarer Abschluss.** Bytes gehen zuerst in eine `.part`-Datei **neben**
   dem Zielnamen (`_write_temp_bytes`), erst in der Commit-Phase folgt
@@ -678,6 +825,8 @@ liest jedoch `%LOCALAPPDATA%\itkflow\itkflow.db`; dort gemessen
 | Bilder auf direkten Kindern eines Moduls | 241 (auf 159 Kindern, 156 Modulen) |
 | Bild-Seriennummern ohne Elternteil (noch nicht verbaut) | 120 |
 | Share-Link-URLs gesamt / davon Weboberflächen-Form / privat | 29 / 20 / 1 |
+| Deskriptoren hinter der einen Ordner-Freigabe | 87 auf 76 Komponenten, 20 Codes, **1 Token** |
+| Davon vor 2026-08-27 gespeichert | 0 |
 
 Die letzte Zeile erklärt den Unterschied zwischen „432 Bilder liegen im
 Spiegel" und „ein Modul zeigt sie": 422 der 432 kommen über EOS, fast alle auf
@@ -695,10 +844,35 @@ Zusicherung.
 - **Nicht verifiziert:** ob die Share-Link-Erkennung alle zFlow-Feldformen der
   Fremdinstitute abdeckt; erkannt wird an der Wertform, geprüft wurde bisher
   nur gegen `URLSCRATCHPAD`/`URLS1..6` aus der Referenz.
-- **Nicht verifiziert (Netzwerk):** dass die DAV-Route der 20
-  Weboberflächen-Links wirklich Bytes liefert. Die Umschreibung ist an der
-  URL-Form getestet, der Abruf gegen einen Fake; ein echter Abruf verlangt VPN
-  und persönliche Rechte und gehört an den Owner, nicht an einen Agenten.
+- **Verifiziert (2026-08-27, ersetzt „Nicht verifiziert (Netzwerk)"):** die
+  DAV-Route der 20 Weboberflächen-Links liefert **keine** Bytes, sondern
+  **501 Not Implemented** — CERNBox ist dafür ohne VPN und ohne Zugangsdaten
+  anonym erreichbar, die Messung steht in Abschnitt 2.3a. Die Bytes kommen
+  über `/s/<token>/download?files=<Eintrag>` als Tar; die Auswahl ist mit dem
+  echten Code gegen das echte Archiv nachgemessen.
+- **Nicht verifiziert:** die Archiv-Route für einen **verschachtelten** Pfad
+  in der Freigabe (`?files=a/b/c.jpg`). Im Spiegel gibt es keinen solchen
+  Link, und das Raten einer fremden Pfadangabe ist kein zulässiger Test. Die
+  Kodierung ist an der URL-Form getestet.
+- **Bekannt und akzeptiert:** der Erstabruf der 20 Ordner-Zeilen kostet
+  einmalig rund 1,5 GB, weil `?files=` den **ganzen** Unterordner packt
+  (79 MB für ein 8,8-MB-Bild). Ein Weg, nur die eine Datei anzufordern, würde
+  eine Auflistung der Freigabe voraussetzen — und die ist genau das, was die
+  DAV-Route mit 501 verweigert. Danach ist es gratis: der Natürliche Schlüssel
+  `(source, code)` lässt jede weitere Komponente die bereits gespiegelte Datei
+  wiederverwenden.
+- **Bewusst kein Cache.** Ein Archiv wird nie im Speicher gehalten. 87
+  Deskriptoren fallen über `(source, code)` auf 20 Abrufe zusammen, und jeder
+  Code steht für einen **eigenen** Unterordner — ein LRU-Cache über
+  80-MB-Archive würde also hunderte MB kosten und **null** Abrufe sparen.
+  Gemerkt wird nur, was ein Verdikt ist: `OutageCircuitBreaker`
+  merkt sich pro Sweep die `(source, code)`-Schlüssel mit **endgültigem**
+  Fehlschlag (gedeckelt auf 4096 Einträge, ohne Bytes), damit dieselbe
+  abgelehnte Freigabe nicht einmal je referenzierender Komponente — im
+  Spiegel bis zu neunmal — neu geholt wird. Transiente Fehlschläge werden
+  nie gemerkt, und nichts davon überlebt den Sweep: ein dauerhaftes Flag in
+  der Datenbank hätte genau die 20 Zeilen eingefroren, die dieser Schnitt
+  repariert.
 - **Unerreichbar, bewusst nicht repariert:** eine Zeile (`20USES50000771`)
   zeigt auf einen persönlichen CERNBox-Bereich statt auf eine Freigabe. Sie
   wird ohne Request abgelehnt (Abschnitt 2.3); reparierbar wäre sie nur, indem
@@ -725,7 +899,11 @@ Zusicherung.
 Code (Stand 2026-08-26, Arbeitskopie):
 
 - `backend/app/attachment_store.py` — Download-, Prüf- und Ablagepipeline
-  (drei Phasen, Retry, Breaker, Share-Link-Kandidaten, EOS-Refresh)
+  (drei Phasen, Retry, Breaker, Share-Link-Kandidaten, EOS-Refresh, seit
+  2026-08-27 auch `_CappedStream`, `_archive_stream_mode`,
+  `safe_archive_member_name`, `_member_is_in_scope`, `_member_rank`,
+  `_archive_member`/`_walk_archive` und der Sweep-Merker
+  `OutageCircuitBreaker.note_permanent_miss`)
 - `backend/app/pdb_test_evidence.py` — `_attachment_summaries`,
   `_share_link_summaries`, `_http_urls`, `_run_detail_payload`
 - `backend/app/pdb_attachments.py` — der ungenutzte Direktweg

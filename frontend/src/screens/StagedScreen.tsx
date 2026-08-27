@@ -41,6 +41,11 @@ import type {
 } from "../api";
 import { useAuth } from "../auth";
 import { filterDemoComponents, makeDemoOutbox } from "../demoData";
+import {
+  DerivedDetail,
+  DerivedVerdicts,
+  parseWorksheetDerived,
+} from "../GlueDerivation";
 import { formatTimestamp, t } from "../i18n";
 import {
   canDiscard,
@@ -705,6 +710,14 @@ function StagedActionCard({
 }) {
   const pushing = busy?.id === action.id && busy.kind === "push";
   const discarding = busy?.id === action.id && busy.kind === "discard";
+  // This is the complete server snapshot staged with the action. The worker
+  // reconstructs and compares it before submission; the approval screen only
+  // formats it and never derives a value from the raw ghost run.
+  const stagedDerived =
+    !history && isTestUpload(action)
+      ? parseWorksheetDerived(action.payload.derived)
+      : null;
+  const hasReviewValues = stagedTest !== null || (stagedDerived?.steps.length ?? 0) > 0;
   const [audit, setAudit] = useState<AuditEvent[] | null>(initialAudit ?? null);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState<string | null>(null);
@@ -736,13 +749,15 @@ function StagedActionCard({
         <div>
           <strong>{summarizeAction(action)}</strong>
           <span className="mono muted">#{action.id} · {action.kind}</span>
+          {stagedDerived !== null && <DerivedVerdicts derived={stagedDerived} />}
           {stagedTest !== null ? (
             <StagedValues test={stagedTest} />
           ) : (
             // Terminal uploads are past judging (their values live in the
             // mirrored run), so the gap is only worth naming while open.
             !history &&
-            isTestUpload(action) && (
+            isTestUpload(action) &&
+            !hasReviewValues && (
               <p className="staged-scope-hint">{t.staged.valuesUnavailable}</p>
             )
           )}
@@ -814,6 +829,9 @@ function StagedActionCard({
           </div>
         </dl>
         {stagedTest !== null && <StagedValueList test={stagedTest} />}
+        {stagedDerived !== null && (
+          <DerivedDetail derived={stagedDerived} source="staged" />
+        )}
         <div className="staged-audit">
           <div className="field-label">{t.staged.audit}</div>
           {auditLoading ? (

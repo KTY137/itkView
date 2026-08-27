@@ -211,6 +211,7 @@ describe("worksheet as the primary detail view", () => {
 
     expect(props.componentSn).toBe(detailFixture.sn);
     expect(props.componentType).toBe("MODULE");
+    expect(props.componentTypeCode).toBe("BM");
     expect(props.instituteCode).toBe("TUDO");
     expect(props.worksheet).toEqual(previewFixture.worksheet);
     expect(props.canWrite).toBe(true);

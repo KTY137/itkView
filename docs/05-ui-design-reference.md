@@ -239,6 +239,31 @@ mit Messwerten, Warnungen und Issues und bieten erst bei gueltigem Ergebnis
 `Stage upload` an. Das erzeugt eine Ghost-Action; es schreibt nicht direkt in
 die PDB.
 
+**Messfelder kommen aus `parameters`, nicht aus `results` (2026-08-27).** Eine
+PDB-Testtyp-Definition (`getTestTypeByCode`, roh gespiegelt) nennt den
+Messfeldblock **`parameters`**; alle 14 gespiegelten MODULE-Definitionen haben
+ueberhaupt keinen `results`-Schluessel. Das Formular las nur `properties` und
+`results` — es zeigte also die Handvoll Bedingungsfelder und **kein einziges
+Messfeld**, verweigerte aber gleichzeitig das Absenden ohne Messwert: kein
+Testtyp war erfassbar. `TestForm.measurementCollection()` entscheidet jetzt
+bewusst mit Vorrang: `results` gewinnt, **solange es Felder traegt**; ein
+fehlendes, `null`-wertiges oder leeres `results` faellt auf `parameters`
+zurueck. Genau ein Block wird gerendert, ein Schema mit beiden Schluesseln
+zeigt kein Feld doppelt. „Traegt Felder" statt „ist vorhanden" ist die
+entscheidende Bedingung, weil ein Aufrufer legitim `results: []` erzeugt (der
+Edit-Strip beim Vorbelegen) — das als „dieser Testtyp hat keine Messwerte" zu
+lesen war der Weg, auf dem das leere Formular eine Schicht weiter
+ueberlebt haette.
+
+**Ehrliche Meldung bei Schemata ohne erfassbares Messfeld (2026-08-27).** Die
+Regel „ohne mindestens einen Messwert kein Lauf" bleibt. Deklariert ein Schema
+aber gar kein Feld, das dieses Formular aufnehmen kann — `HYBRID_TESTS_SUMMARY`
+besteht aus 36 `testRun`-Referenzen, `MODULE_TC` aus zwei `object`-Bloecken —
+dann liegt das am Schema, nicht an der Eingabe. Solche Testtypen zeigen
+deshalb schon vor dem Absenden einen Hinweis (`info-banner`, `role="status"`),
+der den Testtyp nennt und auf den Datei-Upload verweist, und beim Absenden
+dieselbe Erklaerung statt „<Results> is required".
+
 Kommt die Testerfassung vom Shipment-Screen, werden Seriennummer und Testtyp
 als gemeinsamer Navigation-Intent uebergeben. Die Detailkarte oeffnet sofort
 das Formular, zeigt `Pinned test: <TYPE>` und sperrt den Testtyp-Select auf den
@@ -359,8 +384,96 @@ type". Beide Ansichten formatieren ausschliesslich eine in
 `backend/app/domain/glue.py` und `backend/app/glue_service.py` berechnete
 Ableitung — Ziel, Toleranz und Formel kommen ausschliesslich aus dem
 Institutsprofil (`glue_targets`, `glue_weight_inputs`), es gibt keine zweite
-Formel im Frontend. Der PDB-Schreibpfad mischt `derived_results` noch nicht in
-das hochgeladene Dokument (offene Naht E3, siehe Spec §9.4).
+Formel im Frontend. Der PDB-Schreibpfad validiert die auf der Action
+gespeicherten `derived_results` **und** `derived_result_codes` erneut gegen
+Ingest, Profil und Modultyp. Alle serverkontrollierten Codes werden zuerst aus
+einer Kopie der PDB-`results` entfernt; nur vorhandene berechnete Werte werden
+danach autoritativ eingesetzt. So bleibt auch bei einer fehlenden
+Waagenablesung kein alter Roh-/Formelwert stehen. Der empfangene Ingest bleibt
+unveraendert. Ein abweichender oder frei injizierter Wert/Code blockiert den
+Worker und muss neu gestagt werden.
+
+### Feldreihenfolge, Baender und Tool-Dropdowns in der Erfassung (2026-08-27)
+
+Die Erfassungspanels folgen dem Produktionsblatt, nicht der Reihenfolge des
+PDB-Schemas. Modul: [`frontend/src/fieldLayout.ts`](../frontend/src/fieldLayout.ts)
+(rein, testbar), Laden: `dataEntryProfile.ts`, Auswahl: `ToolFieldSelect.tsx`.
+Betroffen sind die Karte `Add test result` und der Edit-Strip des
+Modul-Worksheets; `TestForm` bleibt der einzige Renderer der Schemafelder.
+
+- **Reihenfolge und schreibgeschuetzte Ableitung.** Das Blatt fuehrt eine
+  Klebung als „erst die Teile wiegen, dann die Baugruppe, dann das berechnete
+  Klebegewicht" (Zeilen 10/17/21/24 fuer die Hybride, 35/40/43 fuer das
+  Powerboard). Genau das steht bereits im
+  Institutsprofil: `glue_weight_inputs` nennt je Schritt `subtract`
+  (die vorher gewogenen Teile), `measured` (die Baugruppe) und `result_code`
+  (die Ableitung). Die Reihenfolge wird **aus der Formel gelesen**, nicht aus
+  einer Tabelle im Code — kein Feldcode, kein Modultyp ist ein Literal
+  (harte Regel 4), und ein Institut mit anderer Klebekette bekommt seine
+  Reihenfolge ohne Codeaenderung. Zum Vergleich die PDB-Reihenfolge von
+  `GLUE_WEIGHT`: `GW_SENSOR, GW_GLUE_H2, GW_HYBRID1, GW_GLUE_PB, …` — jedes
+  abgeleitete Klebegewicht zwischen den Waagenwerten, und **jedes `order`-Feld
+  der Definition steht auf `1`**, es gibt dort also nichts zu sortieren.
+  Ein Code, den zwei Schritte nennen (`GW_MODULE_H1` ist Ergebnis der
+  Hybridklebung und Eingang der Powerboardklebung), erscheint **einmal**, im
+  Band, das ihn gemessen hat — wie im Blatt. Felder, die kein Schritt nennt,
+  behalten die Schemareihenfolge und stehen hinten. Ohne Profil aendert sich
+  nichts. Ein aktiver `result_code` ist dagegen kein zweiter Rohwert: er wird
+  aus `TestForm` entfernt und nur in der serverseitigen Ableitung angezeigt.
+  Damit kann ein Operator den spaeter autoritativ hochgeladenen Wert nicht
+  parallel als widerspruechliche Zahl eintippen.
+  **Noch offen:** Das Live-Blatt berechnet in allen 290 Modulspalten
+  `Hybrid ohne Tabs = Hybrid mit Tabs - Tabs` (Zeilen 17/20). itkFlow setzt
+  `GW_HYBRID1/2` heute als fertigen Rohwert voraus; fuer diese vorgelagerte,
+  abhaengige Ableitung fehlt noch ein serverseitiger Profilvertrag.
+- **Baender.** Ein Band traegt das `label` des Profilschritts **woertlich**
+  (Institutsdaten, wie die `assembly_tool_slots`-Labels im Wizard), nie eine
+  erfundene Ueberschrift. Ein unbenanntes Restband bekommt keine.
+  **Grenze, bewusst:** Ueberschriften **zwischen** den generierten
+  Messfeldern kann nur `TestForm` selbst zeichnen; heute stehen sie ueber der
+  Tooling-Sektion. Der fehlende Baustein ist eine `groups`-Prop an `TestForm`
+  (Plan im Abschlussbericht des Schnitts).
+- **Konfigurierte PDB-Tool-Felder sind Dropdowns.** Im Live-Blatt sind die
+  Hybrid-Jig- und Pickup-Zeilen 28/29 praktisch durchgaengig validierte
+  Serienlisten; Zeile 30 ist es nur in einzelnen Farb-Zellen, Zeile 38 fuehrt
+  kombinierte Serien ueberwiegend als Freitext. Eine PDB-Definition kann ein
+  echtes Tool-Feld nicht von anderem `dataType: "string"` unterscheiden, und
+  der Spiegel zeigt die Folge: dieselbe
+  Jig steht in 28 `MODULE_BOW`-Laeufen unter **drei** Schreibweisen, eine
+  Bondmaschine in 17 Laeufen unter **vier**. Der neue, validierte
+  Profilschluessel `test_tool_fields` (`{"<TEST_TYPE>": [{"code": …,
+  "kinds": […], "step": …}]}`, `backend/app/institute_settings.py`) benennt
+  diese Felder; sie werden aus dem generierten Formular **entfernt** und als
+  Auswahl ueber die Tool-Registry gerendert (gefiltert nach `Tool.kind` und
+  `compatible_types`, Label vorn, Seriennummer hinten —
+  `fieldLayout.toolOptionLabel`, dieselbe Regel wie im Assembly-Wizard).
+  `step` verweist auf einen `glue_weight_inputs`-Schritt und setzt das Feld
+  in dessen Band, weil das Blatt seine Werkzeugzeilen **innerhalb** der
+  Klebebaender fuehrt und keine Klebeformel eine Jig nennt. Wichtig:
+  `GLUE_WEIGHT` besitzt im PDB-Schema **kein** Jig-/Pickup-Feld;
+  `GW_METHOD` ist die Auftragsart und `GLUE_METHOD_V_*` sind
+  Programmversionen. Diese Codes duerfen nicht als Tool-Slot konfiguriert
+  werden. Der Glue-Werkzeugnachweis bleibt E5 und braucht den geplanten lokalen
+  Nachbarspeicher; der reale, heute nutzbare Fall ist z. B. `MODULE_BOW.JIG`.
+- **Scannen bleibt.** Neben jeder Auswahl steht ein Enter-terminiertes
+  Scanfeld (Keyboard-Wedge, Barcode oder RFID, lokal gegen die geladenen
+  Kandidaten aufgeloest). Ein Dropdown darf den schnelleren Weg nicht
+  ersetzen. Die Auswahl selbst ist ein natives `<select>` und damit ohne Maus
+  bedienbar; Ziele sind 40 px hoch (Handschuh, Touchscreen).
+- **Nie stillschweigend aendern.** Ein gespeicherter Wert, den die Registry
+  nicht kennt (der alte Freitext), bleibt ausgewaehlt und wird als
+  „not in the tool registry" gekennzeichnet — statt beim Oeffnen des Strips
+  auf leer zu fallen. Ein **Pflicht**-Tool-Feld blockiert das Staging mit
+  Begruendung: `TestForm` kann ein Feld nicht pruefen, das es nie gesehen hat.
+- **Parser faellt geschlossen zurueck.** Ein unlesbarer gespeicherter Block
+  liest sich als „keine Konfiguration"
+  (Schemareihenfolge, kein Dropdown) — nie halb angewandt, sonst waeren
+  einzelne Felder Picker und der Rest Freitext.
+- **Nebenbefund, im selben Schnitt behoben:** Der Edit-Strip belegte nur
+  `definition.results` vor. Keine gespiegelte MODULE-Definition hat diesen
+  Schluessel — die Messfelder liegen unter `parameters`. Der Strip oeffnete
+  sich damit **leer ueber einem erfassten Lauf**. Er waehlt den Messblock
+  jetzt mit derselben Praezedenz wie `TestForm.measurementFields`.
 
 ### Shipment-Empfang und Reception-Tests
 
