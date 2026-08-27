@@ -13,7 +13,9 @@ persisted as data itself.
 
 from __future__ import annotations
 
+import math
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from app.notifications import REDACTED_URL, is_https_notification_url
@@ -50,6 +52,20 @@ _ASSEMBLY_TOOL_SLOT_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}\Z")
 # JIG_HYBRID_ALIGNMENT.
 _ASSEMBLY_PROPERTY_KEY_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
 _ASSEMBLY_TOOL_SLOT_FIELDS = frozenset({"key", "label", "kinds", "multiple", "property_key"})
+# A PDB result code, e.g. GW_MODULE_H1PB. Which codes exist is schema data;
+# only their shape is validated here.
+_RESULT_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
+# A glue process name, e.g. TRUEBLUE. Institute vocabulary, never a fixed list.
+_GLUE_PROCESS_RE = re.compile(r"[A-Z][A-Z0-9_]{0,31}\Z")
+# Derivation step keys double as JSON object keys and as the join between
+# `glue_weight_inputs` and each module type in `glue_targets`.
+_GLUE_STEP_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}\Z")
+_GLUE_TARGET_FIELDS = frozenset({"process", "label", "valid_from", "module_types"})
+_GLUE_INPUT_FIELDS = frozenset({"label", "test_type", "measured", "subtract", "result_code"})
+_GLUE_STEP_TARGET_FIELDS = frozenset({"target_mg", "tolerance_mg"})
+# Milligrams. A glue step is a smear of adhesive, not a payload: the ceiling
+# only exists so a slipped decimal point cannot be stored as a target.
+_MAX_GLUE_MG = 100_000.0
 
 
 class InstituteSettingsValidationError(ValueError):
@@ -498,6 +514,269 @@ def _stage_requirements(value: Any) -> dict[str, list[str]] | None:
     return normalised
 
 
+
+def _result_code(value: Any, label: str) -> str:
+    code = _clean_string(value, label=label, max_length=64).upper()
+    if _RESULT_CODE_RE.fullmatch(code) is None:
+        raise InstituteSettingsValidationError(
+            f"{label} must look like a PDB result code."
+        )
+    return code
+
+
+def _glue_process(value: Any, label: str) -> str:
+    process = _clean_string(value, label=label, max_length=32).upper()
+    if _GLUE_PROCESS_RE.fullmatch(process) is None:
+        raise InstituteSettingsValidationError(
+            f"{label} may contain uppercase letters, digits, and underscores."
+        )
+    return process
+
+
+def _glue_step_key(value: Any) -> str:
+    key = _clean_string(value, label="Glue step key", max_length=32)
+    if _GLUE_STEP_KEY_RE.fullmatch(key) is None:
+        raise InstituteSettingsValidationError(
+            "Glue step keys may contain letters, digits, underscores, and hyphens."
+        )
+    return key
+
+
+def _glue_milligrams(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InstituteSettingsValidationError(f"{label} must be a number.")
+    amount = float(value)
+    if not math.isfinite(amount):
+        raise InstituteSettingsValidationError(f"{label} must be a finite number.")
+    if amount < 0:
+        raise InstituteSettingsValidationError(f"{label} must not be negative.")
+    if amount > _MAX_GLUE_MG:
+        raise InstituteSettingsValidationError(f"{label} is implausibly large.")
+    return amount
+
+
+def _glue_valid_from(value: Any) -> str | None:
+    """Normalize a rule's validity start to a canonical UTC timestamp.
+
+    ``null`` means "always valid" and is the fallback a process falls back to
+    when no dated rule covers the measurement. A plain date is read as midnight
+    UTC so that two generations of the same rule can be compared at all.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise InstituteSettingsValidationError(
+            "Glue target valid_from must be an ISO 8601 date or null."
+        )
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        raise InstituteSettingsValidationError(
+            "Glue target valid_from must be an ISO 8601 date or null."
+        ) from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.isoformat()
+
+
+def _glue_module_types(value: Any) -> dict[str, dict[str, dict[str, float]]]:
+    if not isinstance(value, dict):
+        raise InstituteSettingsValidationError(
+            "Glue target module_types must be an object."
+        )
+    normalised: dict[str, dict[str, dict[str, float]]] = {}
+    for raw_type_code, raw_steps in value.items():
+        type_code = _clean_string(
+            raw_type_code, label="Glue target module type", max_length=32
+        ).upper()
+        if _COMPONENT_TYPE_RE.fullmatch(type_code) is None:
+            raise InstituteSettingsValidationError(
+                "Glue target module types may contain uppercase letters, digits, "
+                "and underscores."
+            )
+        if type_code in normalised:
+            raise InstituteSettingsValidationError(
+                "Glue target module types must be unique."
+            )
+        if not isinstance(raw_steps, dict):
+            raise InstituteSettingsValidationError(
+                "Every glue target module type must map to an object of steps."
+            )
+        steps: dict[str, dict[str, float]] = {}
+        for raw_step_key, raw_target in raw_steps.items():
+            step_key = _glue_step_key(raw_step_key)
+            if step_key in steps:
+                raise InstituteSettingsValidationError(
+                    "Glue step keys must be unique per module type."
+                )
+            if not isinstance(raw_target, dict):
+                raise InstituteSettingsValidationError(
+                    "Every glue target must be an object with target_mg and tolerance_mg."
+                )
+            if set(raw_target) - _GLUE_STEP_TARGET_FIELDS:
+                raise InstituteSettingsValidationError(
+                    "Glue targets only support target_mg and tolerance_mg."
+                )
+            steps[step_key] = {
+                "target_mg": _glue_milligrams(
+                    raw_target.get("target_mg"), "Glue target weight"
+                ),
+                "tolerance_mg": _glue_milligrams(
+                    raw_target.get("tolerance_mg"), "Glue tolerance"
+                ),
+            }
+        # An empty step map is meaningful and preserved: it states that this
+        # module type is glued in no derived step at all (a half-module carries
+        # no powerboard), which is a different fact from "not configured yet".
+        normalised[type_code] = steps
+    return normalised
+
+
+def _glue_targets(value: Any) -> list[dict[str, Any]] | None:
+    """Normalize the institute's glue targets per process, module type and step.
+
+    ``None`` disables target-based derivation. An empty list is rejected so an
+    accidental form submission cannot silently disable a configured profile.
+
+    Several entries may name the same process as long as their ``valid_from``
+    differs. That is not decoration — the sheet this replaces runs two
+    generations of the same rule side by side, and a profile that knows only
+    one set of constants judges historical runs by today's numbers.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise InstituteSettingsValidationError("glue_targets must be a list.")
+    normalised: list[dict[str, Any]] = []
+    seen: set[tuple[str, str | None]] = set()
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise InstituteSettingsValidationError("Every glue target set must be an object.")
+        if set(entry) - _GLUE_TARGET_FIELDS:
+            raise InstituteSettingsValidationError(
+                "Glue target set contains unsupported fields."
+            )
+        process = _glue_process(entry.get("process"), "Glue process")
+        valid_from = _glue_valid_from(entry.get("valid_from"))
+        if (process, valid_from) in seen:
+            raise InstituteSettingsValidationError(
+                "Glue target sets must be unique per process and valid_from."
+            )
+        seen.add((process, valid_from))
+        raw_label = entry.get("label")
+        label = (
+            _clean_string(raw_label, label="Glue process label", max_length=120)
+            if raw_label is not None
+            else process
+        )
+        normalised.append(
+            {
+                "process": process,
+                "label": label,
+                "valid_from": valid_from,
+                "module_types": _glue_module_types(entry.get("module_types", {})),
+            }
+        )
+    if not normalised:
+        raise InstituteSettingsValidationError(
+            "glue_targets must contain at least one rule set; use null to disable it."
+        )
+    return normalised
+
+
+def _glue_weight_inputs(value: Any) -> dict[str, dict[str, Any]] | None:
+    """Normalize which PDB result codes feed which derived glue weight.
+
+    The formula is data: ``measured`` minus every code in ``subtract``, stored
+    under ``result_code``. Which codes those are is schema and institute
+    business — an institute gluing two hybrids in one step weighs a different
+    chain than one gluing a single hybrid — so none of them may be a literal in
+    the derivation. ``None`` disables input-based derivation.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise InstituteSettingsValidationError("glue_weight_inputs must be an object.")
+    normalised: dict[str, dict[str, Any]] = {}
+    for raw_key, raw_step in value.items():
+        key = _glue_step_key(raw_key)
+        if key in normalised:
+            raise InstituteSettingsValidationError("Glue step keys must be unique.")
+        if not isinstance(raw_step, dict):
+            raise InstituteSettingsValidationError("Every glue step must be an object.")
+        if set(raw_step) - _GLUE_INPUT_FIELDS:
+            raise InstituteSettingsValidationError("Glue step contains unsupported fields.")
+        measured = _result_code(raw_step.get("measured"), "Glue step measured code")
+        raw_subtract = raw_step.get("subtract", [])
+        if not isinstance(raw_subtract, list):
+            raise InstituteSettingsValidationError(
+                "Glue step subtract must be a list of result codes."
+            )
+        subtract: list[str] = []
+        for raw_code in raw_subtract:
+            code = _result_code(raw_code, "Glue step subtracted code")
+            if code == measured:
+                raise InstituteSettingsValidationError(
+                    "A glue step must not subtract the code it measures."
+                )
+            if code in subtract:
+                raise InstituteSettingsValidationError(
+                    "Glue step subtracted codes must be unique."
+                )
+            subtract.append(code)
+        step: dict[str, Any] = {"measured": measured, "subtract": subtract}
+        raw_label = raw_step.get("label")
+        if raw_label is not None:
+            step["label"] = _clean_string(raw_label, label="Glue step label", max_length=60)
+        raw_test_type = raw_step.get("test_type")
+        if raw_test_type is not None:
+            test_type = _clean_string(
+                raw_test_type, label="Glue step test type", max_length=64
+            ).upper()
+            if _TEST_TYPE_RE.fullmatch(test_type) is None:
+                raise InstituteSettingsValidationError(
+                    "Glue step test types may contain uppercase letters, digits, "
+                    "and underscores."
+                )
+            step["test_type"] = test_type
+        raw_result_code = raw_step.get("result_code")
+        if raw_result_code is not None:
+            result_code = _result_code(raw_result_code, "Glue step result code")
+            if result_code == measured or result_code in subtract:
+                # The derived value would overwrite one of its own inputs on
+                # upload, and the next derivation would read its own output.
+                raise InstituteSettingsValidationError(
+                    "A glue step must not store its result in one of its input codes."
+                )
+            step["result_code"] = result_code
+        normalised[key] = step
+    if not normalised:
+        raise InstituteSettingsValidationError(
+            "glue_weight_inputs must contain at least one step; "
+            "use null to disable it."
+        )
+    return normalised
+
+
+def _glue_default_process(value: Any) -> str | None:
+    """The explicit process used when a run does not name one."""
+
+    if value is None:
+        return None
+    return _glue_process(value, "glue_default_process")
+
+
+def _glue_process_property(value: Any) -> str | None:
+    """The PDB code under which a run names its glue process. ``None`` clears it."""
+
+    if value is None:
+        return None
+    return _result_code(value, "glue_process_property")
+
+
 def _reconcile_stage_model(normalised: dict[str, Any]) -> None:
     """Keep a stage that only exists in ``stage_requirements`` visible.
 
@@ -639,6 +918,28 @@ def normalize_institute_settings_update(
     if "assembly_tool_slots" in settings_patch:
         normalised["assembly_tool_slots"] = _assembly_tool_slots(
             settings_patch["assembly_tool_slots"]
+        )
+    if "glue_targets" in settings_patch:
+        normalised["glue_targets"] = _glue_targets(settings_patch["glue_targets"])
+    if "glue_weight_inputs" in settings_patch:
+        normalised["glue_weight_inputs"] = _glue_weight_inputs(
+            settings_patch["glue_weight_inputs"]
+        )
+    # `glue_process_default` was briefly used during development. Accept it at
+    # the boundary for old clients, but persist/return only the canonical key.
+    if "glue_default_process" in settings_patch:
+        normalised["glue_default_process"] = _glue_default_process(
+            settings_patch["glue_default_process"]
+        )
+        normalised.pop("glue_process_default", None)
+    elif "glue_process_default" in settings_patch:
+        normalised["glue_default_process"] = _glue_default_process(
+            settings_patch["glue_process_default"]
+        )
+        normalised.pop("glue_process_default", None)
+    if "glue_process_property" in settings_patch:
+        normalised["glue_process_property"] = _glue_process_property(
+            settings_patch["glue_process_property"]
         )
     if "stage_order" in settings_patch:
         normalised["stage_order"] = _stage_order(settings_patch["stage_order"])

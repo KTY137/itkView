@@ -35,6 +35,8 @@ import type {
   TestTypeSchema,
   WorksheetArraySummary,
   WorksheetChildGroup,
+  WorksheetDerived,
+  WorksheetDerivedStep,
   WorksheetGroup,
   WorksheetLatestRun,
   WorksheetRow,
@@ -71,6 +73,9 @@ export type ModuleWorksheetProps = {
 };
 
 const TABLE_COLUMNS = 5;
+// The wire exposes the PDB lifecycle state verbatim. Only this exact terminal
+// state withdraws a run; `requestedToDelete` still counts as live evidence.
+const WITHDRAWN_TEST_RUN_STATE = "deleted";
 
 // ---- Small, self-contained helpers (no imports from ComponentsScreen/TestResults internals) ----
 
@@ -284,6 +289,198 @@ function statusLabel(status: WorksheetRow["status"]): string {
   }
 }
 
+// ---- Server-derived judgement (plan §9.3) -----------------------------------
+//
+// The sheet this replaces turns a row of scale readings into a glue weight, a
+// target, a tolerance and a verdict. itkFlow keeps that judgement, but the
+// arithmetic lives in exactly one place — the backend adapter. Everything
+// below formats numbers that arrived in the payload; nothing here adds,
+// subtracts, scales or compares them. A second copy of the formula is how the
+// sheet and the reference implementation drifted apart in the first place.
+
+const VERDICT_CHIP_CLASS: Record<WorksheetDerivedStep["verdict"], string> = {
+  ok: "chip green",
+  too_little: "chip red",
+  too_much: "chip red",
+  // Never neutral: a missing input must not read like a passing result.
+  unknown: "chip amber",
+};
+
+/**
+ * The verdict as a word. `unknown` resolves to its reason rather than to a
+ * blank or a bare "unknown" — on the owner's sheet 8 of 13 powerboard
+ * verdicts are arithmetic over empty cells, and they are indistinguishable
+ * from real ones precisely because the gap has no name.
+ */
+function verdictLabel(step: WorksheetDerivedStep): string {
+  switch (step.verdict) {
+    case "ok":
+      return t.worksheet.verdictOk;
+    case "too_little":
+      return t.worksheet.verdictTooLittle;
+    case "too_much":
+      return t.worksheet.verdictTooMuch;
+    case "unknown":
+      break;
+  }
+  switch (step.reason) {
+    case "no_target":
+      return t.worksheet.verdictNoTarget;
+    case "missing_inputs":
+      return t.worksheet.verdictMissingInputs;
+    case "no_run":
+      return t.worksheet.verdictNoRun;
+    case null:
+      return t.worksheet.verdictUnknown;
+    default:
+      // A reason this build does not know yet is still shown verbatim: an
+      // unnamed gap is exactly the failure mode this field exists to prevent.
+      return t.worksheet.verdictUnknownReason(step.reason);
+  }
+}
+
+/** Formatting only — `formatScalar` trims float noise, it does not round a
+ * measured value into something else. */
+function derivedNumber(value: number | null): string {
+  return value === null ? t.common.none : formatScalar(value);
+}
+
+/**
+ * The compact "measured against target" figure, e.g. `151.2 / 151 ± 22 mg`.
+ *
+ * The tolerance is shown as the server sent it and never resolved into a
+ * band: printing `129 – 173` would mean the browser had done the subtraction,
+ * and that is the duplicated formula this design refuses.
+ */
+function derivedFigure(step: WorksheetDerivedStep): string {
+  return t.worksheet.derivedFigure(
+    derivedNumber(step.measured_mg),
+    step.target_mg === null ? null : derivedNumber(step.target_mg),
+    step.tolerance_mg === null ? null : derivedNumber(step.tolerance_mg),
+  );
+}
+
+/**
+ * The judgement in the collapsed row: per derivation step one verdict word
+ * and one figure. Two steps (hybrids, powerboard) stay two verdicts — they
+ * are separate glueings with separate targets, and the PDB's single `passed`
+ * bit collapsing them is one of the reasons this display exists.
+ */
+function DerivedVerdicts({ derived }: { derived: WorksheetDerived }) {
+  if (derived.steps.length === 0) return null;
+  return (
+    <span className="ws-derived">
+      {derived.steps.map((step) => (
+        <span
+          className="ws-derived-step"
+          key={step.key}
+          title={t.worksheet.derivedStepTitle(step.label, verdictLabel(step))}
+        >
+          <span className={VERDICT_CHIP_CLASS[step.verdict]}>{verdictLabel(step)}</span>
+          <span className="ws-val-name">{step.label}</span>
+          <span className="mono">{derivedFigure(step)}</span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** Where the derivation shown in the edit strip came from. */
+type DerivedSource = "preview" | "latest_run";
+
+function derivedProcessSourceLabel(source: WorksheetDerived["process_source"]): string {
+  switch (source) {
+    case "run":
+      return t.worksheet.derivedProcessFromRun;
+    case "profile_default":
+      return t.worksheet.derivedProcessFromProfile;
+    case "unknown":
+      return t.worksheet.derivedProcessUnknownSource;
+  }
+}
+
+/**
+ * The read-only derivation below the edit strip's raw fields.
+ *
+ * The scale readings above are ordinary schema fields; this panel is what the
+ * server made of them. It shows the dry-run's own derivation once one exists
+ * and otherwise the last recorded run's — and says which, because a stale
+ * judgement presented as a live one is the exact failure the owner's sheet
+ * has been showing for eighteen months.
+ */
+function DerivedDetail({
+  derived,
+  source,
+}: {
+  derived: WorksheetDerived;
+  source: DerivedSource;
+}) {
+  return (
+    <div className="ws-derived-detail">
+      <div className="field-label">{t.worksheet.derivedTitle}</div>
+      <p className="muted ws-derived-note">
+        {source === "preview"
+          ? t.worksheet.derivedFromPreview
+          : t.worksheet.derivedFromLatestRun}
+      </p>
+      <p className="ws-derived-process">
+        <span className="ws-val-name">{t.worksheet.derivedProcessLabel}</span>{" "}
+        <span className="mono">
+          {derived.process ?? t.worksheet.derivedProcessUnresolved}
+        </span>{" "}
+        <span className="chip neutral">{derivedProcessSourceLabel(derived.process_source)}</span>
+      </p>
+      {derived.steps.length === 0 ? (
+        <p className="state-note">{t.worksheet.derivedNoSteps}</p>
+      ) : (
+        <ul className="ws-derived-steps">
+          {derived.steps.map((step) => (
+            <li key={step.key}>
+              <div className="ws-derived-step-head">
+                <span className={VERDICT_CHIP_CLASS[step.verdict]}>{verdictLabel(step)}</span>
+                <span className="ws-derived-step-label">{step.label}</span>
+              </div>
+              <dl className="ws-derived-figures">
+                <dt>{t.worksheet.derivedWeightLabel}</dt>
+                <dd className="mono">
+                  {step.measured_mg === null
+                    ? t.common.none
+                    : t.worksheet.derivedMg(derivedNumber(step.measured_mg))}
+                </dd>
+                <dt>{t.worksheet.derivedTargetLabel}</dt>
+                <dd className="mono">
+                  {step.target_mg === null
+                    ? t.common.none
+                    : t.worksheet.derivedMg(derivedNumber(step.target_mg))}
+                </dd>
+                <dt>{t.worksheet.derivedToleranceLabel}</dt>
+                <dd className="mono">
+                  {step.tolerance_mg === null
+                    ? t.common.none
+                    : t.worksheet.derivedToleranceMg(derivedNumber(step.tolerance_mg))}
+                </dd>
+                {step.inputs.length > 0 && (
+                  <>
+                    <dt>{t.worksheet.derivedInputsLabel}</dt>
+                    <dd className="ws-derived-inputs">
+                      {step.inputs.map((input) => (
+                        <span className="ws-val" key={input.code} title={input.code}>
+                          <span className="ws-val-name">{input.name}</span>{" "}
+                          <span className="mono">{formatScalar(input.value)}</span>
+                        </span>
+                      ))}
+                    </dd>
+                  </>
+                )}
+              </dl>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function mergedStaged(
   key: string,
   row: WorksheetRow,
@@ -444,9 +641,15 @@ function RunDetailContent({
         <li className="run" key={run.external_ref ?? `${testType}-${index}`}>
           <div className="run-head">
             <strong className="run-type">{run.test_type}</strong>
-            <span className={run.passed ? "chip green" : "chip red"}>
-              {run.passed ? t.worksheet.statusPassed : t.worksheet.statusFailed}
-            </span>
+            {run.run_state === WITHDRAWN_TEST_RUN_STATE ? (
+              <span className="chip amber" title={t.worksheet.withdrawnHint}>
+                {t.worksheet.statusWithdrawn}
+              </span>
+            ) : (
+              <span className={run.passed ? "chip green" : "chip red"}>
+                {run.passed ? t.worksheet.statusPassed : t.worksheet.statusFailed}
+              </span>
+            )}
             {run.run_number !== null && (
               <span className="chip muted">{t.worksheet.runNumber(String(run.run_number))}</span>
             )}
@@ -770,6 +973,20 @@ export default function ModuleWorksheet({
                   const isExpanded = expanded[key] === true;
                   const isEditing = editingKey === key;
                   const staged = mergedStaged(key, row, optimisticStaged);
+                  const rowDerived = row.derived ?? null;
+                  // The dry-run's own derivation wins while the strip is open;
+                  // until the server sends one, the strip falls back to the
+                  // last recorded run's and labels it as such. Either way the
+                  // browser computes nothing.
+                  const previewDerived = stagingPreview?.derived ?? null;
+                  const stripDerived: { derived: WorksheetDerived; source: DerivedSource } | null =
+                    !isEditing
+                      ? null
+                      : previewDerived !== null
+                        ? { derived: previewDerived, source: "preview" }
+                        : rowDerived !== null
+                          ? { derived: rowDerived, source: "latest_run" }
+                          : null;
                   return (
                     <Fragment key={key}>
                       <tr
@@ -780,6 +997,12 @@ export default function ModuleWorksheet({
                       >
                         <td className="mono">{row.test_type}</td>
                         <td>
+                          {/* The judgement first, the readings that produced
+                              it below: the operator reads the sheet for the
+                              verdict, not for the scale values. Rows the
+                              profile configures no derivation for are
+                              untouched. */}
+                          {rowDerived !== null && <DerivedVerdicts derived={rowDerived} />}
                           <ValuesCell latest={row.latest} />
                         </td>
                         <td>
@@ -912,6 +1135,15 @@ export default function ModuleWorksheet({
                                     onSubmit={handleEditSubmit}
                                   />
                                 </>
+                              )}
+                              {stripDerived !== null && (
+                                // Below the raw scale readings: what the
+                                // server made of them. Read-only on purpose —
+                                // the formula exists once, on the server.
+                                <DerivedDetail
+                                  derived={stripDerived.derived}
+                                  source={stripDerived.source}
+                                />
                               )}
                               {stagingEntryError !== null && (
                                 <p className="error-text" role="alert">

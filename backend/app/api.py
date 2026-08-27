@@ -32,7 +32,13 @@ from app.auth import (
 from app.config import ProductionAccessError, Settings
 from app.domain.glue import pot_life_state
 from app.domain.stages import DEFAULT_STAGE_ORDER
-from app.ingestion import ParsedTestRun, missing_required_properties, parse_payload
+from app.glue_service import derivation_payload, derived_result_grams
+from app.ingestion import (
+    ParsedTestRun,
+    derive_glue_results,
+    missing_required_properties,
+    parse_payload,
+)
 from app.institute_settings import (
     InstituteSettingsValidationError,
     normalize_institute_settings_update,
@@ -2916,23 +2922,83 @@ def _ingest_target_issues(ingest: IngestFile, parsed: ParsedTestRun) -> list[str
     return issues
 
 
-def _required_property_issues(
+def _ingest_institute(
     db: Session,
+    parsed: ParsedTestRun,
+    component: Component | None,
+    *,
+    institute_code: str | None = None,
+) -> InstituteProfile | None:
+    """The profile whose rules govern one ingest file.
+
+    The mirrored component owns the answer. For an unmirrored component an
+    explicit preview/proposal selection wins, then the institution named by
+    the payload is the fallback. Everything institute-specific about an upload
+    — required properties, glue targets — resolves through this one lookup.
+    """
+    resolved_code = (
+        component.institute_code
+        if component is not None
+        else institute_code or parsed.institution
+    )
+    if resolved_code is None:
+        return None
+    return db.scalar(select(InstituteProfile).where(InstituteProfile.code == resolved_code))
+
+
+def _require_matching_unmirrored_institute(
+    parsed: ParsedTestRun,
+    component: Component | None,
+    institute_code: str | None,
+) -> None:
+    """Do not let an explicit tenant silently reinterpret an unmirrored file."""
+    if (
+        component is None
+        and institute_code is not None
+        and parsed.institution is not None
+        and institute_code != parsed.institution
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Payload institution '{parsed.institution}' does not match selected "
+                f"institute '{institute_code}'."
+            ),
+        )
+
+
+def _ingest_derivation(
     ingest: IngestFile,
     parsed: ParsedTestRun,
     component: Component | None,
+    profile: InstituteProfile | None,
+):
+    """Server-side derived values for one ingest file (spec 2026-08-27 §9.3).
+
+    Computed in the dry-run, before anything is staged, so the operator sees
+    the verdict while the file can still be rejected — and so the value that is
+    uploaded is the value they approved. None where the institute configures no
+    derivation for this test type.
+    """
+    return derive_glue_results(
+        ingest.payload,
+        profile.settings if profile is not None else None,
+        parsed.test_type or ingest.test_type,
+        component.type_code if component is not None else None,
+        measured_at=parsed.measured_at,
+    )
+
+
+def _required_property_issues(
+    ingest: IngestFile,
+    parsed: ParsedTestRun,
+    profile: InstituteProfile | None,
 ) -> list[str]:
     """Institute-configured mandatory upload properties (e.g. the used jig) that
     are missing from this ingest file (docs/07). Data-driven and empty by default
     — a no-op until an institute sets `settings['required_properties']`."""
     test_type = parsed.test_type or ingest.test_type
-    institute_code = (
-        component.institute_code if component is not None else None
-    ) or parsed.institution
-    if test_type is None or institute_code is None:
-        return []
-    profile = db.scalar(select(InstituteProfile).where(InstituteProfile.code == institute_code))
-    if profile is None:
+    if test_type is None or profile is None:
         return []
     missing = missing_required_properties(
         ingest.payload.get("properties"), profile.settings, test_type
@@ -2948,7 +3014,11 @@ def _required_property_issues(
     response_model=IngestPreviewOut,
     tags=["ingestion"],
 )
-def preview_ingest_file(file_id: int, db: Session = Depends(get_db)) -> IngestPreviewOut:
+def preview_ingest_file(
+    file_id: int,
+    institute_code: str | None = None,
+    db: Session = Depends(get_db),
+) -> IngestPreviewOut:
     """Dry-run parse of a stored payload — no state change, no PDB access."""
     ingest = db.get(IngestFile, file_id)
     if ingest is None:
@@ -2963,10 +3033,22 @@ def preview_ingest_file(file_id: int, db: Session = Depends(get_db)) -> IngestPr
     component_sn = ingest.component_sn or parsed.component_sn or (
         component.sn if component is not None else None
     )
+    _require_matching_unmirrored_institute(parsed, component, institute_code)
+    profile = _ingest_institute(
+        db,
+        parsed,
+        component,
+        institute_code=institute_code,
+    )
+    if component is None and institute_code is not None and profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Institute '{institute_code}' not found.",
+        )
     issues = (
         parsed.issues
         + _ingest_target_issues(ingest, parsed)
-        + _required_property_issues(db, ingest, parsed, component)
+        + _required_property_issues(ingest, parsed, profile)
     )
     return IngestPreviewOut(
         file_id=ingest.id,
@@ -2978,7 +3060,7 @@ def preview_ingest_file(file_id: int, db: Session = Depends(get_db)) -> IngestPr
         local_name=parsed.local_name,
         component_mirrored=component is not None,
         component_stage=component.stage if component is not None else None,
-        institute_code=component.institute_code if component is not None else None,
+        institute_code=profile.code if profile is not None else None,
         test_type=parsed.test_type,
         run_number=parsed.run_number,
         institution=parsed.institution,
@@ -2989,6 +3071,7 @@ def preview_ingest_file(file_id: int, db: Session = Depends(get_db)) -> IngestPr
         results=parsed.results,
         issues=issues,
         warnings=parsed.warnings,
+        derived=derivation_payload(_ingest_derivation(ingest, parsed, component, profile)),
     )
 
 
@@ -3022,17 +3105,7 @@ def propose_ingest_outbox_action(
         )
     parsed = parse_payload(ingest.payload)
     component = db.scalar(select(Component).where(Component.sn == ingest.component_sn))
-    issues = (
-        parsed.issues
-        + _ingest_target_issues(ingest, parsed)
-        + _required_property_issues(db, ingest, parsed, component)
-    )
-    if issues:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Dry-run validation failed: {'; '.join(issues)}.",
-        )
-
+    _require_matching_unmirrored_institute(parsed, component, body.institute_code)
     institute_code = component.institute_code if component is not None else body.institute_code
     if institute_code is None:
         raise HTTPException(
@@ -3046,6 +3119,19 @@ def propose_ingest_outbox_action(
     if institute is None:
         raise HTTPException(status_code=404, detail=f"Institute '{institute_code}' not found.")
     _require_institute_scope(user, institute)
+
+    issues = (
+        parsed.issues
+        + _ingest_target_issues(ingest, parsed)
+        + _required_property_issues(ingest, parsed, institute)
+    )
+    if issues:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Dry-run validation failed: {'; '.join(issues)}.",
+        )
+
+    derivation = _ingest_derivation(ingest, parsed, component, institute)
 
     action = OutboxAction(
         institute_id=institute.id,
@@ -3064,6 +3150,11 @@ def propose_ingest_outbox_action(
             "passed": parsed.passed,
             "measured_at": parsed.measured_at,
             "dry_run_required": True,
+            # What the dry-run computed, in the grams the PDB stores. Staged
+            # with the action rather than written back into the ingest file, so
+            # the uploaded document keeps matching the sha256 it was received
+            # under while the write intent still carries the derived values.
+            "derived_results": derived_result_grams(derivation),
         },
     )
     db.add(action)

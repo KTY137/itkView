@@ -1,9 +1,9 @@
 # Logistics and Operations
 
 > - **Owns:** the Phase 4 contract — glue-batch registry, tool resources and
->   assembly recording, shipment mirror and reception, reminders and
->   notification channels, and the operations health view, together with the
->   institute-profile keys that configure them.
+>   assembly recording, glue-weight derivation, shipment mirror and reception,
+>   reminders and notification channels, and the operations health view,
+>   together with the institute-profile keys that configure them.
 > - **Read this if:** you work on any of those modules, wire an operational
 >   screen, or need to know which process fires reminders and drains the outbox.
 > - **Links to:** [`09-pdb-production-strategy.md`](09-pdb-production-strategy.md)
@@ -100,7 +100,43 @@ editor and persists them through `PATCH /api/institutes/{code}`:
       "after_minutes": 30,
       "channel": "email-ops"
     },
-    "evidence_component_types": ["MODULE"]
+    "evidence_component_types": ["MODULE"],
+    "glue_targets": [
+      {
+        "process": "TRUEBLUE",
+        "label": "True Blue / False Blue",
+        "valid_from": null,
+        "module_types": {
+          "R5M1_HALFMODULE": {"hybrids": {"target_mg": 151, "tolerance_mg": 22}},
+          "R5M0_HALFMODULE": {
+            "hybrids": {"target_mg": 135, "tolerance_mg": 20},
+            "powerboard": {"target_mg": 103, "tolerance_mg": 16}
+          },
+          "R2": {
+            "hybrids": {"target_mg": 164, "tolerance_mg": 25},
+            "powerboard": {"target_mg": 70, "tolerance_mg": 11}
+          }
+        }
+      }
+    ],
+    "glue_weight_inputs": {
+      "hybrids": {
+        "label": "Hybrids",
+        "test_type": "GLUE_WEIGHT",
+        "measured": "GW_MODULE_H1",
+        "subtract": ["GW_SENSOR", "GW_HYBRID1"],
+        "result_code": "GW_GLUE_H1"
+      },
+      "powerboard": {
+        "label": "Powerboard",
+        "test_type": "GLUE_WEIGHT",
+        "measured": "GW_MODULE_H1PB",
+        "subtract": ["GW_MODULE_H1", "GW_PB"],
+        "result_code": "GW_GLUE_PB"
+      }
+    },
+    "glue_process_default": "TRUEBLUE",
+    "glue_process_property": null
   }
 }
 ```
@@ -135,6 +171,20 @@ The API normalizes the following operational settings when they are present:
   from 1 through 1,440.
 - `evidence_component_types`: a de-duplicated component-type list used by the
   automatic Evidence mirror.
+- `glue_targets`: a list of rule sets, each naming a `process`, an optional
+  `label`, a `valid_from` (ISO 8601 or `null`) and `module_types`. Process names
+  and module-type codes are uppercased; weights must be finite, non-negative
+  milligrams. Two rule sets may name the same process only if their `valid_from`
+  differs. `null` restores the seed defaults; an empty list is rejected.
+- `glue_weight_inputs`: derivation steps keyed by step name, each with a
+  `measured` result code, an optional `subtract` list, an optional `label`,
+  `test_type` and `result_code`. A step may not subtract or store its result in
+  the code it measures. `null` restores the seed defaults.
+- `glue_process_default`: the process applied when a run does not name one.
+  `null` is fine — an institute with exactly one configured process resolves to
+  it automatically.
+- `glue_process_property`: the PDB property or result code under which a run
+  names its own glue process. `null` by default.
 
 Malformed values are rejected as `422` rather than being silently stored.
 Updates emit `institute.updated` with changed top-level profile fields,
@@ -179,6 +229,89 @@ from [`06-users-roles-audit.md`](06-users-roles-audit.md).
 Full per-institute row and query scoping is still a Phase 6 item. The current
 list/read routes operate on the local instance-wide dataset. Do not treat this
 contract as completed tenant isolation.
+
+## Glue-weight derivation
+
+The PDB does not judge glue weights. All 14 module test schemas carry
+`automaticGrading=false` with every threshold `null`, and the single `passed`
+bit reproduces the production sheet's verdict only 80 % of the time — for two
+separate verdicts at once (hybrids and powerboard). Target, tolerance and
+verdict therefore come from the institute profile, and itkFlow computes them
+**server-side**: `app/domain/glue.py` holds the arithmetic, `app/glue_service.py`
+supplies its inputs from the database. The formula exists once. No client ever
+recomputes it.
+
+**Units.** The PDB stores every `GW_` result in **grams**; targets, tolerances
+and derived weights are stated in **milligrams**. The conversion happens only at
+the two edges of `glue_service`: derived values leave the API in milligrams, and
+the value staged for upload is converted back to grams.
+
+**Selecting a rule set.** All entries whose `process` matches, then the one with
+the greatest `valid_from` not later than the run's `measured_at`. `valid_from:
+null` always qualifies and loses to any dated rule. A run without a measurement
+date, and a row with no run at all, select the newest rule — the one a
+measurement taken today would be judged by. The validity period is not
+decoration: the sheet this replaces runs two generations of the same rule side
+by side, so a profile that knows one set of constants misjudges older runs.
+
+**Which steps appear.** Every step configured in `glue_weight_inputs` for the
+row's test type, except where the selected rule *knows* the module type and that
+type carries no entry for the step — that is the profile stating that this type
+has no such gluing step (a half-module carries no powerboard). A module type the
+rule has never seen keeps all its steps and reports `no_target`, so a profile gap
+stays visible.
+
+**The derived payload** appears on `worksheet.groups[].rows[].derived` of
+`GET /api/components/{sn}/preview` and on `derived` of
+`GET /api/ingest/files/{id}/preview`, and is `null` where the profile derives
+nothing for that test type:
+
+```json
+{
+  "kind": "glue_weight",
+  "process": "TRUEBLUE",
+  "process_source": "profile_default",
+  "steps": [
+    {
+      "key": "hybrids",
+      "label": "Hybrids",
+      "measured_mg": 132.7,
+      "target_mg": 151,
+      "tolerance_mg": 22,
+      "verdict": "ok",
+      "reason": null,
+      "result_code": "GW_GLUE_H1",
+      "inputs": [{"code": "GW_MODULE_H1", "name": "...", "value": 9.3819}]
+    }
+  ]
+}
+```
+
+`verdict` is `ok`, `too_little`, `too_much` or `unknown`, and an `unknown`
+verdict always carries a `reason`: `no_run` (nothing measured yet — the target is
+still shown), `missing_inputs` (a scale reading is absent or not a number) or
+`no_target` (the profile has no target for this module type, or the process could
+not be established). This is a hard rule rather than defensive style: on the
+owner's real sheet, 8 of 13 powerboard verdicts are arithmetic on blank cells,
+because an empty input looked exactly like a result. `input.value` is the raw
+reading in grams, `null` where it is missing — never a substituted zero.
+
+`process_source` is `run` when the run named its own process through
+`glue_process_property`, `profile_default` when the profile's default (explicit
+or the single configured process) applied, and `unknown` when neither could be
+established. An unknown process yields no rule set and therefore `no_target`.
+
+**Derivation in the dry-run.** `GET /api/ingest/files/{id}/preview` derives from
+the uploaded payload before anything is staged, so the operator sees the verdict
+while the file can still be rejected. `POST /api/ingest/files/{id}/propose-outbox`
+stores the computed values as `derived_results` (result code to grams) on the
+outbox action payload. They ride on the write intent, not on the ingest file:
+the received document keeps matching the `sha256` it was recorded under. A step
+without a computed value contributes nothing — an upload never carries a
+fabricated zero.
+
+Withdrawn runs (`state='deleted'`) never produce a verdict, in line with the
+rest of the evidence handling.
 
 ## Glue-batch registry
 
