@@ -5,10 +5,12 @@ import gzip
 import inspect
 import io
 import tarfile
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event, Lock
 from urllib.error import HTTPError
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app import attachment_store
 from app.attachment_store import (
@@ -19,7 +21,11 @@ from app.attachment_store import (
 )
 from app.config import Settings
 from app.db import Base, make_engine, make_session_factory
-from app.models import TestRunAttachment, TestRunEvidence
+from app.models import (
+    TestRunAttachment,
+    TestRunAttachmentReference,
+    TestRunEvidence,
+)
 
 JPEG = b"\xff\xd8\xff\xe0itkflow-test-image"
 
@@ -95,30 +101,53 @@ class _FakeGateway:
 
 
 def test_storage_path_groups_by_serial_number():
-    path = storage_path("20USEM20000041", "abc123", "image/jpeg", "x.jpg")
-    assert path == "20USEM20000041/abc123.jpg"
+    path = storage_path(
+        "20USEM20000041", "abc123", "image/jpeg", "x.jpg", source="pdb"
+    )
+    assert path == "20USEM20000041/pdb/abc123.jpg"
 
 
 def test_storage_path_ignores_the_pdb_filename():
     """A PDB-supplied name must never reach the filesystem."""
-    path = storage_path("20USEM1", "code9", "image/png", "../../evil.exe")
-    assert path == "20USEM1/code9.png"
+    path = storage_path(
+        "20USEM1", "code9", "image/png", "../../evil.exe", source="pdb"
+    )
+    assert path == "20USEM1/pdb/code9.png"
     assert ".." not in path and "evil" not in path
 
 
 def test_storage_path_sanitises_a_hostile_code():
-    path = storage_path("20USEM1", "../../../etc/passwd", "image/png", None)
+    path = storage_path(
+        "20USEM1", "../../../etc/passwd", "image/png", None, source="pdb"
+    )
     assert ".." not in path
-    assert path.count("/") == 1
+    assert path.count("/") == 2
+
+
+def test_storage_path_sanitises_source_without_aliasing_distinct_names():
+    first = storage_path("SN", "c", "image/png", None, source="future/source")
+    second = storage_path("SN", "c", "image/png", None, source="future?source")
+    empty = storage_path("SN", "c", "image/png", None, source="")
+    literal_unknown = storage_path("SN", "c", "image/png", None, source="unknown")
+
+    assert ".." not in first
+    assert first.count("/") == 2
+    assert first != second
+    assert empty != literal_unknown
 
 
 def test_unknown_content_type_gets_no_extension():
     # Better a extension-less file than writing an arbitrary one.
-    assert storage_path("SN", "c", "application/x-msdownload", "a.exe") == "SN/c"
+    assert (
+        storage_path(
+            "SN", "c", "application/x-msdownload", "a.exe", source="pdb"
+        )
+        == "SN/pdb/c"
+    )
 
 
 def test_extension_falls_back_to_a_trusted_suffix():
-    assert storage_path("SN", "c", None, "photo.png") == "SN/c.png"
+    assert storage_path("SN", "c", None, "photo.png", source="pdb") == "SN/pdb/c.png"
 
 
 # --- descriptor extraction -------------------------------------------------
@@ -155,12 +184,109 @@ def test_download_writes_the_file_and_indexes_it(session, settings, evidence):
 
     assert stats.downloaded == 1 and stats.failed == 0
     row = session.scalar(select(TestRunAttachment))
-    assert row.relative_path == "20USEM20000041/abc123.jpg"
+    assert row.relative_path == "20USEM20000041/pdb/abc123.jpg"
     assert row.size_bytes == len(JPEG)
     assert row.downloaded_at is not None
 
     stored = resolve_path(settings, row)
     assert stored is not None and stored.read_bytes() == JPEG
+
+
+def test_equal_codes_from_different_sources_keep_distinct_same_suffix_files(
+    session, settings, monkeypatch
+):
+    """The database identity `(source, code)` must also be the disk identity."""
+    code = "same-code"
+    component_sn = "20USEM20000041"
+    payloads = {
+        "pdb": b"\xff\xd8\xffpdb-image",
+        "share_link": b"\xff\xd8\xffshare-image",
+    }
+    descriptors = [
+        {
+            "component_sn": component_sn,
+            "test_type": "VISUAL_INSPECTION",
+            "test_run_ref": f"RUN-{source}",
+            "code": code,
+            "filename": f"{source}.jpg",
+            "content_type": "image/jpeg",
+            "title": source,
+            "source": source,
+            "type": "share_link" if source == "share_link" else "file",
+            "url": "https://example.invalid/public.jpg"
+            if source == "share_link"
+            else None,
+        }
+        for source in payloads
+    ]
+
+    def fetch_by_source(client, descriptor, *, timeout, max_bytes):  # noqa: ARG001
+        return payloads[descriptor["source"]], "image/jpeg"
+
+    monkeypatch.setattr(attachment_store, "_fetch_bytes", fetch_by_source)
+
+    stats = download_attachments(
+        session,
+        _FakeGateway(),
+        settings,
+        component_sn,
+        descriptors=descriptors,
+    )
+    session.commit()
+
+    assert stats.downloaded == 2
+    rows = list(
+        session.scalars(
+            select(TestRunAttachment)
+            .where(TestRunAttachment.pdb_code == code)
+            .order_by(TestRunAttachment.source)
+        )
+    )
+    assert {row.source for row in rows} == {"pdb", "share_link"}
+    assert {row.relative_path for row in rows} == {
+        f"{component_sn}/pdb/{code}.jpg",
+        f"{component_sn}/share_link/{code}.jpg",
+    }
+    assert len({row.relative_path for row in rows}) == 2
+    for row in rows:
+        path = resolve_path(settings, row)
+        assert path is not None
+        assert path.read_bytes() == payloads[row.source]
+    assert len(list(session.scalars(select(TestRunAttachmentReference)))) == 2
+
+
+def test_reuse_preserves_an_existing_flat_legacy_relative_path(
+    session, settings, evidence
+):
+    legacy_relative_path = "20USEM20000041/abc123.jpg"
+    legacy_path = attachment_store.attachment_root(settings) / legacy_relative_path
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_bytes(JPEG)
+    row = TestRunAttachment(
+        component_sn="20USEM20000041",
+        test_type="VISUAL_INSPECTION",
+        test_run_ref="RUN-1",
+        source="pdb",
+        pdb_code="abc123",
+        filename="Untitled.jpg",
+        content_type="image/jpeg",
+        relative_path=legacy_relative_path,
+        size_bytes=len(JPEG),
+    )
+    session.add(row)
+    session.commit()
+
+    client = _FakeClient(fail=True)
+    stats = download_attachments(
+        session, _FakeGateway(client), settings, "20USEM20000041"
+    )
+    session.commit()
+    session.refresh(row)
+
+    assert stats.reused == 1 and stats.downloaded == 0
+    assert client.calls == 0
+    assert row.relative_path == legacy_relative_path
+    assert resolve_path(settings, row) == legacy_path.resolve()
 
 
 def test_download_is_idempotent(session, settings, evidence):
@@ -346,13 +472,28 @@ def test_looks_like_html_detects_the_usual_shapes():
 
 def test_instrument_data_keeps_its_suffix():
     """Instrument output arrives as octet-stream; the name is the only clue."""
-    assert storage_path("SN", "c", "application/octet-stream", "iv_002.dat") == "SN/c.dat"
-    assert storage_path("SN", "c", "application/octet-stream", "run.log") == "SN/c.log"
+    assert (
+        storage_path(
+            "SN", "c", "application/octet-stream", "iv_002.dat", source="pdb"
+        )
+        == "SN/pdb/c.dat"
+    )
+    assert (
+        storage_path(
+            "SN", "c", "application/octet-stream", "run.log", source="pdb"
+        )
+        == "SN/pdb/c.log"
+    )
 
 
 def test_an_executable_suffix_is_still_refused():
     for name in ("payload.exe", "script.bat", "lib.dll", "run.ps1", "x.cmd"):
-        assert storage_path("SN", "c", "application/octet-stream", name) == "SN/c", name
+        assert (
+            storage_path(
+                "SN", "c", "application/octet-stream", name, source="pdb"
+            )
+            == "SN/pdb/c"
+        ), name
 
 
 # --- EOS and public share-link sources -------------------------------------
@@ -1110,12 +1251,23 @@ def test_a_duplicate_code_across_runs_stays_stored(session, settings):
         )
     session.commit()
 
-    stats = download_attachments(session, _FakeGateway(), settings, "20USEM20000043")
+    client = _FakeClient()
+    gateway = _FakeGateway(client)
+    stats = download_attachments(session, gateway, settings, "20USEM20000043")
     session.commit()
 
     assert stats.downloaded == 1 and stats.reused == 1 and stats.failed == 0
     row = session.scalar(select(TestRunAttachment))
     assert resolve_path(settings, row) is not None
+
+    forced = download_attachments(
+        session, gateway, settings, "20USEM20000043", force=True
+    )
+    session.commit()
+
+    assert forced.downloaded == 1 and forced.reused == 1 and forced.failed == 0
+    assert client.calls == 2, "each sweep must fetch a physical blob only once"
+    assert resolve_path(settings, row).read_bytes() == JPEG
 
 
 def test_download_heartbeat_fires_per_file_and_per_retry(
@@ -1369,6 +1521,174 @@ def test_a_concurrent_writer_is_never_blocked_during_the_network_fetch(tmp_path)
     assert probe_errors == []
 
 
+def test_overlapping_component_syncs_fetch_and_store_one_shared_blob(
+    tmp_path, monkeypatch
+):
+    """Direct/background overlap is serialized by physical attachment key.
+
+    Two calls even target the same component, so without the lock they also
+    write the exact same deterministic .part path. A third component proves
+    that serialization retains every association instead of duplicating the
+    bytes under each serial number.
+    """
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'parallel-attachments.db'}",
+        attachment_dir=str(tmp_path / "attachments"),
+        _env_file=None,
+    )
+    engine = make_engine(settings.database_url)
+    Base.metadata.create_all(engine)
+    factory = make_session_factory(engine)
+    primary_sn = "20USEP00000001"
+    component_sns = [primary_sn, primary_sn, "20USEP00000002"]
+    descriptor_by_component = {
+        component_sn: {
+            "component_sn": component_sn,
+            "test_type": "VISUAL_INSPECTION",
+            "test_run_ref": f"RUN-{component_sn}",
+            "code": "parallel-shared-code",
+            "filename": "picture.jpg",
+            "content_type": "image/jpeg",
+            "title": "Inspection picture",
+            "type": "share_link",
+            "url": "https://example.invalid/s/public",
+            "source": "share_link",
+        }
+        for component_sn in set(component_sns)
+    }
+    with factory() as session:
+        descriptor = descriptor_by_component[primary_sn]
+        session.add(
+            TestRunEvidence(
+                component_sn=primary_sn,
+                test_type=descriptor["test_type"],
+                passed=True,
+                source="pdb",
+                external_ref=descriptor["test_run_ref"],
+                payload={
+                    "attachments": [
+                        {
+                            key: value
+                            for key, value in descriptor.items()
+                            if key not in {"component_sn", "test_type", "test_run_ref"}
+                        }
+                    ]
+                },
+            )
+        )
+        session.commit()
+
+    first_fetch_started = Event()
+    contenders_ready = Barrier(3)
+    savepoint_ended = Event()
+    commit_flush_ended = Event()
+    allow_root_commit = Event()
+    duplicate_fetch_started = Event()
+    fetch_guard = Lock()
+    fetches: list[str] = []
+
+    def fetch_once(client, descriptor, *, timeout, max_bytes):  # noqa: ARG001
+        with fetch_guard:
+            fetches.append(descriptor["code"])
+            first = len(fetches) == 1
+        if first:
+            first_fetch_started.set()
+            contenders_ready.wait(timeout=5)
+        else:
+            duplicate_fetch_started.set()
+        return JPEG, "image/jpeg"
+
+    monkeypatch.setattr(attachment_store, "_fetch_bytes", fetch_once)
+
+    class _NoPdbGateway:
+        is_configured = False
+
+    def mirror(component_sn: str, *, planned: bool):
+        if planned:
+            first_fetch_started.wait(timeout=5)
+            contenders_ready.wait(timeout=5)
+        with factory() as session:
+            stats = download_attachments(
+                session,
+                _NoPdbGateway(),
+                settings,
+                component_sn,
+                descriptors=[descriptor_by_component[component_sn]] if planned else None,
+            )
+            if planned:
+                session.commit()
+                return stats
+
+            # Ending a SAVEPOINT and the internal transaction used by the
+            # commit autoflush both emit `after_transaction_end`. Neither may
+            # release the physical-key lock before the root transaction ends.
+            with session.begin_nested():
+                pass
+            savepoint_ended.set()
+            blob = session.scalar(select(TestRunAttachment))
+            blob.title = "Dirty again so root commit must autoflush"
+            root_transaction = session.get_transaction()
+
+            def pause_after_commit_flush(
+                active_session, transaction  # noqa: ARG001
+            ):
+                if transaction.parent is root_transaction and not transaction.nested:
+                    commit_flush_ended.set()
+                    allow_root_commit.wait(timeout=5)
+
+            event.listen(session, "after_transaction_end", pause_after_commit_flush)
+            try:
+                session.commit()
+            finally:
+                event.remove(session, "after_transaction_end", pause_after_commit_flush)
+            return stats
+
+    with ThreadPoolExecutor(max_workers=len(component_sns)) as executor:
+        direct = executor.submit(mirror, primary_sn, planned=False)
+        background_same_component = executor.submit(mirror, primary_sn, planned=True)
+        background_other_component = executor.submit(
+            mirror, component_sns[-1], planned=True
+        )
+        try:
+            assert savepoint_ended.wait(timeout=5)
+            assert commit_flush_ended.wait(timeout=5)
+            # Both waiters are already trying the same key. If either the
+            # SAVEPOINT or commit-flush child event released it, one enters the
+            # fetch before the deliberately paused root COMMIT can finish.
+            assert not duplicate_fetch_started.wait(timeout=1)
+            assert not background_same_component.done()
+            assert not background_other_component.done()
+        finally:
+            allow_root_commit.set()
+        stats = [
+            direct.result(timeout=10),
+            background_same_component.result(timeout=10),
+            background_other_component.result(timeout=10),
+        ]
+
+    assert sum(item.downloaded for item in stats) == 1
+    assert sum(item.reused for item in stats) == 2
+    assert fetches == ["parallel-shared-code"]
+    with factory() as session:
+        assert len(list(session.scalars(select(TestRunAttachment)))) == 1
+        references = list(session.scalars(select(TestRunAttachmentReference)))
+        assert {reference.component_sn for reference in references} == set(component_sns)
+        assert len(references) == 2
+        for component_sn in set(component_sns):
+            assert [
+                row.pdb_code
+                for row in attachment_store.known_attachments(session, component_sn)
+            ] == ["parallel-shared-code"]
+
+    root = attachment_store.attachment_root(settings)
+    stored_files = [
+        path for path in root.rglob("*") if path.is_file() and not path.name.endswith(".part")
+    ]
+    assert len(stored_files) == 1
+    assert stored_files[0].read_bytes() == JPEG
+    assert list(root.rglob("*.part")) == []
+
+
 def test_a_failed_download_leaves_no_part_file_and_no_relative_path(
     session, settings, evidence
 ):
@@ -1404,7 +1724,7 @@ def test_a_stale_part_file_from_a_crashed_run_is_overwritten(
     """A previous process could die mid-write; the leftover `.part` file must
     not make the next sweep fail or serve stale bytes."""
     root = attachment_store.attachment_root(settings)
-    stale = root / "20USEM20000041" / "abc123.jpg.part"
+    stale = root / "20USEM20000041" / "pdb" / "abc123.jpg.part"
     stale.parent.mkdir(parents=True, exist_ok=True)
     stale.write_bytes(b"leftover-from-a-crashed-process")
 
@@ -1798,6 +2118,14 @@ def _tar(entries, *, compress=False, tail=True, archive_format=tarfile.GNU_FORMA
     return gzip.compress(blob) if compress else blob
 
 
+def _gzip_with_filename(payload: bytes, filename: str) -> bytes:
+    """A gzip stream carrying the optional FNAME header field."""
+    target = io.BytesIO()
+    with gzip.GzipFile(filename=filename, mode="wb", fileobj=target, mtime=0) as stream:
+        stream.write(payload)
+    return target.getvalue()
+
+
 def _folder_archive(*, compress=False, entry=FOLDER_ENTRY) -> bytes:
     """The shape the live share really returns, with tiny payloads."""
     return _tar(
@@ -1901,15 +2229,15 @@ def test_the_stored_archive_member_is_the_one_the_rule_names(
 ):
     """Which of five plausible members is picked, and why it cannot drift.
 
-    The live folder holds two JPEGs, two Canon raws and a note. The rule is:
-    the exactly-named entry, else an image the mirror can store, else anything
-    else it can name, else nothing - ties broken by path. That makes the
-    choice a pure function of the archive's *content*, so the order a host
-    streams members in cannot change which file an operator ends up with.
+    The live folder holds two JPEGs, two Canon raws and a note. An older TIFF
+    is added here to prove that a browser-displayable image wins before the
+    path tie-breaker. The choice stays a pure function of the archive's
+    *content*, never of the order a host streams members in.
     """
     shuffled = _tar(
         [
             _entry(f"{FOLDER_ENTRY}/{FOLDER_ENTRY}_1.CR2", b"raw-canon-bytes"),
+            _entry(f"{FOLDER_ENTRY}/{FOLDER_ENTRY}_0.TIFF", b"II*\x00tiff-image"),
             _entry(f"{FOLDER_ENTRY}/{FOLDER_ENTRY}_4.JPG", b"\xff\xd8\xff\xe0second"),
             _entry(f"{FOLDER_ENTRY}/", kind=tarfile.DIRTYPE),
             _entry(f"{FOLDER_ENTRY}/{FOLDER_ENTRY}_2025_09_08_pics1-4.txt", b"note\n"),
@@ -1928,20 +2256,84 @@ def test_the_stored_archive_member_is_the_one_the_rule_names(
 
     assert stats.downloaded == 1
     row = session.scalar(select(TestRunAttachment))
-    # `_2.JPG`: not the note that sorts between the two pictures, not the raw
-    # that is larger, and not `_4.JPG` that arrived earlier in the stream.
+    # `_2.JPG`: not the lexicographically earlier TIFF, not the note or raw,
+    # and not `_4.JPG` that arrived earlier in the stream.
     assert resolve_path(settings, row).read_bytes() == JPEG
+
+
+def test_archive_image_ranking_uses_sniffed_bytes_not_remote_extensions():
+    """A misleading suffix must not outrank the image a browser can paint."""
+    real_tiff = b"II*\x00tiff-image"
+    real_jpeg = b"\xff\xd8\xff\xe0jpeg-image"
+    archive = _tar(
+        [
+            # Lexicographically first and named like a JPEG, but the bytes are
+            # TIFF. The later member has the inverse mismatch and must win.
+            _entry(f"{FOLDER_ENTRY}/a.jpg", real_tiff),
+            _entry(f"{FOLDER_ENTRY}/b.tiff", real_jpeg),
+        ]
+    )
+    stream = attachment_store._CappedStream(io.BytesIO(archive), len(archive) + 1)
+
+    selected = attachment_store._archive_member(
+        stream,
+        mode="r|",
+        wanted=FOLDER_ENTRY,
+        max_bytes=4096,
+        budget=len(archive) + 1,
+    )
+
+    assert selected == (f"{FOLDER_ENTRY}/b.tiff", real_jpeg)
+    assert attachment_store._member_content_type(*selected) == "image/jpeg"
 
 
 def test_the_exactly_named_entry_beats_every_other_member():
     """When the descriptor names a file rather than a folder, that file wins
     even against an image sitting next to it."""
     rank = attachment_store._member_rank
-    assert rank("photo", "photo") < rank("shiny.png", "photo")
-    assert rank("shiny.png", "photo") < rank("readme.txt", "photo")
-    assert rank("readme.txt", "photo") < rank("scan.cr2", "photo")
+    assert rank("photo", "photo", None) < rank("shiny.png", "photo", "image/png")
+    assert rank("shiny.png", "photo", "image/png") < rank(
+        "older.tiff", "photo", "image/tiff"
+    )
+    assert rank("older.tiff", "photo", "image/tiff") < rank(
+        "readme.txt", "photo", None
+    )
+    assert rank("readme.txt", "photo", None) < rank("scan.cr2", "photo", None)
     # Without a named entry there is no exact match to prefer.
-    assert rank("photo", "") == rank("photo.cr2", "")
+    assert rank("photo", "", None) == rank("photo.cr2", "", None)
+
+
+@pytest.mark.parametrize("exact_first", [False, True])
+def test_the_exact_wanted_path_wins_in_the_stream_too(exact_first):
+    exact = _entry("folder/photo", b"exact-file")
+    descendant = _entry("folder/photo/shiny.jpg", JPEG)
+    archive = _tar([exact, descendant] if exact_first else [descendant, exact])
+    stream = attachment_store._CappedStream(io.BytesIO(archive), len(archive) + 1)
+
+    assert attachment_store._archive_member(
+        stream,
+        mode="r|",
+        wanted="folder/photo",
+        max_bytes=4096,
+        budget=len(archive) + 1,
+    ) == ("folder/photo", b"exact-file")
+
+
+def test_a_duplicate_normalised_member_path_is_first_wins():
+    """Tar permits byte-distinct duplicates; their first occurrence is final."""
+    first = b"II*\x00first-is-tiff"
+    later_but_higher_rank = b"\xff\xd8\xff\xe0second-is-jpeg"
+    path = f"{FOLDER_ENTRY}/same-picture"
+    archive = _tar([_entry(path, first), _entry(path, later_but_higher_rank)])
+    stream = attachment_store._CappedStream(io.BytesIO(archive), len(archive) + 1)
+
+    assert attachment_store._archive_member(
+        stream,
+        mode="r|",
+        wanted=FOLDER_ENTRY,
+        max_bytes=4096,
+        budget=len(archive) + 1,
+    ) == (path, first)
 
 
 def test_a_member_escaping_its_directory_is_refused():
@@ -1977,7 +2369,7 @@ def test_a_control_character_in_a_member_name_is_refused():
 
 
 def test_only_regular_files_are_ever_eligible():
-    """Symlinks, hardlinks, devices, fifos, directories and GNU sparse.
+    """Symlinks, hardlinks, devices, fifos, directories and every sparse form.
 
     A symlink is the classic one: written out, it would point the stored name
     at a file elsewhere on the operator's disk. It is refused on *type*,
@@ -1996,6 +2388,42 @@ def test_only_regular_files_are_ever_eligible():
         assert attachment_store.safe_archive_member_name(info) is None, kind
     ordinary, _ = _entry("harmless.jpg", JPEG)
     assert attachment_store.safe_archive_member_name(ordinary) == "harmless.jpg"
+
+    # PAX sparse metadata is represented by tarfile as a regular type with a
+    # sparse map; a type-only guard therefore misses it.
+    pax_sparse = tarfile.TarInfo("looks-regular.jpg")
+    pax_sparse.type = tarfile.REGTYPE
+    pax_sparse.size = len(JPEG)
+    pax_sparse.sparse = [(0, len(JPEG))]
+    assert pax_sparse.isreg() and pax_sparse.issparse()
+    assert attachment_store.safe_archive_member_name(pax_sparse) is None
+
+
+def test_a_parsed_pax_sparse_member_is_never_selected():
+    """Exercise the real tar parser path, not only a constructed TarInfo."""
+    payload = b"abc"
+    info = tarfile.TarInfo(f"{FOLDER_ENTRY}/looks-regular.jpg")
+    info.type = tarfile.REGTYPE
+    info.size = len(payload)
+    info.pax_headers = {"GNU.sparse.map": "0,3", "GNU.sparse.size": "3"}
+    archive = (
+        info.tobuf(format=tarfile.PAX_FORMAT)
+        + payload
+        + b"\x00" * (-len(payload) % 512)
+        + b"\x00" * 1024
+    )
+    stream = attachment_store._CappedStream(io.BytesIO(archive), len(archive) + 1)
+
+    assert (
+        attachment_store._archive_member(
+            stream,
+            mode="r|",
+            wanted=FOLDER_ENTRY,
+            max_bytes=4096,
+            budget=len(archive) + 1,
+        )
+        is None
+    )
 
 
 def test_a_symlink_member_is_not_stored_even_when_it_is_the_named_entry(
@@ -2416,13 +2844,41 @@ def test_an_archive_whose_member_is_an_html_error_page_is_refused(
     assert resolve_path(settings, session.scalar(select(TestRunAttachment))) is None
 
 
+@pytest.mark.parametrize(
+    "optional_filename_bytes",
+    [0, 4096, attachment_store._GZIP_ARCHIVE_SNIFF_BYTES - 11],
+)
 def test_a_gzip_compressed_archive_is_unpacked_too(
-    session, settings, evidence, monkeypatch, no_sleep
+    session, settings, evidence, monkeypatch, no_sleep, optional_filename_bytes
 ):
+    plain_archive = _folder_archive()
+    archive = (
+        _gzip_with_filename(plain_archive, "x" * optional_filename_bytes)
+        if optional_filename_bytes
+        else gzip.compress(plain_archive)
+    )
+    if optional_filename_bytes:
+        assert attachment_store._gzip_header_end(archive[:512]) is None
+        probe = attachment_store._CappedStream(
+            io.BytesIO(archive),
+            len(archive) + 1,
+        )
+        assert attachment_store._sniff_archive_stream_mode(probe) == "r|gz"
+        assert probe.consumed <= (
+            attachment_store._GZIP_ARCHIVE_SNIFF_BYTES
+            + attachment_store._GZIP_DEFLATE_SNIFF_BYTES
+        )
+        if optional_filename_bytes == attachment_store._GZIP_ARCHIVE_SNIFF_BYTES - 11:
+            assert (
+                attachment_store._gzip_header_end(
+                    archive[: attachment_store._GZIP_ARCHIVE_SNIFF_BYTES]
+                )
+                == attachment_store._GZIP_ARCHIVE_SNIFF_BYTES
+            )
     monkeypatch.setattr(
         attachment_store,
         "_open_public_url",
-        _share_opener([], archive=_folder_archive(compress=True)),
+        _share_opener([], archive=archive),
     )
     _stage_folder_descriptor(session, evidence)
 
@@ -2435,6 +2891,45 @@ def test_a_gzip_compressed_archive_is_unpacked_too(
     row = session.scalar(select(TestRunAttachment))
     assert resolve_path(settings, row).read_bytes() == JPEG
     assert row.content_type == "image/jpeg"
+
+
+def test_a_gzip_header_beyond_the_fixed_cap_is_refused():
+    archive = _gzip_with_filename(
+        _folder_archive(), "x" * attachment_store._GZIP_ARCHIVE_SNIFF_BYTES
+    )
+    stream = attachment_store._CappedStream(io.BytesIO(archive), len(archive) + 1)
+
+    with pytest.raises(attachment_store._ArchiveRefused, match="gzip header"):
+        attachment_store._sniff_archive_stream_mode(stream)
+    assert stream.consumed == attachment_store._GZIP_ARCHIVE_SNIFF_BYTES
+
+
+def test_a_gzip_deflate_probe_is_bounded_when_it_yields_no_output():
+    # A valid sequence of non-final empty stored blocks can consume arbitrary
+    # compressed input without producing one clear byte. It must not turn the
+    # archive sniff into an unbounded search for the tar header.
+    header = b"\x1f\x8b\x08\x00" + b"\x00" * 4 + b"\x00\xff"
+    empty_deflate_block = b"\x00\x00\x00\xff\xff"
+    blocks = (
+        attachment_store._GZIP_DEFLATE_SNIFF_BYTES // len(empty_deflate_block)
+    ) + 10
+    wire_bytes = header + empty_deflate_block * blocks
+    stream = attachment_store._CappedStream(io.BytesIO(wire_bytes), len(wire_bytes) + 1)
+
+    with pytest.raises(attachment_store._ArchiveRefused, match="sniff budget"):
+        attachment_store._sniff_archive_stream_mode(stream)
+    assert stream.consumed == len(header) + attachment_store._GZIP_DEFLATE_SNIFF_BYTES
+
+
+def test_an_ordinary_gzip_with_a_maximum_header_stays_byte_identical():
+    wire_bytes = _gzip_with_filename(
+        b"ordinary compressed file" * 100,
+        "x" * (attachment_store._GZIP_ARCHIVE_SNIFF_BYTES - 11),
+    )
+    stream = attachment_store._CappedStream(io.BytesIO(wire_bytes), len(wire_bytes) + 1)
+
+    assert attachment_store._sniff_archive_stream_mode(stream) is None
+    assert stream.read(len(wire_bytes) + 1) == wire_bytes
 
 
 def test_archive_success_log_never_contains_the_remote_member_name(
@@ -2614,7 +3109,7 @@ def test_one_folder_share_is_asked_once_per_sweep_not_once_per_component(
     )
 
     breaker = attachment_store.OutageCircuitBreaker()
-    for component_sn in ("20USEP27010572", "20USEP27011071", "20USEP27012213"):
+    for component_sn in ("20USEP00000001", "20USEP00000002", "20USEP00000003"):
         download_attachments(
             session,
             _FakeGateway(configured=False),
@@ -2647,7 +3142,7 @@ def test_a_shared_folder_that_works_is_fetched_once_and_then_reused(
 
     totals = []
     breaker = attachment_store.OutageCircuitBreaker()
-    for component_sn in ("20USEP27010572", "20USEP27011071", "20USEP27012213"):
+    for component_sn in ("20USEP00000001", "20USEP00000002", "20USEP00000003"):
         totals.append(
             download_attachments(
                 session,
@@ -2663,11 +3158,126 @@ def test_a_shared_folder_that_works_is_fetched_once_and_then_reused(
     assert [stats.downloaded for stats in totals] == [1, 0, 0]
     assert [stats.reused for stats in totals] == [0, 1, 1]
     assert opens == [FOLDER_DAV_URL, FOLDER_ARCHIVE_URL]
+    assert len(list(session.scalars(select(TestRunAttachment)))) == 1
+    references = list(session.scalars(select(TestRunAttachmentReference)))
+    assert {reference.component_sn for reference in references} == {
+        "20USEP00000001",
+        "20USEP00000002",
+        "20USEP00000003",
+    }
+    assert len(references) == 3
+    for component_sn in {reference.component_sn for reference in references}:
+        assert [
+            row.pdb_code for row in attachment_store.known_attachments(session, component_sn)
+        ] == ["works" * 4]
+    stored_files = [
+        path for path in attachment_store.attachment_root(settings).rglob("*") if path.is_file()
+    ]
+    assert len(stored_files) == 1
+    assert stored_files[0].read_bytes() == JPEG
 
 
-def test_a_transient_share_failure_is_never_memoised(
+def test_reference_resync_updates_metadata_but_separates_null_run_test_types(
     session, settings, monkeypatch, no_sleep
 ):
+    """A missing run id does not make two test types the same association."""
+    opens: list[str] = []
+    monkeypatch.setattr(
+        attachment_store,
+        "_open_public_url",
+        _share_opener(opens, archive=_folder_archive()),
+    )
+    component_sn = "20USEP00000001"
+    code = "metadata" * 4
+    first = {
+        **_folder_descriptor(component_sn, code),
+        "test_type": "VISUAL_INSPECTION",
+        "test_run_ref": None,
+        "title": "Original title",
+    }
+    second = {
+        **first,
+        "test_type": "METROLOGY",
+        "title": "Other test",
+    }
+    updated = {
+        **first,
+        "filename": "operator-facing-name.jpg",
+        "title": "Updated title",
+    }
+    with_run = {
+        **first,
+        "test_run_ref": "RUN-STABLE",
+        "test_type": "OLD_TEST_TYPE",
+        "title": "Before upstream correction",
+    }
+    corrected_run = {
+        **with_run,
+        "test_type": "CORRECTED_TEST_TYPE",
+        "title": "After upstream correction",
+    }
+
+    outcomes = []
+    for descriptor in (
+        first,
+        second,
+        updated,
+        updated,
+        with_run,
+        corrected_run,
+        corrected_run,
+    ):
+        outcomes.append(
+            download_attachments(
+                session,
+                _FakeGateway(configured=False),
+                settings,
+                component_sn,
+                descriptors=[descriptor],
+            )
+        )
+        session.commit()
+
+    assert [outcome.downloaded for outcome in outcomes] == [1, 0, 0, 0, 0, 0, 0]
+    assert [outcome.reused for outcome in outcomes] == [0, 1, 1, 1, 1, 1, 1]
+    assert opens == [FOLDER_DAV_URL, FOLDER_ARCHIVE_URL]
+    assert len(list(session.scalars(select(TestRunAttachment)))) == 1
+    references = list(
+        session.scalars(
+            select(TestRunAttachmentReference).order_by(TestRunAttachmentReference.test_type)
+        )
+    )
+    assert len(references) == 3
+    assert [reference.test_type for reference in references] == [
+        "CORRECTED_TEST_TYPE",
+        "METROLOGY",
+        "VISUAL_INSPECTION",
+    ]
+    assert {
+        reference.test_run_ref
+        for reference in references
+        if reference.test_type in {"METROLOGY", "VISUAL_INSPECTION"}
+    } == {""}
+    corrected = next(
+        reference for reference in references if reference.test_run_ref == "RUN-STABLE"
+    )
+    assert corrected.test_type == "CORRECTED_TEST_TYPE"
+    assert corrected.title == "After upstream correction"
+    visual = next(
+        reference for reference in references if reference.test_type == "VISUAL_INSPECTION"
+    )
+    assert visual.filename == "operator-facing-name.jpg"
+    assert visual.title == "Updated title"
+    assert attachment_store.attachment_counts_by_run(session, [component_sn]) == {
+        component_sn: {
+            "CORRECTED_TEST_TYPE": {"RUN-STABLE": 1},
+            "METROLOGY": {None: 1},
+            "VISUAL_INSPECTION": {None: 1},
+        }
+    }
+
+
+def test_a_transient_share_failure_is_never_memoised(session, settings, monkeypatch, no_sleep):
     """Only *final* answers may be remembered. A file that failed because the
     line dropped has to stay reachable for the next component in the sweep."""
     opens: list[str] = []
@@ -2679,7 +3289,7 @@ def test_a_transient_share_failure_is_never_memoised(
     monkeypatch.setattr(attachment_store, "_open_public_url", _down)
 
     breaker = attachment_store.OutageCircuitBreaker(threshold=99)
-    for component_sn in ("20USEP27010572", "20USEP27011071"):
+    for component_sn in ("20USEP00000001", "20USEP00000002"):
         download_attachments(
             session,
             _FakeGateway(configured=False),

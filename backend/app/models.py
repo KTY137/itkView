@@ -229,7 +229,50 @@ class TestRunAttachment(Base):
 
     @property
     def is_image(self) -> bool:
-        return bool(self.content_type and self.content_type.startswith("image/"))
+        content_type = (self.content_type or "").split(";", 1)[0].strip().lower()
+        return content_type.startswith("image/")
+
+
+class TestRunAttachmentReference(Base):
+    """One component/test-run occurrence of a deduplicated attachment blob.
+
+    ``TestRunAttachment`` owns the physical file and stays unique on
+    ``(source, pdb_code)``.  A share-link URL can legitimately occur on many
+    components and test runs, though, so those associations cannot live on
+    that one blob row.  Keeping them here lets the mirror download one file
+    once while still showing it everywhere the PDB evidence references it.
+
+    ``test_run_ref`` uses the empty string as the database representation of
+    ``None`` so the uniqueness constraint behaves identically on SQLite and
+    PostgreSQL (both otherwise allow multiple NULLs in a unique key). Test type
+    is part of that identity because sources without a run reference can still
+    attach the same blob to two distinct tests on one component.
+    """
+
+    __tablename__ = "test_run_attachment_reference"
+    __test__ = False
+    __table_args__ = (
+        UniqueConstraint(
+            "attachment_id",
+            "component_sn",
+            "test_type",
+            "test_run_ref",
+            name="uq_attachment_ref_blob_component_type_run",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    attachment_id: Mapped[int] = mapped_column(
+        ForeignKey("test_run_attachment.id", ondelete="CASCADE"), index=True
+    )
+    component_sn: Mapped[str] = mapped_column(String(20), index=True)
+    test_type: Mapped[str] = mapped_column(String(64), index=True)
+    test_run_ref: Mapped[str] = mapped_column(String(64), default="", index=True)
+    filename: Mapped[str | None] = mapped_column(String(255), default=None)
+    title: Mapped[str | None] = mapped_column(String(255), default=None)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    attachment: Mapped[TestRunAttachment] = relationship()
 
 
 class TestTypeSchema(Base):

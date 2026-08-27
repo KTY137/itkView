@@ -10,8 +10,11 @@ default the moment two of {API request, outbox worker/processor, reminder
 scheduler} touched the file at once.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Lock
+
 import pytest
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.db import (
@@ -21,7 +24,13 @@ from app.db import (
     make_engine,
     make_session_factory,
 )
-from app.models import InstituteProfile
+from app.models import (
+    InstituteProfile,
+    TestRunAttachment,
+    TestRunAttachmentReference,
+    TestRunEvidence,
+    utcnow,
+)
 
 # ---------------------------------------------------------------------------
 # 1. File-backed SQLite gets WAL + a generous busy timeout; :memory: does not.
@@ -324,3 +333,398 @@ def test_fresh_database_migration_does_not_duplicate_or_break_the_index(tmp_path
         with pytest.raises(IntegrityError):
             session.add(Tool(kind="jig", code="JIG-1", institute_id=institute.id))
             session.commit()
+
+
+# ---------------------------------------------------------------------------
+# 3. Additive attachment-reference migration.
+# ---------------------------------------------------------------------------
+
+
+def test_attachment_content_type_repair_covers_every_supported_image_suffix(
+    tmp_path,
+):
+    """The historical reuse bug blanked every image MIME, not only JPEG/PNG."""
+    engine = make_engine(f"sqlite:///{tmp_path / 'attachment-content-types.db'}")
+    Base.metadata.create_all(engine)
+    factory = make_session_factory(engine)
+    expected = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+        ".avif": "image/avif",
+        ".tif": "image/tiff",
+        ".tiff": "image/tiff",
+        ".svg": "image/svg+xml",
+    }
+    with factory() as session:
+        for index, suffix in enumerate(expected):
+            session.add(
+                TestRunAttachment(
+                    component_sn=f"IMAGE-SN-{index}",
+                    test_type="VISUAL_INSPECTION",
+                    source="pdb",
+                    pdb_code=f"image-{index}",
+                    content_type=None,
+                    relative_path=f"IMAGE-SN-{index}/image-{index}{suffix}",
+                    downloaded_at=utcnow(),
+                )
+            )
+        # Extension matching is exact and only repairs rows known to have
+        # completed a download. It never infers SVG (or any other type) from
+        # arbitrary bytes or a suffix embedded before another extension.
+        session.add_all(
+            [
+                TestRunAttachment(
+                    component_sn="NOT-DOWNLOADED",
+                    test_type="VISUAL_INSPECTION",
+                    source="pdb",
+                    pdb_code="not-downloaded",
+                    content_type=None,
+                    relative_path="NOT-DOWNLOADED/not-downloaded.gif",
+                    downloaded_at=None,
+                ),
+                TestRunAttachment(
+                    component_sn="SVG-TEXT",
+                    test_type="VISUAL_INSPECTION",
+                    source="pdb",
+                    pdb_code="svg-text",
+                    content_type=None,
+                    relative_path="SVG-TEXT/operator-note.svg.txt",
+                    downloaded_at=utcnow(),
+                ),
+                TestRunAttachment(
+                    component_sn="KNOWN-TYPE",
+                    test_type="VISUAL_INSPECTION",
+                    source="pdb",
+                    pdb_code="known-type",
+                    content_type="application/octet-stream",
+                    relative_path="KNOWN-TYPE/known-type.svg",
+                    downloaded_at=utcnow(),
+                ),
+            ]
+        )
+        session.commit()
+
+    ensure_phase0_sqlite_schema(engine)
+    ensure_phase0_sqlite_schema(engine)
+
+    with factory() as session:
+        repaired = {
+            suffix: session.scalar(
+                select(TestRunAttachment.content_type).where(
+                    TestRunAttachment.pdb_code
+                    == f"image-{list(expected).index(suffix)}"
+                )
+            )
+            for suffix in expected
+        }
+        assert repaired == expected
+        assert session.scalar(
+            select(TestRunAttachment.content_type).where(
+                TestRunAttachment.pdb_code == "not-downloaded"
+            )
+        ) is None
+        assert session.scalar(
+            select(TestRunAttachment.content_type).where(
+                TestRunAttachment.pdb_code == "svg-text"
+            )
+        ) is None
+        assert session.scalar(
+            select(TestRunAttachment.content_type).where(
+                TestRunAttachment.pdb_code == "known-type"
+            )
+        ) == "application/octet-stream"
+
+
+def _attachment_reference_upgrade_fixture(tmp_path, name):
+    engine = make_engine(f"sqlite:///{tmp_path / name}")
+    Base.metadata.create_all(engine)
+    factory = make_session_factory(engine)
+    with factory() as session:
+        session.add(
+            TestRunAttachment(
+                component_sn="20USEP00000001",
+                test_type="VISUAL_INSPECTION",
+                test_run_ref="RUN-SHARED",
+                source="share_link",
+                pdb_code="shared-folder-code",
+                filename="folder",
+                content_type="image/jpeg",
+                relative_path="20USEP00000001/shared-folder-code.jpg",
+            )
+        )
+        session.add(
+            TestRunEvidence(
+                component_sn="20USEP00000001",
+                test_type="VISUAL_INSPECTION",
+                passed=True,
+                source="pdb",
+                external_ref="RUN-SHARED",
+                payload={
+                    "attachments": [
+                        {
+                            "source": "share_link",
+                            "code": "shared-folder-code",
+                            "filename": "folder",
+                            "content_type": None,
+                            "title": "Inspection picture",
+                        }
+                    ]
+                },
+            )
+        )
+        session.commit()
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE test_run_attachment_reference"))
+    Base.metadata.create_all(engine)
+    return engine, factory
+
+
+def test_attachment_reference_migration_backfills_evidence_and_legacy_rows_once(
+    tmp_path,
+):
+    """Upgrade reconstructs every occurrence without copying a stored blob."""
+    engine = make_engine(f"sqlite:///{tmp_path / 'attachment-references.db'}")
+    Base.metadata.create_all(engine)
+    factory = make_session_factory(engine)
+    shared_code = "shared-folder-code"
+
+    with factory() as session:
+        shared_blob = TestRunAttachment(
+            component_sn="20USEP00000001",
+            test_type="VISUAL_INSPECTION",
+            test_run_ref="RUN-A1",
+            source="share_link",
+            pdb_code=shared_code,
+            filename="folder",
+            content_type="image/jpeg",
+            title="Legacy representative",
+            size_bytes=1234,
+            relative_path="20USEP00000001/shared-folder-code.jpg",
+        )
+        legacy_only_blob = TestRunAttachment(
+            component_sn="20USEP00000099",
+            test_type="CUSTOM_TEST",
+            test_run_ref=None,
+            source="pdb",
+            pdb_code="legacy-only-code",
+            filename="legacy.txt",
+            content_type="text/plain",
+            title="No Evidence payload exists",
+        )
+        session.add_all([shared_blob, legacy_only_blob])
+        session.flush()
+        shared_blob_id = shared_blob.id
+        legacy_blob_id = legacy_only_blob.id
+
+        associations = [
+            ("20USEP00000001", "RUN-A1"),
+            ("20USEP00000001", "RUN-A2"),
+            ("20USEP00000002", "RUN-B"),
+            ("20USEP00000003", "RUN-C"),
+        ]
+        for component_sn, run_ref in associations:
+            attachments = [
+                {
+                    "source": "share_link",
+                    "code": shared_code,
+                    "filename": "folder",
+                    "content_type": None,
+                    "title": "Inspection picture",
+                }
+            ]
+            if run_ref == "RUN-B":
+                # Old Evidence can know metadata for a file whose download
+                # never succeeded. Its blob index and association still need
+                # to exist after migration, with no claim that bytes exist.
+                attachments.append(
+                    {
+                        "code": "pending-pdb-code",
+                        "filename": "pending.dat",
+                        "content_type": None,
+                        "title": "Pending binary",
+                    }
+                )
+            session.add(
+                TestRunEvidence(
+                    component_sn=component_sn,
+                    test_type="VISUAL_INSPECTION",
+                    passed=True,
+                    source="pdb",
+                    external_ref=run_ref,
+                    payload={"attachments": attachments},
+                )
+            )
+        session.commit()
+
+    # Model an upgrade from the old schema: create_all on the new application
+    # adds the table before the SQLite startup helper performs the data backfill.
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE test_run_attachment_reference"))
+    Base.metadata.create_all(engine)
+
+    ensure_phase0_sqlite_schema(engine)
+    ensure_phase0_sqlite_schema(engine)
+
+    with factory() as session:
+        blobs = {
+            (blob.source, blob.pdb_code): blob
+            for blob in session.scalars(select(TestRunAttachment))
+        }
+        assert len(blobs) == 3
+        shared = blobs[("share_link", shared_code)]
+        assert shared.id == shared_blob_id
+        assert shared.relative_path == "20USEP00000001/shared-folder-code.jpg"
+        assert shared.size_bytes == 1234
+        pending = blobs[("pdb", "pending-pdb-code")]
+        assert pending.relative_path is None
+        assert pending.downloaded_at is None
+
+        references = list(
+            session.scalars(
+                select(TestRunAttachmentReference).order_by(
+                    TestRunAttachmentReference.attachment_id,
+                    TestRunAttachmentReference.component_sn,
+                    TestRunAttachmentReference.test_run_ref,
+                )
+            )
+        )
+        shared_references = [
+            reference for reference in references if reference.attachment_id == shared_blob_id
+        ]
+        assert {
+            (reference.component_sn, reference.test_type, reference.test_run_ref)
+            for reference in shared_references
+        } == {
+            (component_sn, "VISUAL_INSPECTION", run_ref) for component_sn, run_ref in associations
+        }
+        assert len(shared_references) == 4
+        assert [
+            (
+                reference.component_sn,
+                reference.test_type,
+                reference.test_run_ref,
+            )
+            for reference in references
+            if reference.attachment_id == legacy_blob_id
+        ] == [("20USEP00000099", "CUSTOM_TEST", "")]
+        assert [
+            (reference.component_sn, reference.test_run_ref)
+            for reference in references
+            if reference.attachment_id == pending.id
+        ] == [("20USEP00000002", "RUN-B")]
+        assert len(references) == 6
+
+        marker_count = session.scalar(
+            text(
+                "SELECT COUNT(*) FROM itkflow_schema_migration "
+                "WHERE name = 'attachment_references_v1'"
+            )
+        )
+        assert marker_count == 1
+
+
+def test_attachment_reference_migration_has_one_winner_under_parallel_startup(
+    tmp_path,
+):
+    """Both processes attempt the claim; exactly one parses the Evidence JSON."""
+    engine, factory = _attachment_reference_upgrade_fixture(
+        tmp_path, "parallel-reference-migration.db"
+    )
+    claim_barrier = Barrier(2)
+    count_guard = Lock()
+    scans = 0
+
+    def observe_sql(
+        connection, cursor, statement, parameters, context, executemany  # noqa: ARG001
+    ):
+        nonlocal scans
+        normalized = " ".join(statement.split())
+        if normalized.startswith(
+            "INSERT OR IGNORE INTO itkflow_schema_migration"
+        ):
+            claim_barrier.wait(timeout=10)
+        elif normalized.startswith(
+            "CREATE TEMP TABLE itkflow_attachment_descriptor_backfill"
+        ):
+            with count_guard:
+                scans += 1
+
+    event.listen(engine, "before_cursor_execute", observe_sql)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(ensure_phase0_sqlite_schema, engine)
+                for _ in range(2)
+            ]
+            for future in futures:
+                future.result(timeout=20)
+    finally:
+        event.remove(engine, "before_cursor_execute", observe_sql)
+
+    assert scans == 1
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count()).select_from(TestRunAttachmentReference)
+            )
+            == 1
+        )
+        assert (
+            session.scalar(
+                text(
+                    "SELECT COUNT(*) FROM itkflow_schema_migration "
+                    "WHERE name = 'attachment_references_v1'"
+                )
+            )
+            == 1
+        )
+
+
+def test_failed_attachment_reference_backfill_releases_claim_for_retry(tmp_path):
+    engine, factory = _attachment_reference_upgrade_fixture(
+        tmp_path, "retry-reference-migration.db"
+    )
+
+    def fail_descriptor_scan(
+        connection, cursor, statement, parameters, context, executemany  # noqa: ARG001
+    ):
+        if "CREATE TEMP TABLE itkflow_attachment_descriptor_backfill" in statement:
+            raise OperationalError(
+                statement, parameters, Exception("simulated JSON scan failure")
+            )
+
+    event.listen(engine, "before_cursor_execute", fail_descriptor_scan)
+    try:
+        ensure_phase0_sqlite_schema(engine)
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_descriptor_scan)
+
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count()).select_from(TestRunAttachmentReference)
+            )
+            == 0
+        )
+        assert (
+            session.scalar(
+                text(
+                    "SELECT COUNT(*) FROM itkflow_schema_migration "
+                    "WHERE name = 'attachment_references_v1'"
+                )
+            )
+            == 0
+        )
+
+    ensure_phase0_sqlite_schema(engine)
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count()).select_from(TestRunAttachmentReference)
+            )
+            == 1
+        )

@@ -59,7 +59,6 @@ from app.models import (
     Shipment,
     StageEvent,
     SyncJob,
-    TestRunAttachment,
     TestRunEvidence,
     TestTypeSchema,
     Tool,
@@ -100,6 +99,7 @@ from app.schemas import (
     AssemblyDraftIn,
     AssemblyPreviewOut,
     AssemblyStageOut,
+    AttachmentLocatorOut,
     AttachmentSyncOut,
     AuditOut,
     ChildAttachmentsOut,
@@ -1938,7 +1938,7 @@ def list_components(
 # is otherwise swallowed by it.
 @router.get(
     "/api/components/thumbnails",
-    response_model=dict[str, str],
+    response_model=dict[str, AttachmentLocatorOut],
     tags=["components"],
 )
 def component_thumbnails(
@@ -1947,58 +1947,38 @@ def component_thumbnails(
     limit: int = 2000,
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
-) -> dict[str, str]:
-    """Map of serial number to one locally stored image, for list thumbnails.
+) -> dict[str, AttachmentLocatorOut]:
+    """Map of serial number to one locally stored image locator.
 
     One request for a whole list rather than one per row: a grid of a few
     hundred modules would otherwise open a few hundred connections just to
     discover that most have no picture.
 
-    Only attachments whose bytes are actually on disk are returned, so the
-    caller can render every entry it receives without a fallback state.
+    Only attachments whose bytes are on disk and whose MIME type browsers can
+    paint are returned, so the caller can render every entry it receives
+    without a fallback state. Stored TIFFs remain truthful gallery
+    placeholders but never become broken list thumbnails.
 
     `limit` bounds *components*, which is what a caller asking for a list of
-    components means by it. Both restrictions therefore belong in the
-    statement: an attachment-row cap counted mostly instrument `.txt` output —
-    on the owner's mirror 3734 rows for 759 serials — so the first 2000 rows
-    reached only 460 serials and produced 83 tiles where 279 components have a
-    picture.
-
-    One row per component is picked with GROUP BY / MIN(id) rather than a
-    window function: identical semantics (the lowest id, exactly the row the
-    previous ordering hit first), and no dependency on SQLite being new enough
-    for window functions, while PostgreSQL plans it the same either way. If
-    that one row's file has meanwhile disappeared from disk the component
-    simply has no tile this time — measured against the owner's mirror, that
-    is true of none of the 279."""
-    from app.attachment_store import is_image_sql, resolve_path
+    components means by it. The helper unites authoritative associations with
+    legacy blob-row ownership, groups that candidate set and applies the limit
+    in SQL before rows reach Python. Repeated run associations therefore
+    cannot turn the bounded endpoint into an unbounded read. If the selected
+    blob has meanwhile disappeared from disk, the component simply has no tile
+    this time."""
+    from app.attachment_store import resolve_path, thumbnail_attachments
 
     settings = request.app.state.settings
-    first_per_component = select(
-        TestRunAttachment.component_sn.label("component_sn"),
-        func.min(TestRunAttachment.id).label("id"),
-    ).where(TestRunAttachment.relative_path.is_not(None), is_image_sql())
-    if institute_code:
-        first_per_component = first_per_component.join(
-            Component, Component.sn == TestRunAttachment.component_sn
-        ).where(Component.institute_code == institute_code)
-    chosen = (
-        first_per_component.group_by(TestRunAttachment.component_sn)
-        .order_by(TestRunAttachment.component_sn)
-        .limit(max(1, min(limit, 5000)))
-        .subquery()
-    )
-
-    thumbnails: dict[str, str] = {}
-    rows = db.scalars(
-        select(TestRunAttachment)
-        .join(chosen, TestRunAttachment.id == chosen.c.id)
-        .order_by(TestRunAttachment.component_sn)
-    )
-    for row in rows:
+    thumbnails: dict[str, AttachmentLocatorOut] = {}
+    for component_sn, row in thumbnail_attachments(
+        db, institute_code=institute_code, limit=limit
+    ):
         if resolve_path(settings, row) is None:
             continue
-        thumbnails[row.component_sn] = row.pdb_code
+        thumbnails[component_sn] = AttachmentLocatorOut(
+            source=row.source,
+            code=row.pdb_code,
+        )
     return thumbnails
 
 
@@ -3320,13 +3300,20 @@ def component_image_binary(
     return Response(content=data, media_type=content_type)
 
 
-def _attachment_rows_by_run(db: Session, sn: str) -> dict[str | None, list]:
-    """Local attachment index for one component, grouped by test run."""
-    from app.attachment_store import known_attachments
+def _attachment_rows_by_run(
+    db: Session, sn: str
+) -> dict[tuple[str, str | None], list]:
+    """Local attachment index grouped by test type and run.
 
-    grouped: dict[str | None, list] = {}
-    for row in known_attachments(db, sn):
-        grouped.setdefault(row.test_run_ref, []).append(row)
+    A real PDB run reference is unique, but custom/legacy evidence may have no
+    reference. Including the test type keeps those valid empty-reference
+    associations from appearing on every no-run test card.
+    """
+    from app.attachment_store import attachment_references
+
+    grouped: dict[tuple[str, str | None], list] = {}
+    for row in attachment_references(db, sn):
+        grouped.setdefault((row.test_type, row.test_run_ref), []).append(row)
     return grouped
 
 
@@ -3380,7 +3367,9 @@ def component_test_details(
                 properties=payload.get("properties") or {},
                 attachments=[
                     _attachment_out(settings, row)
-                    for row in grouped.get(evidence.external_ref, [])
+                    for row in grouped.get(
+                        (evidence.test_type, evidence.external_ref), []
+                    )
                 ],
             )
         )
@@ -3409,7 +3398,7 @@ def component_attachments(
     and component type, never merged into `attachments`: a photograph of a
     sensor is a statement about that sensor. This follows the worksheet's child
     evidence groups (`preview._child_evidence_groups`), including their cost
-    rule — one extra query for the whole family, never one per child.
+    rule — a constant query set for the whole family, never one per child.
 
     The per-run attachment lists in `GET /api/components/{sn}/tests` are
     untouched: a run belongs to exactly one component."""
@@ -3472,6 +3461,7 @@ def component_attachment_binary(
     sn: str,
     code: str,
     request: Request,
+    source: str | None = Query(default=None, min_length=1, max_length=24),
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ) -> Response:
@@ -3479,15 +3469,12 @@ def component_attachment_binary(
 
     Local only: a file that was never downloaded is a 404 rather than a silent
     fetch, so the UI can offer the sync instead of hiding a slow PDB call
-    behind an image tag."""
-    from app.attachment_store import resolve_path
+    behind an image tag. New clients pass ``source`` to address the complete
+    ``(source, code)`` blob identity. Omitting it retains deterministic legacy
+    bookmark compatibility."""
+    from app.attachment_store import attachment_for_component, resolve_path
 
-    row = db.scalar(
-        select(TestRunAttachment).where(
-            TestRunAttachment.component_sn == sn,
-            TestRunAttachment.pdb_code == code,
-        )
-    )
+    row = attachment_for_component(db, sn, code, source=source)
     if row is None:
         raise HTTPException(status_code=404, detail="Unknown attachment.")
 

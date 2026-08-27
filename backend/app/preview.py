@@ -31,11 +31,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import String, cast, func, select
+from sqlalchemy import String, cast, select
 from sqlalchemy.orm import Session
 
 from app.assembly import ASSEMBLY_ACTION_KIND, evaluate_assembly
-from app.attachment_store import known_attachments
+from app.attachment_store import attachment_counts_by_run
 from app.domain.stages import StageModel, stage_model_from_settings
 from app.glue_service import (
     GlueDerivationModel,
@@ -48,7 +48,6 @@ from app.models import (
     IngestFile,
     InstituteProfile,
     OutboxAction,
-    TestRunAttachment,
     TestRunEvidence,
 )
 from app.outbox import TERMINAL
@@ -441,7 +440,7 @@ def _build_worksheet(
     pending: frozenset[str],
     staged_by_test: Mapping[str, list[dict[str, Any]]],
     evidence_rows: list[TestRunEvidence],
-    attachment_counts: Mapping[str | None, int],
+    attachment_counts: Mapping[str, Mapping[str | None, int]],
     glue_model: GlueDerivationModel,
 ) -> dict[str, Any]:
     """One group per stage in the institute's model (incl. future stages).
@@ -467,7 +466,7 @@ def _build_worksheet(
             pending=pending,
             staged_by_test=staged_by_test,
             evidence_by_type=evidence_by_type,
-            attachment_counts=attachment_counts,
+            attachment_counts=attachment_counts.get(test_type, {}),
             glue_model=glue_model,
             type_code=component.type_code,
         )
@@ -549,7 +548,8 @@ def _child_evidence_groups(
 
     Cost is independent of how many children there are: one query for the
     children's run metadata, one for the payloads of the selected newest runs
-    only, one for their attachment counts. Never one query per child.
+    only, and a constant two-query association/legacy attachment read. Never
+    one query per child.
 
     Child rows carry no requirement `status` on purpose — a requirement is a
     statement about the component whose page this is, and the parent's stage
@@ -600,14 +600,7 @@ def _child_evidence_groups(
             )
         }
 
-    attachment_counts: dict[str | None, int] = {}
-    if winners:
-        for test_run_ref, count in session.execute(
-            select(TestRunAttachment.test_run_ref, func.count())
-            .where(TestRunAttachment.component_sn.in_(child_sns))
-            .group_by(TestRunAttachment.test_run_ref)
-        ):
-            attachment_counts[test_run_ref] = count
+    attachment_counts = attachment_counts_by_run(session, child_sns) if winners else {}
 
     groups: list[dict[str, Any]] = []
     for child in children:
@@ -616,7 +609,10 @@ def _child_evidence_groups(
             run_count, withdrawn = counts[(child.sn, test_type)]
             winner = winners.get((child.sn, test_type))
             latest = (
-                _worksheet_latest_run(payloads[winner.id], attachment_counts)
+                _worksheet_latest_run(
+                    payloads[winner.id],
+                    attachment_counts.get(child.sn, {}).get(test_type, {}),
+                )
                 if winner is not None and winner.id in payloads
                 else None
             )
@@ -745,11 +741,7 @@ def build_component_preview(
     # rows instead of building a read model per attachment: that projection
     # stats the attachment directory for its `stored` flag, which is pure waste
     # here and belongs to the endpoints that actually render attachments.
-    attachment_counts: dict[str | None, int] = {}
-    for attachment in known_attachments(session, component.sn):
-        attachment_counts[attachment.test_run_ref] = (
-            attachment_counts.get(attachment.test_run_ref, 0) + 1
-        )
+    attachment_counts = attachment_counts_by_run(session, [component.sn]).get(component.sn, {})
     pending = frozenset(pending_tests)
     worksheet = _build_worksheet(
         component,

@@ -8,10 +8,18 @@ image tag.
 import pytest
 from authutil import authenticate
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
+from app import attachment_store
+from app.attachment_store import download_attachments, pending_attachments
 from app.config import Settings
 from app.main import create_app
-from app.models import TestRunAttachment, TestRunEvidence
+from app.models import (
+    Component,
+    TestRunAttachment,
+    TestRunAttachmentReference,
+    TestRunEvidence,
+)
 from app.pdb_credentials import generate_pdb_credential_encryption_key
 
 JPEG = b"\xff\xd8\xff\xe0itkflow"
@@ -209,6 +217,84 @@ def test_an_unknown_attachment_is_404(as_operator, mirrored):
     assert as_operator.get(f"/api/components/{SN}/attachments/nope").status_code == 404
 
 
+def test_source_qualified_identity_keeps_equal_codes_addressable(
+    as_operator, attachments_dir, mirrored
+):
+    """Blob identity is `(source, code)` all the way through the public API."""
+    code = "same-code"
+    payloads = {
+        "pdb": ("pdb.jpg", "image/jpeg", b"pdb-bytes"),
+        "share_link": ("share.jpg", "image/jpeg", b"share-bytes"),
+    }
+    with as_operator.app.state.session_factory() as session:
+        for source, (filename, content_type, payload) in payloads.items():
+            relative_path = f"{SN}/{source}/{code}.jpg"
+            target = attachments_dir / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+            blob = TestRunAttachment(
+                component_sn=SN,
+                test_type="VISUAL_INSPECTION",
+                test_run_ref=f"RUN-{source}",
+                source=source,
+                pdb_code=code,
+                filename=filename,
+                content_type=content_type,
+                size_bytes=len(payload),
+                relative_path=relative_path,
+            )
+            session.add(blob)
+            session.flush()
+            session.add(
+                TestRunAttachmentReference(
+                    attachment_id=blob.id,
+                    component_sn=SN,
+                    test_type="VISUAL_INSPECTION",
+                    test_run_ref=f"RUN-{source}",
+                    filename=filename,
+                )
+            )
+        session.commit()
+
+    gallery = as_operator.get(f"/api/components/{SN}/attachments").json()
+    assert {
+        (attachment["source"], attachment["code"], attachment["filename"])
+        for attachment in gallery["attachments"]
+        if attachment["code"] == code
+    } == {
+        ("pdb", code, "pdb.jpg"),
+        ("share_link", code, "share.jpg"),
+    }
+
+    for source, (_, _, payload) in payloads.items():
+        response = as_operator.get(
+            f"/api/components/{SN}/attachments/{code}?source={source}"
+        )
+        assert response.status_code == 200
+        assert response.content == payload
+
+    # Old bookmarks without `source` remain deterministic and usable.
+    legacy = as_operator.get(f"/api/components/{SN}/attachments/{code}")
+    assert legacy.status_code == 200
+    assert legacy.content == payloads["pdb"][2]
+    assert (
+        as_operator.get(
+            f"/api/components/{SN}/attachments/{code}?source=not-a-source"
+        ).status_code
+        == 404
+    )
+
+    # The thumbnail locator names the exact blob selected by MIN(id), so its
+    # binary request cannot fall through to the other source.
+    thumbnail = as_operator.get("/api/components/thumbnails").json()[SN]
+    assert thumbnail == {"source": "pdb", "code": code}
+    exact_thumbnail = as_operator.get(
+        f"/api/components/{SN}/attachments/{thumbnail['code']}"
+        f"?source={thumbnail['source']}"
+    )
+    assert exact_thumbnail.content == payloads["pdb"][2]
+
+
 def test_attachment_bytes_need_a_signed_in_user(client, attachments_dir, mirrored):
     _store_attachment(client, attachments_dir)
     assert client.get(f"/api/components/{SN}/attachments/att-1").status_code == 401
@@ -222,7 +308,7 @@ def test_thumbnails_index_one_image_per_component(as_operator, attachments_dir, 
     response = as_operator.get("/api/components/thumbnails")
 
     assert response.status_code == 200
-    assert response.json() == {SN: "att-1"}
+    assert response.json() == {SN: {"source": "pdb", "code": "att-1"}}
 
 
 def test_thumbnails_skip_files_that_are_not_on_disk(
@@ -261,7 +347,7 @@ def test_thumbnails_need_a_signed_in_user(client):
 
 
 def test_thumbnails_route_is_not_shadowed_by_the_serial_route(as_operator):
-    """"thumbnails" must not be parsed as a serial number.
+    """ "thumbnails" must not be parsed as a serial number.
 
     It sits on the same path segment as /api/components/{sn}, so registration
     order is load-bearing.
@@ -269,3 +355,153 @@ def test_thumbnails_route_is_not_shadowed_by_the_serial_route(as_operator):
     response = as_operator.get("/api/components/thumbnails")
     assert response.status_code == 200
     assert isinstance(response.json(), dict)
+
+
+def test_one_blob_stays_visible_on_every_component_and_run_that_references_it(
+    as_operator, attachments_dir, monkeypatch
+):
+    """Blob identity is not association identity.
+
+    One folder-share URL is repeated by several Powerboards (and sometimes by
+    several runs on one board). The bytes must be fetched and stored once, but
+    every component gallery, binary route and owning run must retain its own
+    association. Re-syncing in a different component order must be idempotent.
+    """
+    factory = as_operator.app.state.session_factory
+    parent_sn = "20USEM20000999"
+    component_sns = ["20USEP00000001", "20USEP00000002", "20USEP00000003"]
+    shared_code = "shared-folder-image"
+    shared_url = "https://cernbox.cern.ch/files/link/public/token/folder"
+    runs_by_component = {
+        component_sns[0]: ["RUN-SHARED-A1", "RUN-SHARED-A2"],
+        component_sns[1]: ["RUN-SHARED-B"],
+        component_sns[2]: ["RUN-SHARED-C"],
+    }
+
+    with factory() as session:
+        parent = Component(
+            sn=parent_sn,
+            component_type="MODULE",
+            type_code="R5M0",
+            stage="GLUED",
+            location="TUDO",
+            institute_code="TUDO",
+        )
+        session.add(parent)
+        session.flush()
+        for index, component_sn in enumerate(component_sns):
+            session.add(
+                Component(
+                    sn=component_sn,
+                    component_type="PWB",
+                    type_code="PBR5",
+                    stage="READY",
+                    location="TUDO",
+                    institute_code="TUDO",
+                    parent=parent if index == 2 else None,
+                )
+            )
+            for run_ref in runs_by_component[component_sn]:
+                session.add(
+                    TestRunEvidence(
+                        component_sn=component_sn,
+                        test_type="VISUAL_INSPECTION",
+                        passed=True,
+                        source="pdb",
+                        external_ref=run_ref,
+                        payload={
+                            "attachments": [
+                                {
+                                    "source": "share_link",
+                                    "type": "share_link",
+                                    "code": shared_code,
+                                    "url": shared_url,
+                                    "filename": "folder",
+                                    "content_type": None,
+                                    "title": "Inspection picture",
+                                }
+                            ]
+                        },
+                    )
+                )
+        session.commit()
+
+    fetches: list[str] = []
+
+    def _fetch_once(client, descriptor, *, timeout, max_bytes):  # noqa: ARG001
+        fetches.append(descriptor["code"])
+        return JPEG, "image/jpeg"
+
+    monkeypatch.setattr(attachment_store, "_fetch_bytes", _fetch_once)
+
+    class _NoPdbGateway:
+        is_configured = False
+
+    def _sweep(order):
+        with factory() as session:
+            for component_sn in order:
+                stats = download_attachments(
+                    session,
+                    _NoPdbGateway(),
+                    as_operator.app.state.settings,
+                    component_sn,
+                    descriptors=pending_attachments(session, component_sn),
+                )
+                assert stats.failed == 0
+                session.commit()
+
+    _sweep(component_sns)
+    _sweep(list(reversed(component_sns)))
+
+    assert fetches == [shared_code]
+    stored_files = [path for path in attachments_dir.rglob("*") if path.is_file()]
+    assert len(stored_files) == 1
+    assert stored_files[0].read_bytes() == JPEG
+
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(TestRunAttachment)) == 1
+        assert session.scalar(select(func.count()).select_from(TestRunAttachmentReference)) == 4
+        blob = session.scalar(select(TestRunAttachment))
+        assert blob.component_sn == component_sns[0]
+        assert blob.test_run_ref == "RUN-SHARED-A1"
+        assert sorted(session.scalars(select(TestRunAttachmentReference.test_run_ref))) == sorted(
+            run for runs in runs_by_component.values() for run in runs
+        )
+
+    for component_sn, run_refs in runs_by_component.items():
+        gallery = as_operator.get(f"/api/components/{component_sn}/attachments").json()
+        assert [item["code"] for item in gallery["attachments"]] == [shared_code]
+        assert gallery["attachments"][0]["stored"] is True
+
+        response = as_operator.get(f"/api/components/{component_sn}/attachments/{shared_code}")
+        assert response.status_code == 200
+        assert response.content == JPEG
+
+        runs = as_operator.get(f"/api/components/{component_sn}/tests").json()
+        by_ref = {run["external_ref"]: run for run in runs}
+        for run_ref in run_refs:
+            assert [item["code"] for item in by_ref[run_ref]["attachments"]] == [shared_code]
+
+        preview = as_operator.get(f"/api/components/{component_sn}/preview").json()
+        worksheet_rows = [row for group in preview["worksheet"]["groups"] for row in group["rows"]]
+        visual_row = next(row for row in worksheet_rows if row["test_type"] == "VISUAL_INSPECTION")
+        # The physical blob is shared, but the latest run on each component
+        # still owns one association and therefore reports one attachment.
+        assert visual_row["latest"]["attachment_count"] == 1
+
+    thumbnails = as_operator.get("/api/components/thumbnails").json()
+    assert {sn: thumbnails[sn] for sn in component_sns} == {
+        sn: {"source": "share_link", "code": shared_code}
+        for sn in component_sns
+    }
+    family = as_operator.get(f"/api/components/{parent_sn}/attachments").json()
+    assert [child["sn"] for child in family["children"]] == [component_sns[2]]
+    assert family["children"][0]["attachments"][0]["code"] == shared_code
+    parent_preview = as_operator.get(f"/api/components/{parent_sn}/preview").json()
+    child = next(
+        child
+        for child in parent_preview["worksheet"]["children"]
+        if child["sn"] == component_sns[2]
+    )
+    child_visual = next(row for row in child["rows"] if row["test_type"] == "VISUAL_INSPECTION")
+    assert child_visual["latest"]["attachment_count"] == 1

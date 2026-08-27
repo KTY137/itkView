@@ -241,6 +241,7 @@ def test_preview_leaves_mirrored_runs_to_the_tests_endpoint(
     mirrored_attachment = regular.json()[0]["attachments"]
     assert mirrored_attachment == [
         {
+            "source": "share_link",
             "code": "local-code",
             "test_type": "VISUAL_INSPECTION",
             "test_run_ref": "RUN-IMAGE",
