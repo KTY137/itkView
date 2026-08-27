@@ -346,6 +346,23 @@ Funkloch-Minute wie dauerhaften Verlust aussehen:
   deren Heartbeat aelter als die Drei-Minuten-Grenze ist (dieselbe Regel und
   derselbe Code-Pfad wie die Startup-Recovery); ein Job zwischen zwei
   Heartbeats bleibt unangetastet.
+- **Eine uebernommene Lease zaehmt auch den alten Worker.** Die Jobzeile traegt
+  ein Lease-Token; Claim, Fortschritt, Fehler und Finalisierung aktualisieren
+  nur noch per Compare-and-swap auf `(job_id, lease_token)`. Dieselbe Fence
+  laeuft unmittelbar vor Component-/Evidence-Commit und vor dem atomaren
+  Publizieren einer fertigen Attachment-Datei. Wacht ein alter Prozess nach
+  der stale-Uebernahme wieder auf, darf er lesen und seinen lokalen Download
+  verwerfen, aber weder DB-Zustand noch Datei des Nachfolgers ueberschreiben.
+  Jeder Fetch besitzt dafuer eine exklusiv erzeugte, zufaellige `.part`-Datei
+  neben dem Ziel. Prozesslokale Blob-Sperren bleiben eine Deduplizierungs-
+  Optimierung; die getrennten Temp-Pfade verhindern auch zwischen zwei
+  Prozessen, dass der alte Worker Bytes des Nachfolgers ueberschreibt oder bei
+  Fence-Verlust dessen Staging-Datei loescht. Erst nach erfolgreicher Fence
+  publiziert `os.replace` die eigene Datei atomar.
+  Der Public-Jobvertrag nennt `heartbeat_stale` und
+  `stale_after_seconds`; erst daraufhin bietet die UI den bewussten Retry an.
+  `Check status` allein mutiert nichts. Ein vom Executor abgelehnter Job wird
+  terminalisiert und gibt Lease sowie Queue-Heartbeat sofort frei.
 
 **Share-Link-Attachments landeten nie auf der Platte (2026-08-26, Bugfix).**
 Visual-Inspection-Ergebnisse tragen oefter eine oeffentliche CERNBox-/
@@ -364,6 +381,24 @@ Betrachterseite waere ein kaputtes Bild, das wie ein Galerie-Bug aussieht) —
 protokolliert wird dabei nur der Attachment-Code, nie die URL. Der Content-Type
 kommt aus der Antwort, weil Share-Deskriptoren keinen mitbringen; erst dadurch
 werden gespiegelte Fotos als Bild erkannt und bekommen ihre Dateiendung.
+
+**Passwortgeschuetzte oeffentliche Shares (2026-08-27).** Jedes lokale Konto
+kann im Account-Screen ein Passwort fuer eine konkrete oeffentliche
+ownCloud-/Reva-Freigabe hinterlegen. Das Backend akzeptiert nur HTTPS-Formen
+mit Public-Token, prueft das Passwort vor dem Speichern per DAV-`PROPFIND` und
+legt nur AES-256-GCM-Ciphertext mit usergebundener AAD ab. Listen-/API-
+Antworten enthalten nur Host und Token-Ende. Evidence-Jobs laden ausschliesslich
+die Share-Credentials ihres `SyncJob.user_id`; Basic-Auth nutzt den
+oeffentlichen ownCloud-Benutzer `public`, niemals PDB-Codes. Mit Credentials
+muss jeder Redirect dieselbe HTTPS-Origin (Host und effektiver Port) behalten;
+non-default Public-Share-Ports und HTTPS-Downgrades werden verweigert.
+401/403, Login-HTML, ein fehlendes Passwort und private Dateibrowser-Links
+zaehlen im Job als `skipped`/`authentication_required`, nicht als PDB-Ausfall.
+Nach dem ersten Auth-Befund wird dieselbe gehashte Share-Identitaet im Sweep
+nicht je Komponente neu angefragt. Private CERNBox-Account-URLs brauchen einen
+spaeteren CERN-OAuth-Schnitt; itkFlow nimmt kein CERN-Account-Passwort an.
+Details und der bestehende schema-gebundene Weg fuer manuell erfasste URL-
+Resultate stehen in [`12`](12-attachments-and-images.md) §2.3b.
 
 Die Transient-/Permanent-Einstufung ist an allen drei Grenzen dieselbe Frage
 und jeweils lokal beantwortet: `app/pdb_sync.py` fuer Listing-Seiten,
@@ -404,15 +439,19 @@ parallele HTTP-Requests und Worker-Ticks scheiterten mit „database is locked".
 (1) ein rein lesender Plan, welche `(source, code)`-Paare bereits eine Datei
 auf der Platte haben; (2) der Netzwerk-Fetch mit der bestehenden Retry-/
 Klassifikations-/Heartbeat-Logik, dem gar keine `Session` mehr uebergeben wird
-— die Bytes landen sofort in einer `.part`-Datei neben ihrem Zielpfad; und
+— die Bytes landen sofort in einer exklusiven `.part`-Datei neben ihrem
+Zielpfad; und
 (3) ein kurzer, netzwerkfreier Commit, der die fertigen Dateien atomar
 (`os.replace`) umbenennt und die Zeilen upsertet. Ein Fehlschlag hinterlaesst
-weder eine `.part`-Leiche noch einen `relative_path`; verwaiste `.part`-Dateien
-aus abgestuerzten Laeufen werden ueberschrieben. Ein Regressionstest schreibt
+weder die eigene `.part`-Datei noch einen `relative_path`; eine durch harten
+Prozessabbruch verwaiste Datei unbekannten Owners wird bewusst nicht von einem
+neuen Worker ueberschrieben oder geloescht. Ein Regressionstest schreibt
 waehrend des simulierten Fetches ueber eine zweite unabhaengige
 `sqlite3`-Verbindung und beweist, dass nichts mehr blockiert (reproduzierbar
-rot gegen den alten Code). Stats, Share-Link-Kette, Client-Retry und
-Heartbeat-Timing unveraendert.
+rot gegen den alten Code). Ein weiterer Zwei-Prozess-Test verliert einen
+Lease-Fence nach parallelem Staging und beweist, dass sein Cleanup die Datei
+des aktiven Workers nicht beruehrt. Stats, Share-Link-Kette, Client-Retry und
+Heartbeat-Timing bleiben unveraendert.
 
 **Evidence-Sync committet pro Komponente (2026-08-26):** Der Sweep sammelte
 alle Testlaeufe im Speicher und schrieb sie in einer einzigen Transaktion am
@@ -764,15 +803,18 @@ Zwei Ursachen, beide behoben:
    sonst nichts; nichts davon wird als gespeichert vermerkt, der naechste
    Sweep versucht es erneut.
 
-**Offen, bewusst nicht in diesem Fix:** Die 87 Bilder sind damit noch nicht
-gespiegelt. Die Freigabe ist ein **Ordner**, kein Einzelfile: `/s/<token>/
-download?files=<name>` liefert HTTP 200 — aber ein **tar-Archiv** (ustar-
-Signatur an Byte 257), das den Ordner enthaelt. Sie zu holen hiesse, Archive
-zu entpacken und zu entscheiden, welches Mitglied welchem Testlauf gehoert;
-das ist ein eigener Schnitt, kein Anhaengsel an einen Ausfall-Fix. **Keine
-Zugangsdaten noetig:** cernbox.cern.ch ist ohne VPN und ohne Anmeldung
-erreichbar, die anderen Freigabe-Formen (`/s/<t>`, `/index.php/s/<t>`) laden
-anonym fehlerfrei.
+**Nachfolgeschnitt abgeschlossen:** Die 87 Deskriptoren sind Ordner-Eintraege;
+`/s/<token>/download?files=<name>` liefert ein POSIX-`ustar`, nicht die
+Einzeldatei. Der Mirror streamt dieses Archiv ohne `extract`/`extractall`,
+akzeptiert nur regulaere sichere Mitglieder innerhalb des benannten Eintrags,
+begrenzt Draht-, Dekompressions-, Summengroesse und Anzahl und waehlt
+deterministisch das beste echte Bild anhand Magic Bytes und Pfad. Im Beispiel
+gewinnt das lexikografisch erste browserfaehige JPEG; CR2/TIFF kann es nicht
+verdraengen. Die ausgewaehlten Bytes durchlaufen danach unveraendert
+HTML-Abwehr, Groessenlimit, Sniffing und den lease-gefenceten Dateicommit.
+Damit werden die frueher fehlenden Bilder im naechsten erfolgreichen
+Evidence-Sweep nachgeholt; die vollstaendige Sicherheits- und Auswahlregel
+steht in [`12`](12-attachments-and-images.md) §2.3a.
 
 ## Unbeaufsichtigter Auto-Sync (`app/auto_sync.py`, 2026-08-27)
 

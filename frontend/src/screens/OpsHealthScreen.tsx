@@ -117,6 +117,20 @@ export default function OpsHealthScreen({
 
       <p className="phase4-copy ops-health-local-note">{t.opsHealth.localOnlyHint}</p>
 
+      {health?.diagnostics_available === true && (
+        <section className="panel ops-diagnostics" aria-labelledby="ops-diagnostics-title">
+          <div>
+            <h2 className="section-title" id="ops-diagnostics-title">
+              {t.opsHealth.diagnosticsTitle}
+            </h2>
+            <p className="phase4-copy">{t.opsHealth.diagnosticsHint}</p>
+          </div>
+          <a className="btn" href="/api/ops/diagnostics" download>
+            {t.opsHealth.downloadDiagnostics}
+          </a>
+        </section>
+      )}
+
       {error !== null && (
         <div className="error-banner" role="alert">
           <span>{t.opsHealth.loadFailed(error)}</span>

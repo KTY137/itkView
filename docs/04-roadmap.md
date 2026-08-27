@@ -29,7 +29,7 @@ UI-Arbeit folgt zusaetzlich der verbindlichen Design-Referenz
 [`itkflow-ui-mockup.html`](itkflow-ui-mockup.html)), damit die Umsetzung nicht
 vom Design-Ziel abdriftet.
 
-## Aktueller Stand (2026-08-27)
+## Aktueller Stand (2026-08-28)
 
 - **Manuelle Testerfassung entscheidet jetzt fail-closed aus dem effektiven
   Schema (2026-08-27):** `TestForm.manualEntryCapability()` ist die gemeinsame
@@ -82,12 +82,78 @@ vom Design-Ziel abdriftet.
   und Sweep-Protokolle waehlbar statt vermischt. Die expliziten Karten zeichnen
   nur gleich lange X/Y-Arrays und nennen ausgeschlossene Laeufe, fehlende
   Schemata/Paare, Ladefehler und den bestehenden 300-Run-Cap; der generische
-  Messwert-Explorer samt Scalar-Verteilungen bleibt darunter erhalten. Der
-  lokale Spiegel belegt read-only fuenf IV-Schemata/1 960 lebende Laeufe und
+  Messwert-Explorer samt Scalar-Verteilungen steht davor und bleibt erhalten.
+  IV und CV speichern getrennt `Representative curves` (Default,
+  deterministische Auswahl bis 32 inklusive vorhandener Failures) oder
+  `All returned curves`; sichtbarer Klartext nennt Auswahl-/Pair-/Return-
+  Counts. Dimensionen und Serien liegen in einem benutzer-/institutsgescopten
+  persistenten SWR-Cache: gleiche Revision rendert ohne Aggregationsrequest,
+  eine geaenderte Evidence-Job-/Epoch-Revision aktualisiert im Hintergrund mit
+  In-flight-Deduplizierung. Offen bleibt der kleine autoritative Backend-
+  Revision-Endpoint fuer Mutationen ausserhalb dieses Sync-Jobs; sein genauer
+  Vertrag steht in [`05`](05-ui-design-reference.md). Der lokale Spiegel
+  belegt read-only fuenf IV-Schemata/1 960 lebende Laeufe und
   ein CV-Schema/364 Laeufe, aktuell 2 324 von 2 324 Paaren laengengleich.
   UI-Vertrag und Offline-Mockup sind in [`05`](05-ui-design-reference.md)
-  nachgezogen; 18 fokussierte Helper-/Screen-Tests decken Erkennung,
-  Fehlklassifikation, Paarfilter, Umschalten und Empty States ab.
+  nachgezogen; fokussierte Helper-/Screen-/Cache-Tests decken Erkennung,
+  Fehlklassifikation, Paarfilter, Sampling, Umschalten, Remount,
+  Revisionsinvalidierung und Empty States ab.
+
+- **Statistics zeigt Pflichttest-Lage je Stage datengetrieben
+  (2026-08-27):** `GET /api/stats/required-tests` aggregiert das effektive
+  Institutsprofil ueber den bestaetigten lokalen Mirror. Je Stage/Testtyp
+  werden Komponenten auf oder hinter der Stage in `passed`, `failed` und
+  `missing` geteilt; pro Komponente zaehlt nur der neueste lebende Lauf,
+  `deleted`/trashed Evidence sowie Draft/Submitted/Staged nicht. Die Liste
+  steht vor den Measurement-Plots, folgt der Profilreihenfolge und besitzt
+  Loading-, Empty-, Error- und Retry-Zustaende. Backendvertrag und Frontend
+  sind fokussiert getestet; es gibt keine hart codierte Metrology- oder
+  Instituts-Sonderregel.
+
+- **Sync-Retry ist gegen spaete Zombie-Worker eingezaeunt (2026-08-27):** Das
+  Backend kennzeichnet stale Heartbeats im Jobvertrag; nur dann bietet die UI
+  nach `Check status` einen bewussten Retry. Claim, Fortschritt, Fehler,
+  Finalisierung und jede DB-/Attachment-Publikation sind an Job-ID plus
+  Lease-Token gebunden. Nach einer CAS-Uebernahme kann ein alter Worker weder
+  neuen Status noch Dateien ueberschreiben. Seit der Mehrprozess-Haertung vom
+  2026-08-28 besitzt zudem jeder Fetch eine exklusiv erzeugte `.part`-Datei;
+  verliert der alte Worker seinen Fence, kann sein Cleanup weder Staging noch
+  Zieldatei des Nachfolgers beruehren. Abgelehnte Executor-Submits
+  terminalisieren sauber und geben Queue-Watch/Lease frei. Der Frontend-
+  Controller dedupliziert Jobs und entdeckt einen nach Reload weiterlaufenden
+  Serverjob wieder. Fencing-Regressionen decken Progress, Component-Commit,
+  Evidence-Commit und Attachment-Publikation ab.
+
+- **Desktop-Crashdiagnose ist lokal, rollierend und exportierbar
+  (2026-08-27):** Paketierte Builds schreiben `server.log` (5 MiB, drei
+  Rotationen) und `desktop.log` (1 MiB, drei Rotationen) im App-Datenordner.
+  Python-Faulthandler erfasst Thread-Stacks; der Rust-Launcher protokolliert
+  nur strukturierte Lifecycle-/Health-/Prozessdaten und zeigt einen
+  post-navigation Backend-Ausfall im Fenster, ohne Auto-Restart-Schleife.
+  Globale Desktop-Admins koennen ueber Operations Health ein Diagnose-ZIP aus
+  der festen Log-Allowlist plus sanitisierten letzten Sync-Metadaten laden;
+  Datenbank, Settings, Secrets, Environment, Host-/Usernamen und Attachments
+  sind ausgeschlossen. Der Endpoint ist im Web nicht vorhanden.
+
+- **Passwortgeschuetzte oeffentliche Shares sind persoenliche Account-Daten
+  (2026-08-28):** Der Account-Screen speichert nur sichere
+  ownCloud-/Reva-Public-Share-Formen. Der nutzergesteuerte
+  `PUT /api/account/share-credentials` validiert ausschliesslich die URL-Form
+  und bleibt strikt netzwerkinert; damit ist er kein direkter SSRF-Proxy.
+  Das Share-Passwort liegt per-user mit AES-256-GCM/AAD verschluesselt und wird
+  nie zurueckgegeben. Ob das Passwort stimmt, prueft erst der an eine
+  gespiegelte Evidence-URL gebundene Sync; seine Credential-Redirects duerfen
+  die HTTPS-Origin (Host plus effektiven Port) nicht verlassen. Evidence-Jobs verwenden nur die
+  Credentials ihres `SyncJob.user_id`; fehlendes/falsches Passwort,
+  Login-HTML und private Browserlinks werden als `skipped` und davon
+  `authentication_required` gezaehlt. Derselbe geschuetzte Share wird im
+  Sweep nach dem ersten Auth-Befund nicht hunderte Male angefragt. Private
+  CERNBox-Accountlinks bleiben bewusst ausserhalb dieses Schnitts und
+  brauchen spaeter CERN-OAuth; itkFlow sammelt kein CERN-Account-Passwort.
+  Schema-deklarierte URL-Strings koennen bereits durch den normalen manuellen
+  Test-/Outbox-Flow in die PDB gelangen und werden danach als Evidence
+  gespiegelt; es gibt keinen erfundenen Result-Code und keinen Datei-Upload in
+  CERNBox. Details [`12`](12-attachments-and-images.md) §2.3b.
 
 - **Pflichttest-Erfassung schliesst den Stage-Move jetzt auf derselben offenen
   Detailseite (2026-08-27):** Der Requirement-Stift fuehrt durch den realen
@@ -311,15 +377,18 @@ vom Design-Ziel abdriftet.
   Eigene- und Nur-Kind-TIFFs sind als Regressionen abgedeckt. Details
   [`12`](12-attachments-and-images.md) §5b.
 - **Generierte Plots aus gespiegelten Map-Werten (2026-08-27):** Die
-  aufgeklappte Laufansicht zeichnet neben den unveraenderten numerischen
-  Array-/IV-Kurven jetzt einen kategorischen Plot fuer eine vollstaendig
-  endliche Zahlen-Map und einen Scatter mit neutraler erster/zweiter
-  Wertachse fuer eine vollstaendig endliche Map exakter Zweierpaare. Ohne
-  Schema-Metadaten duerfen generische Zahlenpaare nicht als `Δx`/`Δy`
-  umgedeutet werden. Die vollstaendige Map-Tabelle bleibt
-  immer sichtbar. Leere, gemischte oder nicht-endliche Maps bleiben bewusst
-  nur Tabelle — es werden weder Werte konvertiert noch Punkte erfunden. Der
-  Datenplot haengt nicht davon ab, ob der Lauf ein Plot-Attachment besitzt.
+  aufgeklappte Laufansicht behaelt die unveraenderten numerischen
+  Array-/IV-Kurven und zeichnet einen kategorischen **Balkenplot** fuer eine
+  vollstaendig endliche Zahlen-Map, aber nur als Fallback, wenn weder eine echte
+  numerische Array-Kurve noch ein darstellbares Plot-Attachment existiert.
+  Echte Attachments stehen vor der Array-Kurve; beide bleiben sichtbar.
+  Generische Maps exakter Zweierpaare bleiben Tabelle: Ohne Schema-Metadaten
+  duerfen weder Scatter-Achsen noch `Δx`/`Δy` erfunden werden. Die
+  vollstaendige Map-Tabelle bleibt immer sichtbar. Leere, gemischte oder
+  nicht-endliche Maps bleiben ebenfalls bewusst nur Tabelle. Worksheet-Zeilen
+  und Kind-Evidenz tragen nun den sichtbaren read-only Affordance-Text
+  `Runs & plots` statt eines unbeschrifteten Carets; Kind-Details laden unter
+  ihrer eigenen Seriennummer lazy nach.
 - **Die Bilder werden sichtbar: vier Ursachen, alle am Live-Spiegel gemessen
   (2026-08-27).** Der Bestand hielt 432 echte Bilddateien; ein Operator sah
   fast keine. (1) **Das Listen-Limit zaehlte Zeilen, nicht Komponenten.**
@@ -370,8 +439,8 @@ vom Design-Ziel abdriftet.
   Parallele Direkt-/Background-Syncs desselben Blobs bleiben bis zum sichtbaren
   Root-Commit serialisiert; ein deterministischer Test deckt dabei auch
   SAVEPOINT und Commit-Autoflush ab. Auch ein `force`-Lauf holt einen Blob bei
-  mehreren Lauf-Deskriptoren nur einmal und teilt den Fetch, statt denselben
-  `.part`-Pfad zweimal zu verwenden. Historische PostgreSQL-Daten brauchen
+  mehreren Lauf-Deskriptoren nur einmal und teilt den Fetch, statt redundante
+  Netzwerk- und Staging-Arbeit auszufuehren. Historische PostgreSQL-Daten brauchen
   weiterhin einen Re-Sync oder eine spaetere Alembic-/JSONB-Migration.
   Nachzug aus dem finalen Datenintegritaets-Audit: Thumbnail- und
   Kind-Galerie-SQL normalisieren den MIME-Basistyp jetzt genauso wie Python

@@ -351,6 +351,10 @@ class User(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    share_credentials: Mapped[list["ExternalShareCredential"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class PdbCredential(Base):
@@ -380,6 +384,38 @@ class PdbCredential(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="pdb_credential")
+
+
+class ExternalShareCredential(Base):
+    """Encrypted password for one account-owned public file share.
+
+    Public share tokens are bearer capabilities, so the token itself is not
+    copied into this table. ``share_key`` is a SHA-256 digest of provider host
+    and token; the mirrored evidence already owns the original URL. Only a
+    short non-secret hint is exposed back to Account settings.
+    """
+
+    __tablename__ = "external_share_credential"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "share_key", name="uq_external_share_credential_owner_key"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("app_user.id", ondelete="CASCADE"), index=True
+    )
+    share_key: Mapped[str] = mapped_column(String(64), index=True)
+    provider_host: Mapped[str] = mapped_column(String(253))
+    token_hint: Mapped[str] = mapped_column(String(12))
+    encrypted_password: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="share_credentials")
 
 
 class OutboxPdbPrincipal(Base):

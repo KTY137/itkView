@@ -134,4 +134,21 @@ describe("OpsHealthScreen", () => {
     await user.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(getOpsHealthMock).toHaveBeenCalledTimes(2));
   });
+
+  it("offers the local diagnostics bundle only when the desktop backend exposes it", async () => {
+    getOpsHealthMock.mockResolvedValue({ ...snapshot, diagnostics_available: true });
+    render(
+      <OpsHealthScreen
+        institutes={[institute]}
+        selectedCode=""
+        allowAllInstitutes
+        onSelectedCodeChange={vi.fn()}
+        onNavigate={vi.fn()}
+      />,
+    );
+
+    const link = await screen.findByRole("link", { name: "Download diagnostics" });
+    expect(link).toHaveAttribute("href", "/api/ops/diagnostics");
+    expect(screen.getByText(/review it before sharing/i)).toBeVisible();
+  });
 });

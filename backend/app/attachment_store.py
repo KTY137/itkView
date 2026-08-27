@@ -28,12 +28,14 @@ selection obeys is written down at ``_archive_member`` and its neighbours.
 
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
 import logging
 import os
 import re
 import tarfile
+import tempfile
 import zlib
 from collections.abc import Callable, Mapping
 from contextlib import closing
@@ -59,6 +61,7 @@ from app.models import (
     TestRunEvidence,
     utcnow,
 )
+from app.share_credentials import SharePasswordResolver, public_share_identity
 
 log = logging.getLogger(__name__)
 
@@ -163,10 +166,12 @@ class AttachmentSyncStats:
     downloaded: int = 0
     reused: int = 0
     failed: int = 0
+    skipped: int = 0
+    authentication_required: int = 0
 
     @property
     def total(self) -> int:
-        return self.downloaded + self.reused + self.failed
+        return self.downloaded + self.reused + self.failed + self.skipped
 
 
 @dataclass(frozen=True)
@@ -230,11 +235,12 @@ def _acquire_attachment_key_locks(
     """Serialize overlapping blob downloads without serializing unrelated ones.
 
     A component refresh and a background sweep can plan the same absent blob
-    concurrently. Besides racing the database unique key, two refreshes of the
-    same component then write the same deterministic .part path. Locks are
-    acquired in sorted order to avoid deadlocks when two components share more
-    than one code. The weak registry does not retain one lock forever for every
-    attachment the mirror has ever seen.
+    concurrently. Besides racing the database unique key, they would perform
+    redundant network work. Locks are acquired in sorted order to avoid
+    deadlocks when two components share more than one code. The weak registry
+    does not retain one lock forever for every attachment the mirror has ever
+    seen. Unique staging paths remain the cross-process safety boundary because
+    separate server processes do not share this registry.
     """
     root_key = os.path.normcase(str(root))
     keys = sorted(
@@ -873,36 +879,42 @@ def pending_attachments(session: Session, component_sn: str) -> list[dict[str, A
     return descriptors
 
 
-def _temp_path_for(target: Path) -> Path:
-    """The ``.part`` sibling a download is staged under before it is renamed.
-
-    Deterministic (not a random name): a ``.part`` file orphaned by a crash or
-    a killed process sits at exactly this path, so the next attempt at the
-    same attachment silently overwrites it (``Path.write_bytes`` truncates)
-    instead of tripping over a stale leftover.
-    """
-    return target.with_name(target.name + ".part")
-
-
 def _write_temp_bytes(root: Path, relative_path: str, data: bytes) -> Path:
-    """Write attachment bytes to a ``.part`` file beside their final target.
+    """Write attachment bytes to an owner-scoped ``.part`` staging file.
 
     Never the final name: a reader must never be able to open a half-written
     attachment. Bytes are fully in hand before this is called (no network
-    happens while this — or any later disk write — is in progress), so the
-    only failure mode here is a local disk problem; that leaves no partial
-    ``.part`` file behind either.
+    happens while this — or any later disk write — is in progress).
+
+    The kernel creates an exclusive, unpredictable sibling for every fetch.
+    That matters across processes: the in-memory blob-key locks coordinate
+    threads in one server process, but an old packaged worker and its retry
+    have separate lock registries. They must never truncate the same staging
+    path or unlink each other's bytes after one of them loses its lease fence.
     """
     target = (root / relative_path).resolve()
     if not target.is_relative_to(root):
         raise ValueError("refusing to write an attachment outside its directory")
-    temp = _temp_path_for(target)
-    temp.parent.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp: Path | None = None
+    file_descriptor = -1
     try:
-        temp.write_bytes(data)
+        file_descriptor, raw_temp_path = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".part",
+            dir=target.parent,
+        )
+        temp = Path(raw_temp_path)
+        with os.fdopen(file_descriptor, "wb") as handle:
+            file_descriptor = -1
+            handle.write(data)
     except OSError:
-        temp.unlink(missing_ok=True)
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+        if temp is not None:
+            temp.unlink(missing_ok=True)
         raise
+    assert temp is not None
     return temp
 
 
@@ -971,6 +983,14 @@ class _TransientDownloadFailure(RuntimeError):
 
 class _PdbClientUnavailable(RuntimeError):
     """Marker: no authenticated PDB client can be built for this sweep."""
+
+
+class _ShareLinkSkipped(RuntimeError):
+    """A share attachment needs user action instead of another retry."""
+
+    def __init__(self, *, authentication_required: bool) -> None:
+        super().__init__("Share-link attachment requires user intervention.")
+        self.authentication_required = authentication_required
 
 
 # HTTP statuses worth retrying: request timeout, too-early, rate limit, 5xx.
@@ -1109,12 +1129,49 @@ class _SafeShareRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if not _safe_http_url(newurl):
             raise HTTPError(newurl, code, "Unsafe attachment redirect refused", headers, fp)
+        authorization = req.get_header("Authorization")
+        if authorization:
+            previous = urlsplit(req.full_url)
+            following = urlsplit(newurl)
+            try:
+                previous_port = previous.port or (
+                    443 if previous.scheme.lower() == "https" else 80
+                )
+                following_port = following.port or (
+                    443 if following.scheme.lower() == "https" else 80
+                )
+                same_origin = (
+                    previous.hostname is not None
+                    and following.hostname is not None
+                    and previous.scheme.lower() == following.scheme.lower()
+                    and previous.hostname.rstrip(".").lower()
+                    == following.hostname.rstrip(".").lower()
+                    and previous_port == following_port
+                )
+            except ValueError:
+                same_origin = False
+            if not same_origin:
+                raise HTTPError(
+                    newurl,
+                    code,
+                    "Credential-bearing attachment redirect refused",
+                    headers,
+                    fp,
+                )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _open_public_url(url: str, timeout: int):
+def _share_authorization(password: str) -> str:
+    token = base64.b64encode(f"public:{password}".encode()).decode("ascii")
+    return f"Basic {token}"
+
+
+def _open_public_url(url: str, timeout: int, password: str | None = None):
     opener = build_opener(_SafeShareRedirects())
-    request = Request(url, headers={"User-Agent": "itkFlow attachment mirror"})
+    request_headers = {"User-Agent": "itkFlow attachment mirror"}
+    if password is not None:
+        request_headers["Authorization"] = _share_authorization(password)
+    request = Request(url, headers=request_headers)
     return opener.open(request, timeout=timeout)
 
 
@@ -1761,11 +1818,15 @@ def _share_link_candidates(url: str) -> list[str]:
 
 
 def _fetch_share_link(
-    descriptor: dict[str, Any], *, timeout: int, max_bytes: int
+    descriptor: dict[str, Any],
+    *,
+    timeout: int,
+    max_bytes: int,
+    share_passwords: SharePasswordResolver,
 ) -> tuple[bytes, str | None] | None:
     url = descriptor.get("url")
     if not isinstance(url, str) or not _safe_http_url(url):
-        return None
+        raise _ShareLinkSkipped(authentication_required=False)
     candidates = _share_link_candidates(url)
     if not candidates:
         # Not a public share at all but a personal web-UI location (one such
@@ -1777,16 +1838,24 @@ def _fetch_share_link(
             "than a public share; skipped without a request.",
             descriptor.get("code"),
         )
-        return None
+        raise _ShareLinkSkipped(authentication_required=True)
+    share_password = share_passwords.password_for_url(url)
     wanted = _share_member_path(url)
     archive_budget = max_bytes * ARCHIVE_SIZE_BUDGET_FACTOR
     transient_seen = False
     html_seen = False
+    authentication_seen = False
+    archive_response_seen = False
     for candidate in candidates:
         if not _safe_http_url(candidate):
             continue
         try:
-            with closing(_open_public_url(candidate, timeout)) as response:
+            response_handle = (
+                _open_public_url(candidate, timeout, share_password)
+                if share_password is not None
+                else _open_public_url(candidate, timeout)
+            )
+            with closing(response_handle) as response:
                 final_url = getattr(response, "geturl", lambda u=candidate: u)()
                 if not isinstance(final_url, str) or not _safe_http_url(final_url):
                     continue
@@ -1796,6 +1865,7 @@ def _fetch_share_link(
                     data = stream.read(max_bytes + 1)
                     content_type = _response_content_type(response)
                 else:
+                    archive_response_seen = True
                     # A folder share answers with an archive. Take the one
                     # member the descriptor asked for and nothing else — and
                     # send it through exactly the same guards below, because
@@ -1830,6 +1900,7 @@ def _fetch_share_link(
                         content_type or "unknown type",
                     )
         except _ArchiveRefused as refusal:
+            archive_response_seen = True
             # A limit was broken, not a network hiccup: the same archive would
             # break it again, so this candidate is finished for this sweep.
             log.warning(
@@ -1838,6 +1909,13 @@ def _fetch_share_link(
                 descriptor.get("code"),
                 refusal,
             )
+            continue
+        except HTTPError as exc:
+            if exc.code in {401, 403}:
+                authentication_seen = True
+            else:
+                # Do not stringify: urllib errors may carry the complete URL.
+                transient_seen = transient_seen or is_transient_download_error(exc)
             continue
         except Exception as exc:
             # Every candidate is best effort. Do not stringify network
@@ -1858,6 +1936,14 @@ def _fetch_share_link(
             return payload, content_type
     if transient_seen:
         raise _TransientDownloadFailure("share-link download failed with a transient error")
+    if archive_response_seen:
+        # A real archive is proof that the public route was reachable. If its
+        # named member was unsafe, ambiguous, malformed, or HTML, a later
+        # viewer-page fallback must not relabel that content failure as a
+        # missing password.
+        return None
+    if authentication_seen:
+        raise _ShareLinkSkipped(authentication_required=True)
     if html_seen:
         # Storing the page would fake a mirrored attachment that renders as a
         # broken image. Log the code (never the URL) so the miss is visible.
@@ -1866,6 +1952,7 @@ def _fetch_share_link(
             "expired or require sign-in. Nothing was stored.",
             descriptor.get("code"),
         )
+        raise _ShareLinkSkipped(authentication_required=True)
     return None
 
 
@@ -1961,9 +2048,15 @@ def _fetch_bytes(
     *,
     timeout: int,
     max_bytes: int,
+    share_passwords: SharePasswordResolver | None = None,
 ) -> tuple[bytes, str | None] | None:
     if descriptor.get("source") == "share_link":
-        return _fetch_share_link(descriptor, timeout=timeout, max_bytes=max_bytes)
+        return _fetch_share_link(
+            descriptor,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            share_passwords=share_passwords or SharePasswordResolver(),
+        )
     if client is None:
         return None
     if descriptor.get("type") == "eos":
@@ -2054,6 +2147,11 @@ class OutageCircuitBreaker:
         # Insertion-ordered, values unused: a set with a bounded eviction
         # order. Holds keys only — never bytes, never a URL.
         self._permanent_misses: dict[tuple[str, str], None] = {}
+        # SHA-256 public-share identities that challenged for authentication
+        # in this sweep. One protected folder can back many attachment codes
+        # across many components; after the first honest challenge, do not
+        # fetch the same login response dozens of times.
+        self.authentication_blocked_shares: set[str] = set()
 
     def note_permanent_miss(self, key: tuple[str, str]) -> None:
         """Remember that this exact attachment got a *final* answer.
@@ -2117,7 +2215,7 @@ class _FetchOutcome:
     phase without a live network handle or a ``Session`` anywhere in sight."""
 
     descriptor: dict[str, Any]
-    outcome: Literal["reused", "downloaded", "failed"]
+    outcome: Literal["reused", "downloaded", "failed", "skipped"]
     content_type: str | None = None
     relative_path: str | None = None
     temp_path: Path | None = None
@@ -2126,6 +2224,9 @@ class _FetchOutcome:
     # ladder) rather than receiving a permanent per-file answer. Feeds the
     # outage circuit breaker; meaningless for non-failed outcomes.
     transient: bool = False
+    # A subset of skipped public-share results need a password or account
+    # login; keeping the flag here lets the UI state that explicitly.
+    authentication_required: bool = False
 
 
 def _plan_resolved(
@@ -2159,6 +2260,7 @@ def _fetch_all(
     timeout: int,
     max_bytes: int,
     max_attempts: int,
+    share_passwords: SharePasswordResolver,
     heartbeat: Callable[[], None] | None,
     breaker: OutageCircuitBreaker | None = None,
 ) -> list[_FetchOutcome]:
@@ -2181,6 +2283,9 @@ def _fetch_all(
     """
     outcomes: list[_FetchOutcome] = []
     downloaded_keys: set[tuple[str, str]] = set()
+    authentication_blocked_shares = (
+        breaker.authentication_blocked_shares if breaker is not None else set()
+    )
 
     def note(outcome: _FetchOutcome) -> None:
         outcomes.append(outcome)
@@ -2206,6 +2311,28 @@ def _fetch_all(
 
     for descriptor in descriptors:
         key = (descriptor["source"], descriptor["code"])
+        descriptor_url = descriptor.get("url")
+        share_identity = None
+        if descriptor.get("source") == "share_link" and isinstance(
+            descriptor_url, str
+        ):
+            try:
+                share_identity = public_share_identity(descriptor_url)
+            except ValueError:
+                pass
+        if (
+            share_identity is not None
+            and share_identity.share_key in authentication_blocked_shares
+        ):
+            note(
+                _FetchOutcome(
+                    descriptor,
+                    "skipped",
+                    authentication_required=True,
+                )
+            )
+            _beat(heartbeat)
+            continue
 
         # A remote that has stopped answering is skipped for the rest of the
         # sweep: its files fail immediately instead of each burning a full
@@ -2228,10 +2355,10 @@ def _fetch_all(
                 continue
 
         # A forced sweep re-fetches each physical blob once, not once per run
-        # association. Reusing a successful fetch from this same call also
-        # prevents two outcomes from sharing the same deterministic `.part`
-        # path. If the first descriptor failed, the next one still gets its
-        # own attempt because the key has not entered `downloaded_keys`.
+        # association. Reusing a successful fetch from this same call avoids
+        # redundant network and staging work. If the first descriptor failed,
+        # the next one still gets its own attempt because the key has not
+        # entered `downloaded_keys`.
         if key in downloaded_keys or (not force and resolved.get(key)):
             note(_FetchOutcome(descriptor, "reused"))
             _beat(heartbeat)
@@ -2247,18 +2374,47 @@ def _fetch_all(
 
         fetched: tuple[bytes, str | None] | None = None
         transient_failure = False
+        share_skipped = False
         attempt = 0
         while True:
             attempt += 1
             try:
                 if needs_pdb_client and client is None:
                     client = _open_pdb_client(gateway)
-                fetched = _fetch_bytes(
-                    client,
-                    descriptor,
-                    timeout=timeout,
-                    max_bytes=max_bytes,
+                configured_share_password = (
+                    descriptor.get("source") == "share_link"
+                    and isinstance(descriptor_url, str)
+                    and share_passwords.password_for_url(descriptor_url) is not None
                 )
+                if configured_share_password:
+                    fetched = _fetch_bytes(
+                        client,
+                        descriptor,
+                        timeout=timeout,
+                        max_bytes=max_bytes,
+                        share_passwords=share_passwords,
+                    )
+                else:
+                    # Preserve the long-standing private helper signature for
+                    # ordinary/unprotected downloads and test doubles.
+                    fetched = _fetch_bytes(
+                        client,
+                        descriptor,
+                        timeout=timeout,
+                        max_bytes=max_bytes,
+                    )
+                break
+            except _ShareLinkSkipped as skipped:
+                if skipped.authentication_required and share_identity is not None:
+                    authentication_blocked_shares.add(share_identity.share_key)
+                note(
+                    _FetchOutcome(
+                        descriptor,
+                        "skipped",
+                        authentication_required=skipped.authentication_required,
+                    )
+                )
+                share_skipped = True
                 break
             except _PdbClientUnavailable:
                 break
@@ -2272,6 +2428,9 @@ def _fetch_all(
             client_unavailable = True
             client_unavailable_transient = transient_failure
 
+        if share_skipped:
+            _beat(heartbeat)
+            continue
         if fetched is None:
             if breaker is not None and not transient_failure:
                 breaker.note_permanent_miss(key)
@@ -2326,7 +2485,7 @@ def _commit_outcomes(
     an upsert per descriptor plus one rename per successful download. The
     caller still commits afterwards, exactly as before.
     """
-    downloaded = reused = failed = 0
+    downloaded = reused = failed = skipped = authentication_required = 0
     for item in outcomes:
         descriptor = item.descriptor
         row = _upsert_row(
@@ -2361,6 +2520,11 @@ def _commit_outcomes(
         if item.outcome == "reused":
             reused += 1
             continue
+        if item.outcome == "skipped":
+            skipped += 1
+            if item.authentication_required:
+                authentication_required += 1
+            continue
         if item.outcome == "failed" or item.temp_path is None or item.relative_path is None:
             failed += 1
             continue
@@ -2378,7 +2542,13 @@ def _commit_outcomes(
         row.downloaded_at = utcnow()
         downloaded += 1
 
-    return AttachmentSyncStats(downloaded=downloaded, reused=reused, failed=failed)
+    return AttachmentSyncStats(
+        downloaded=downloaded,
+        reused=reused,
+        failed=failed,
+        skipped=skipped,
+        authentication_required=authentication_required,
+    )
 
 
 def download_attachments(
@@ -2391,6 +2561,8 @@ def download_attachments(
     heartbeat: Callable[[], None] | None = None,
     descriptors: list[dict[str, Any]] | None = None,
     breaker: OutageCircuitBreaker | None = None,
+    before_commit: Callable[[Session], None] | None = None,
+    share_passwords: SharePasswordResolver | None = None,
 ) -> AttachmentSyncStats:
     """Mirror this component's attachment bytes to the local folder.
 
@@ -2416,6 +2588,10 @@ def download_attachments(
     ``None``, the plan is read here. ``breaker`` (if given) turns several
     consecutive transient file failures into a stopped phase — see
     ``OutageCircuitBreaker`` — while everything fetched so far still commits.
+    ``before_commit`` runs after network fetching but before a temporary file
+    is renamed or a database row is written. Background jobs use it to verify
+    and lock their durable lease in this same transaction, so a stale worker
+    cannot publish files after a newer retry took ownership.
     """
     if descriptors is None:
         descriptors = pending_attachments(session, component_sn)
@@ -2465,11 +2641,14 @@ def download_attachments(
             timeout=timeout,
             max_bytes=max_bytes,
             max_attempts=max_attempts,
+            share_passwords=share_passwords or SharePasswordResolver(),
             heartbeat=heartbeat,
             breaker=breaker,
         )
 
         # Phase 3 - commit (short, network-free transaction).
+        if before_commit is not None:
+            before_commit(session)
         stats = _commit_outcomes(session, root, outcomes)
     except Exception:
         for outcome in outcomes:

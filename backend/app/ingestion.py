@@ -215,6 +215,14 @@ def _parse_glue_weight(payload: dict) -> ParsedTestRun:
     results = payload.get("results")
     if isinstance(results, dict):
         for name, value in results.items():
+            # The PDB GLUE_WEIGHT schema uses the GW_* namespace for its
+            # measured and derived weights.  Other schema-declared results
+            # may carry supporting metadata (for example an HTTPS share link)
+            # and must survive ingestion unchanged.  This parser has no schema
+            # context, so keep the established weight namespace strict without
+            # guessing types for unrelated result codes.
+            if not isinstance(name, str) or not name.strip().upper().startswith("GW_"):
+                continue
             if value is None:
                 parsed.warnings.append(f"Result '{name}' is empty")
             elif isinstance(value, bool) or not isinstance(value, (int, float)):

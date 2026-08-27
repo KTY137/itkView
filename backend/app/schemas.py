@@ -83,6 +83,8 @@ class EvidenceSyncJobResultOut(BaseModel):
     attachments_downloaded: int
     attachments_reused: int
     attachments_failed: int
+    attachments_skipped: int = 0
+    attachments_authentication_required: int = 0
     attachments_total: int
 
 
@@ -120,6 +122,10 @@ class SyncJobOut(BaseModel):
     started_at: datetime | None
     updated_at: datetime
     finished_at: datetime | None
+    # Calculated by the server from the same heartbeat contract that governs
+    # stale takeover. Clients must not guess from their own wall clock.
+    heartbeat_stale: bool = False
+    stale_after_seconds: int = 180
 
 
 class ToolSyncOut(BaseModel):
@@ -638,6 +644,7 @@ class OpsHealthOut(BaseModel):
     outbox: OpsOutboxOut
     reminders: OpsRemindersOut
     ingest: OpsIngestOut
+    diagnostics_available: bool = False
 
 
 # --- Auth / users (docs/06) ------------------------------------------------
@@ -777,6 +784,22 @@ class PdbConnectionOut(BaseModel):
     institutions: list[str]
     last_checked_at: datetime | None
     verified_at: datetime | None
+
+
+class ShareCredentialPut(BaseModel):
+    """Write-only public-share URL/password pair."""
+
+    url: str = Field(min_length=1, max_length=2048)
+    password: SecretStr = Field(min_length=1, max_length=1024)
+
+
+class ShareCredentialOut(BaseModel):
+    """Non-secret public-share credential status."""
+
+    id: int
+    provider_host: str
+    token_hint: str
+    updated_at: datetime
 
 
 # --- Tools / jigs (docs/07) ------------------------------------------------
@@ -968,6 +991,22 @@ class ProductionStatsOut(BaseModel):
     yield_: YieldOut
 
 
+class RequiredTestStageRowOut(BaseModel):
+    stage: str
+    test_type: str
+    component_total: int
+    passed: int
+    failed: int
+    missing: int
+
+
+class RequiredTestStatsOut(BaseModel):
+    institute: str
+    denominator: Literal["at_or_beyond_stage"]
+    stage_order: list[str]
+    rows: list[RequiredTestStageRowOut]
+
+
 class StatsDimensionsOut(BaseModel):
     component_types: list[str]
     type_codes: list[str]
@@ -996,6 +1035,8 @@ class EvidenceSyncOut(BaseModel):
     attachments_downloaded: int = 0
     attachments_reused: int = 0
     attachments_failed: int = 0
+    attachments_skipped: int = 0
+    attachments_authentication_required: int = 0
     attachments_total: int = 0
 
 
@@ -1033,6 +1074,8 @@ class AttachmentSyncOut(BaseModel):
     downloaded: int
     reused: int
     failed: int
+    skipped: int = 0
+    authentication_required: int = 0
     total: int
 
 

@@ -27,10 +27,28 @@ def satisfied_test_results(session: Session, sn: str) -> dict[str, bool]:
     been retracted, the requirement reads `missing` again rather than keeping
     the verdict of a measurement nobody stands behind any more.
     """
-    results: dict[str, bool] = {}
+    return satisfied_test_results_for_components(session, [sn]).get(sn, {})
+
+
+def satisfied_test_results_for_components(
+    session: Session, component_sns: list[str]
+) -> dict[str, dict[str, bool]]:
+    """Latest live pass/fail evidence for several components at once.
+
+    This is the batch form of :func:`satisfied_test_results`, used by aggregate
+    read models so they do not repeat the evidence and confirmed-outbox queries
+    once per component. Ordering and precedence deliberately remain identical:
+    latest live mirrored evidence wins within a test type, then a confirmed
+    itkFlow upload wins over the mirror. Draft/submitted actions never count.
+    """
+    sns = list(dict.fromkeys(component_sns))
+    if not sns:
+        return {}
+    wanted = set(sns)
+    results: dict[str, dict[str, bool]] = {sn: {} for sn in sns}
     evidence_rows = session.scalars(
         select(TestRunEvidence)
-        .where(TestRunEvidence.component_sn == sn, live_runs_only())
+        .where(TestRunEvidence.component_sn.in_(sns), live_runs_only())
         .order_by(
             # SQLite sorts NULLs first in ASC by default; PostgreSQL sorts them
             # last. Pin NULLS FIRST explicitly so both engines agree that a
@@ -44,7 +62,7 @@ def satisfied_test_results(session: Session, sn: str) -> dict[str, bool]:
     )
     for row in evidence_rows:
         if row.test_type:
-            results[row.test_type] = bool(row.passed)
+            results[row.component_sn][row.test_type] = bool(row.passed)
 
     actions = session.scalars(
         select(OutboxAction)
@@ -56,11 +74,12 @@ def satisfied_test_results(session: Session, sn: str) -> dict[str, bool]:
     )
     for action in actions:
         payload = action.payload or {}
-        if payload.get("component_sn") != sn:
+        component_sn = payload.get("component_sn")
+        if not isinstance(component_sn, str) or component_sn not in wanted:
             continue
         test_type = payload.get("test_type")
         if isinstance(test_type, str) and test_type:
-            results[test_type] = bool(payload.get("passed"))
+            results[component_sn][test_type] = bool(payload.get("passed"))
     return results
 
 

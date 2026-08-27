@@ -1,8 +1,10 @@
 """Desktop packaging entry point: state locations, key stability, ports."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
 
 from app import desktop_server
 from app.pdb_credentials import PdbAccessCodes, decrypt_access_codes, encrypt_access_codes
@@ -119,10 +121,33 @@ def test_main_reports_a_bind_failure_instead_of_hanging(data_dir, capsys):
 
 def test_ready_line_is_machine_readable():
     # The host parses this; keep it one line of JSON behind a stable prefix.
-    line = f'{desktop_server.READY_PREFIX} {json.dumps({"port": 1})}'
+    line = f"{desktop_server.READY_PREFIX} {json.dumps({'port': 1})}"
     prefix, _, payload = line.partition(" ")
     assert prefix == "ITKFLOW_READY"
     assert json.loads(payload)["port"] == 1
+
+
+def test_ready_payload_never_exposes_the_personal_data_directory(data_dir):
+    settings = SimpleNamespace(pdb_instance="production")
+    app = SimpleNamespace(state=SimpleNamespace(spa_mounted=True))
+
+    payload = desktop_server.ready_payload("127.0.0.1", 43123, settings, app)
+
+    assert payload == {
+        "port": 43123,
+        "url": "http://127.0.0.1:43123/",
+        "pdb_instance": "production",
+        "spa": True,
+    }
+    assert str(data_dir) not in json.dumps(payload)
+
+
+def test_desktop_uvicorn_config_disables_request_access_logs(monkeypatch):
+    monkeypatch.setenv("ITKFLOW_LOG_LEVEL", "warning")
+    config = desktop_server.uvicorn_config(FastAPI())
+
+    assert config.access_log is False
+    assert config.log_level == "warning"
 
 
 def test_bundled_static_dir_is_none_outside_a_bundle():
@@ -144,6 +169,63 @@ def test_frozen_build_always_writes_a_log(data_dir, monkeypatch):
         _sys.stdout.close()
         _sys.stdout, _sys.stderr = real_stdout, real_stderr
     assert "hello from the bundle" in log_file.read_text(encoding="utf-8")
+
+
+def test_full_server_log_rotates_before_the_new_process_appends(data_dir):
+    log_dir = data_dir / "logs"
+    log_dir.mkdir()
+    log_file = log_dir / "server.log"
+    log_file.write_text("current-run", encoding="utf-8")
+    (log_dir / "server.log.1").write_text("previous-run", encoding="utf-8")
+    (log_dir / "server.log.2").write_text("older-run", encoding="utf-8")
+
+    desktop_server.rotate_log(log_file, max_bytes=1, backups=3)
+
+    assert not log_file.exists()
+    assert (log_dir / "server.log.1").read_text(encoding="utf-8") == "current-run"
+    assert (log_dir / "server.log.2").read_text(encoding="utf-8") == "previous-run"
+    assert (log_dir / "server.log.3").read_text(encoding="utf-8") == "older-run"
+
+
+def test_small_server_log_is_not_rotated(data_dir):
+    log_dir = data_dir / "logs"
+    log_dir.mkdir()
+    log_file = log_dir / "server.log"
+    log_file.write_text("keep", encoding="utf-8")
+
+    desktop_server.rotate_log(log_file, max_bytes=100, backups=3)
+
+    assert log_file.read_text(encoding="utf-8") == "keep"
+    assert not (log_dir / "server.log.1").exists()
+
+
+def test_rotation_failure_does_not_remove_the_only_crash_trail(data_dir, monkeypatch):
+    log_dir = data_dir / "logs"
+    log_dir.mkdir()
+    log_file = log_dir / "server.log"
+    log_file.write_text("keep me", encoding="utf-8")
+
+    def locked_file(_self, _target):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(type(log_file), "replace", locked_file)
+    desktop_server.rotate_log(log_file, max_bytes=1, backups=3)
+
+    assert log_file.read_text(encoding="utf-8") == "keep me"
+
+
+def test_faulthandler_uses_the_redirected_stderr(monkeypatch):
+    calls = []
+    marker = object()
+    monkeypatch.setattr(desktop_server.sys, "stderr", marker)
+    monkeypatch.setattr(
+        desktop_server.faulthandler,
+        "enable",
+        lambda *, file, all_threads: calls.append((file, all_threads)),
+    )
+
+    assert desktop_server.enable_crash_trace() is True
+    assert calls == [(marker, True)]
 
 
 def test_unfrozen_run_keeps_the_terminal(data_dir, monkeypatch):

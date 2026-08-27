@@ -358,18 +358,25 @@ weiterhin über die extrahierten Bytes.
   HTTP-Request ab und schreibt eine `INFO`-Zeile (nur der Code, nie die URL).
   Der Spiegel enthält genau **eine** solche Zeile (`20USES50000771`, ein
   persönlicher CERNBox-Bereich). Sie ist per Konstruktion unerreichbar —
-  itkFlow hat dafür keine Credentials und soll keine bekommen —, und die
-  Formprüfung ist der Grund, warum sie **nicht in jedem Sweep erneut** eine
-  Login-Seite abholt. Ein persistentes „permanent gescheitert"-Flag in der
+  ein öffentliches Share-Passwort ist dafür kein Ersatz; ein künftiger
+  Zugriff bräuchte einen echten CERN-OAuth-/Account-Flow. itkFlow fragt
+  deshalb niemals nach dem CERN-Account-Passwort. Die Formprüfung ist der
+  Grund, warum die URL **nicht in jedem Sweep erneut** eine Login-Seite
+  abholt. Ein persistentes „permanent gescheitert"-Flag in der
   Datenbank wäre die naheliegende Alternative und wurde **verworfen**: es
   hätte genau die 20 Bilder oben eingefroren, die dieselbe Runde repariert
   hat. Ein Code-Fix muss alte Fehlschläge wieder in Reichweite bringen.
-- **Sicherheitsrahmen (ADR 006, Punkt 6):** Der Abruf läuft **ohne jede
-  Authentifizierung** über `urllib` mit eigenem Opener — es werden nie
-  PDB-Credentials an einen fremden Host geschickt. `_safe_http_url` lehnt
-  URLs mit Benutzer/Passwort, `localhost` und nicht-globale IP-Adressen ab;
-  `_SafeShareRedirects` prüft **jede** Weiterleitung erneut, bevor urllib ihr
-  folgt; die finale URL nach Redirects wird nochmals geprüft.
+- **Sicherheitsrahmen (ADR 006, Punkt 6):** Anonyme Freigaben laufen ohne
+  Authentifizierung. Fuer eine passwortgeschuetzte **oeffentliche** Freigabe
+  darf ausschliesslich das persoenlich gespeicherte Share-Passwort als
+  ownCloud-Basic-Auth (`public:<Passwort>`) mitgehen; PDB-Codes werden nie an
+  einen fremden Host geschickt. `_safe_http_url` lehnt URLs mit eingebautem
+  Benutzer/Passwort, `localhost` und nicht-globale IP-Adressen ab.
+  `_SafeShareRedirects` prueft jede Weiterleitung erneut und verlangt mit
+  Share-Auth dieselbe HTTPS-Origin (Host und effektiver Port); Host-/Portwechsel
+  sowie ein HTTPS-Downgrade werden verweigert. Gespeicherte Public-Share-
+  Identitaeten akzeptieren nur den HTTPS-Standardport. Die finale URL wird
+  nochmals geprueft.
 - **Was schiefgehen kann:**
   - Alle Kandidaten liefern HTML (abgelaufener Share, gelöschte Datei,
     Login-Zwang, Nextcloud-Störung) → nichts wird gespeichert, und es gibt
@@ -380,12 +387,55 @@ weiterhin über die extrahierten Bytes.
   - Antwort > `attachment_max_bytes` → verworfen.
   - Netzwerkfehler bei mindestens einem Kandidaten → gilt als transient,
     Retry-Leiter greift.
-- **Wie es sich für den Nutzer anfühlt:** identisch zu 2.1 — Kachel fehlt oder
-  zeigt „Not downloaded yet". Der Unterschied ist nur im Log sichtbar.
+- **Wie es sich für den Nutzer anfühlt:** Die Kachel bleibt bei einem nicht
+  erreichbaren Share ehrlich leer. Der Sync meldet `skipped` und davon
+  `authentication_required` separat; ein fehlendes oder falsches Passwort
+  wird damit nicht als Netzwerkfehler oder erfolgreicher Download kaschiert.
 - **Historischer Nebenbefund:** Bis 2026-08-26 wurden diese Bilder **nie**
   gespiegelt, weil der Mirror die Betrachterseite angefragt hat und die
   HTML-Abwehr korrekt zugeschlagen hat (docs/04, „Sync ueberlebt kurze
   Internet-Ausfaelle"). Der Fix war der Kandidatenweg oben.
+
+### 2.3b Passwortgeschuetzte oeffentliche Shares und manuelle URLs (2026-08-27)
+
+Der Account-Screen hat einen eigenen Bereich `Public share passwords`. Ein
+Nutzer gibt dort eine unterstuetzte HTTPS-Freigabe (`/s/<token>`,
+`/files/link/public/<token>` oder `/remote.php/dav/public-files/<token>`) und
+deren **Share-Passwort** ein. Der Speicher-Request validiert nur lokal die
+sichere Public-Link-Form und sendet **keinen** Request an den angegebenen Host.
+Das schliesst den unmittelbar nutzergesteuerten SSRF-Pfad; erst ein spaeterer,
+an eine tatsaechlich gespiegelte Evidence-URL gebundener Sync prueft den
+Zugriff. Der Browser bekommt nach dem Speichern nur Host, Token-Ende und
+Aenderungszeit zurueck, nie das Secret. Ein falsches Passwort kann deshalb
+bewusst gespeichert werden und wird beim Sync ehrlich als `skipped` und
+`authentication_required` gemeldet.
+
+Die Ablage ist nutzergebunden: der Lookup-Key ist SHA-256 aus Host und Token,
+der Ciphertext AES-256-GCM mit usergebundener AAD und dem bereits fuer
+persoenliche PDB-Codes konfigurierten Master-Key. Ein von Nutzer A gespeichertes
+Passwort kann weder von Nutzer B gelesen noch fuer dessen Sync benutzt werden.
+Ein Background-Sync laedt den Resolver ueber `SyncJob.user_id`. Ein
+beschaedigter optionaler Credential-Datensatz blockiert nicht den gesamten
+Evidence-Sweep; die betroffene Freigabe wird als authentifizierungspflichtig
+uebersprungen.
+
+Nach dem ersten 401/403-/Login-HTML-Befund merkt sich der laufende Sweep nur
+die gehashte Share-Identitaet und fordert denselben geschuetzten Share nicht
+fuer jede Komponente erneut an. Abgelaufene, private oder weiterhin
+geschuetzte Links zaehlen als `skipped`; `authentication_required` ist deren
+erklaerbarer Teil. Beides steht im Job-Ergebnis und in der Sync-Anzeige.
+
+Eine Share-URL kann ausserdem ueber den bestehenden manuellen Test-Flow
+(`Record test` -> Dry-run -> `Stage upload`) in itkFlow gelangen, **wenn** das
+gespiegelte PDB-Testtyp-Schema dafuer bereits ein kompatibles String-Feld
+deklariert. itkFlow erfindet keinen lokalen Result-Code: ohne ein solches
+Schema muss zuerst das PDB-Schema abgestimmt werden. Die URL bleibt bis zum
+PDB-Submit ein normaler String-Wert; nach dem bestaetigten Upload entdeckt der
+Evidence-Sync sie formbasiert und spiegelt die Datei. Fuer `GLUE_WEIGHT`
+erzwingt die Ingestion numerische Werte nur im etablierten `GW_*`-Mess- und
+Derived-Namespace, damit ein unabhaengiges schema-deklariertes URL-Feld nicht
+faelschlich verworfen wird. Das ist **kein** Datei-Upload in CERNBox und kein
+Ersatz fuer CERN-OAuth.
 
 ### 2.4 Vergleich auf einen Blick
 
@@ -394,7 +444,7 @@ weiterhin über die extrahierten Bytes.
 | Marker im Deskriptor | `type: "file"`, `source: "pdb"` | `type: "eos"` | `source: "share_link"` |
 | `code` | PDB-Handle (Hex) | PDB-Handle (Hex) | SHA-256 der URL (64 Hex) |
 | Braucht `test_run_ref` | für den guten Weg ja | zwingend | nein |
-| Authentifizierung | persönliche PDB-Codes | persönliche PDB-Codes | keine |
+| Authentifizierung | persönliche PDB-Codes | persönliche PDB-Codes | anonym oder persönliches Passwort einer öffentlichen Freigabe |
 | URL dauerhaft speicherbar | entfällt | **nein** (Signatur) | ja (aber nie im Read-Model) |
 | Typischer Fehlerfall | HTML-Seite statt Datei | abgelaufene Signatur | HTML-Betrachterseite |
 | Bei TUDO beobachtet | ja | **ja — 425 Deskriptoren, 422 der 432 Bilder** | ja (29 URLs, siehe 8.) |
@@ -545,19 +595,24 @@ Alle drei Quellen laufen durch dieselben Schutzmechanismen (ADR 006, Punkt 6):
 - **Atomarer Abschluss.** Bytes gehen zuerst in eine `.part`-Datei **neben**
   dem Zielnamen (`_write_temp_bytes`), erst in der Commit-Phase folgt
   `os.replace()` (`_finalize_download`). Ein Leser kann also nie eine halb
-  geschriebene Datei öffnen. Der `.part`-Name ist absichtlich deterministisch,
-  damit ein durch Absturz verwaister Rest beim nächsten Versuch einfach
-  überschrieben wird.
+  geschriebene Datei öffnen. Jeder Fetch erzeugt seinen `.part`-Pfad per
+  exklusivem `mkstemp` neu; zwei Prozesse können deshalb weder denselben Rest
+  truncaten noch beim Cleanup die Bytes des jeweils anderen löschen. Ein
+  harter Prozessabbruch kann einen eindeutig benannten Rest hinterlassen. Ein
+  späterer Worker ignoriert ihn; die noch offene Altersbereinigung ist eine
+  getrennte Aufgabe und darf nie unbekannte aktive Owner erraten.
 - **Überlappende Syncs je Blob serialisiert.** Direkter Refresh und
-  Hintergrund-Sweep desselben Sidecars sperren nur ihre gemeinsamen
+  Hintergrund-Sweep desselben Sidecars sperren innerhalb eines Prozesses nur
+  ihre gemeinsamen
   `(attachment_root, source, code)`-Schlüssel; verschiedene Dateien bleiben
   parallel. Die Sperre reicht bis Commit/Rollback, damit der Wartende den
   kanonischen Blob bereits sehen und wiederverwenden kann. So gibt es auch bei
-  zwei gleichzeitigen Aufrufen derselben Komponente nur einen Netzabruf, eine
-  Datei und keine konkurrierenden Schreibzugriffe auf den deterministischen
-  `.part`-Pfad. `force` laedt einen physischen Blob pro Aufruf erneut, aber
-  nicht einmal je Lauf-Deskriptor: mehrere Associations desselben
-  `(source, code)` teilen auch dann genau einen erfolgreichen Fetch.
+  zwei gleichzeitigen Aufrufen derselben Komponente in diesem Prozess nur
+  einen Netzabruf und eine Datei. Prozessübergreifend sind die eindeutigen
+  Temp-Pfade die Dateigrenze, während die Lease-Fence vor `os.replace` die
+  Publikationshoheit entscheidet. `force` lädt einen physischen Blob pro
+  Aufruf erneut, aber nicht einmal je Lauf-Deskriptor: mehrere Associations
+  desselben `(source, code)` teilen auch dann genau einen erfolgreichen Fetch.
 - **Pfad-Containment beim Schreiben.** `_write_temp_bytes` verweigert jeden
   Zielpfad außerhalb der Wurzel.
 - **Keine Netzwerkarbeit in offener Schreibtransaktion.** Der Download ist in
@@ -865,8 +920,10 @@ prüfbar. Der erste Schritt, der scheitert, ist die Ursache.
      wahrscheinlich die Zwei-Wurzeln-Falle aus 4.1. Prüfen, aus welchem
      Verzeichnis der Server gestartet wurde, und ob es einen **zweiten**
      `attachments`-Ordner gibt.
-   - `.part`-Dateien im Ordner → ein Download wurde unterbrochen; nächster
-     Sync holt ihn nach.
+   - `.part`-Dateien im Ordner → ein Prozess wurde hart während des Stagings
+     beendet. Der nächste Sync holt die eigentliche Datei nach, ignoriert den
+     eindeutig benannten alten Rest aber, bis eine sichere Altersbereinigung
+     existiert; er überschreibt oder löscht keine Datei unbekannten Owners.
 
 4. **Ist die Datei ein Bild — im Sinne der App?**
    In der Laufkarte steht „Not downloaded yet" oder es erscheint ein
@@ -1024,11 +1081,12 @@ Zusicherung.
   Blobzeilen und Evidence-Payloads; ein idempotenter Re-Sync lädt denselben
   Share genau einmal, hält ihn aber auf allen Komponenten und Läufen sichtbar.
 - **Offen:** Zukunft der beiden Live-`/images`-Endpunkte (Abschnitt 4.2).
-- **Erledigt (2026-08-27):** Gleichzeitige direkte und Background-Syncs eines
-  geteilten Attachment-Codes schreiben dank Blob-Key-Sperre nicht mehr
-  konkurrierend auf denselben deterministischen `.part`-Pfad (auch unter
-  `force` bleibt der Dateizugriff serialisiert; ein erzwungener Abruf darf
-  danach semantisch erneut laden).
+- **Erledigt (2026-08-28):** Gleichzeitige direkte und Background-Syncs eines
+  geteilten Attachment-Codes teilen innerhalb eines Prozesses die Blob-Key-
+  Sperre. Zwischen Prozessen besitzt jeder Fetch eine eigene exklusiv erzeugte
+  `.part`-Datei; Fence-Verlust und Cleanup eines alten Workers können deshalb
+  die Staging-Datei des Nachfolgers nicht mehr überschreiben oder löschen.
+  `force` bleibt pro Aufruf dedupliziert und darf danach semantisch neu laden.
 - **Offen:** Aufräumen verwaister alter `.part`-Dateien und Attachments, die aus
   der PDB verschwunden sind.
 - **Erledigt (2026-08-27):** die Doc-Map-Zeile für dieses Dokument steht jetzt

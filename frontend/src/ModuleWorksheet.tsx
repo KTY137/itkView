@@ -361,45 +361,118 @@ function ValuesCell({ latest }: { latest: WorksheetLatestRun | null }) {
  * Kept visibly separate from the stage groups above, and deliberately without
  * a Status column or an edit affordance: a requirement check is a statement
  * about *this* component, and recording a result belongs on the child's own
- * page where the serial in the payload would be right.
+ * page where the serial in the payload would be right. Read-only expansion is
+ * still available so a module page does not hide the curves that mostly live
+ * on its children.
  */
-function ChildEvidence({ groups }: { groups: readonly WorksheetChildGroup[] }) {
+function ChildEvidence({
+  groups,
+  refreshKey,
+  onOpenImage,
+}: {
+  groups: readonly WorksheetChildGroup[];
+  refreshKey: number;
+  onOpenImage: (sn: string, attachment: TestRunAttachment) => void;
+}) {
   if (groups.length === 0) return null;
   return (
     <section className="ws-children">
       <h3 className="section-title">{t.worksheet.childrenTitle}</h3>
       <p className="state-note">{t.worksheet.childrenIntro}</p>
       {groups.map((child) => (
-        <div className="panel ws-group-panel" key={child.sn}>
-          <div className="ws-group-head">
-            <span className="chip neutral">
-              {describeComponent({
-                component_type: child.component_type,
-                type_code: child.type_code,
-              })}
-            </span>
-            <span className="mono">{child.sn}</span>
-            {child.local_name !== null && <span className="muted">{child.local_name}</span>}
-          </div>
-          {child.rows.length === 0 ? (
-            <p className="state-note">{t.worksheet.childrenEmpty}</p>
-          ) : (
-            <table className="data-table ws-table">
-              <thead>
-                <tr>
-                  <th scope="col">{t.worksheet.colTest}</th>
-                  <th scope="col">{t.worksheet.colValues}</th>
-                  <th scope="col">{t.worksheet.colResult}</th>
-                  <th scope="col">{t.worksheet.colDate}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {child.rows.map((row) => (
-                  <tr className="ws-row" key={row.test_type}>
+        <ChildEvidenceGroup
+          key={child.sn}
+          child={child}
+          refreshKey={refreshKey}
+          onOpenImage={onOpenImage}
+        />
+      ))}
+    </section>
+  );
+}
+
+function ChildEvidenceGroup({
+  child,
+  refreshKey,
+  onOpenImage,
+}: {
+  child: WorksheetChildGroup;
+  refreshKey: number;
+  onOpenImage: (sn: string, attachment: TestRunAttachment) => void;
+}) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [runsRequested, setRunsRequested] = useState(false);
+  const [runs, setRuns] = useState<TestRunDetail[] | null>(null);
+  const [runsError, setRunsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!runsRequested || runs !== null) return;
+    let cancelled = false;
+    const ctrl = new AbortController();
+    getComponentTests(child.sn, ctrl.signal)
+      .then((data) => {
+        if (cancelled) return;
+        setRuns(data);
+        setRunsError(null);
+      })
+      .catch((error: unknown) => {
+        if (cancelled || ctrl.signal.aborted) return;
+        setRuns([]);
+        setRunsError(error instanceof ApiError ? error.message : t.worksheet.runsLoadError);
+      });
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+    };
+  }, [runsRequested, runs, child.sn, refreshKey]);
+
+  useEffect(() => {
+    if (runsRequested) {
+      setRuns(null);
+      setRunsError(null);
+    }
+    // A mirror refresh invalidates the child payload just like the parent's.
+  }, [refreshKey, child.sn, runsRequested]);
+
+  function toggle(testType: string): void {
+    setExpanded((current) => ({ ...current, [testType]: !current[testType] }));
+    setRunsRequested(true);
+  }
+
+  return (
+    <div className="panel ws-group-panel">
+      <div className="ws-group-head">
+        <span className="chip neutral">
+          {describeComponent({
+            component_type: child.component_type,
+            type_code: child.type_code,
+          })}
+        </span>
+        <span className="mono">{child.sn}</span>
+        {child.local_name !== null && <span className="muted">{child.local_name}</span>}
+      </div>
+      {child.rows.length === 0 ? (
+        <p className="state-note">{t.worksheet.childrenEmpty}</p>
+      ) : (
+        <table className="data-table ws-table">
+          <thead>
+            <tr>
+              <th scope="col">{t.worksheet.colTest}</th>
+              <th scope="col">{t.worksheet.colValues}</th>
+              <th scope="col">{t.worksheet.colResult}</th>
+              <th scope="col">{t.worksheet.colDate}</th>
+              <th scope="col"><span className="sr-only">{t.worksheet.colActions}</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {child.rows.map((row) => {
+              const isExpanded = expanded[row.test_type] === true;
+              const detailId = `ws-child-detail-${sanitizeId(child.sn)}-${sanitizeId(row.test_type)}`;
+              return (
+                <Fragment key={row.test_type}>
+                  <tr className="ws-row">
                     <td className="mono">{row.test_type}</td>
-                    <td>
-                      <ValuesCell latest={row.latest} />
-                    </td>
+                    <td><ValuesCell latest={row.latest} /></td>
                     <td>
                       {row.latest === null ? (
                         <span className="muted">{t.common.none}</span>
@@ -420,14 +493,47 @@ function ChildEvidence({ groups }: { groups: readonly WorksheetChildGroup[] }) {
                     <td className={row.latest?.measured_at ? undefined : "muted"}>
                       {formatMeasuredAt(row.latest?.measured_at ?? null)}
                     </td>
+                    <td>
+                      {row.run_count + row.withdrawn_count > 0 && (
+                        <button
+                          type="button"
+                          className="ws-toggle"
+                          aria-expanded={isExpanded}
+                          aria-controls={detailId}
+                          aria-label={
+                            isExpanded
+                              ? t.worksheet.collapseRow(row.test_type)
+                              : t.worksheet.expandRow(row.test_type)
+                          }
+                          onClick={() => toggle(row.test_type)}
+                        >
+                          <span aria-hidden="true">{isExpanded ? "▾" : "▸"}</span>
+                          <span>{t.worksheet.runsAndPlots}</span>
+                        </button>
+                      )}
+                    </td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      ))}
-    </section>
+                  {isExpanded && (
+                    <tr className="ws-detail-row" id={detailId}>
+                      <td colSpan={TABLE_COLUMNS}>
+                        <RunDetailContent
+                          sn={child.sn}
+                          testType={row.test_type}
+                          runs={runs}
+                          runsError={runsError}
+                          onRetry={() => setRuns(null)}
+                          onOpenImage={(attachment) => onOpenImage(child.sn, attachment)}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
   );
 }
 
@@ -483,9 +589,9 @@ function RunDetailContent({
             )}
             <span className="muted run-date">{formatMeasuredAt(run.measured_at)}</span>
           </div>
+          <RunAttachments sn={sn} attachments={run.attachments} onOpen={onOpenImage} />
           <RunCurves run={run} />
           <RunScalars run={run} />
-          <RunAttachments sn={sn} attachments={run.attachments} onOpen={onOpenImage} />
           <RunConditions run={run} />
         </li>
       ))}
@@ -517,7 +623,10 @@ export default function ModuleWorksheet({
   const [runsRequested, setRunsRequested] = useState(false);
   const [runs, setRuns] = useState<TestRunDetail[] | null>(null);
   const [runsError, setRunsError] = useState<string | null>(null);
-  const [lightbox, setLightbox] = useState<TestRunAttachment | null>(null);
+  const [lightbox, setLightbox] = useState<{
+    sn: string;
+    attachment: TestRunAttachment;
+  } | null>(null);
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [optimisticStaged, setOptimisticStaged] = useState<Record<string, WorksheetStagedRef[]>>(
     {},
@@ -830,7 +939,18 @@ export default function ModuleWorksheet({
         <div className="panel">
           <p className="state-note">{t.worksheet.empty}</p>
         </div>
-        <ChildEvidence groups={childGroups} />
+        <ChildEvidence
+          groups={childGroups}
+          refreshKey={refreshKey}
+          onOpenImage={(sn, attachment) => setLightbox({ sn, attachment })}
+        />
+        {lightbox !== null && (
+          <ImageLightbox
+            sn={lightbox.sn}
+            attachment={lightbox.attachment}
+            onClose={() => setLightbox(null)}
+          />
+        )}
       </div>
     );
   }
@@ -933,6 +1053,7 @@ export default function ModuleWorksheet({
                                 onClick={() => toggleExpand(key)}
                               >
                                 <span aria-hidden="true">{isExpanded ? "▾" : "▸"}</span>
+                                <span>{t.worksheet.runsAndPlots}</span>
                               </button>
                             )}
                             {canWrite && (
@@ -1169,7 +1290,9 @@ export default function ModuleWorksheet({
                               runs={runs}
                               runsError={runsError}
                               onRetry={() => setRuns(null)}
-                              onOpenImage={setLightbox}
+                              onOpenImage={(attachment) =>
+                                setLightbox({ sn: componentSn, attachment })
+                              }
                             />
                           </td>
                         </tr>
@@ -1182,9 +1305,17 @@ export default function ModuleWorksheet({
           </div>
         </section>
       ))}
-      <ChildEvidence groups={childGroups} />
+      <ChildEvidence
+        groups={childGroups}
+        refreshKey={refreshKey}
+        onOpenImage={(sn, attachment) => setLightbox({ sn, attachment })}
+      />
       {lightbox !== null && (
-        <ImageLightbox sn={componentSn} attachment={lightbox} onClose={() => setLightbox(null)} />
+        <ImageLightbox
+          sn={lightbox.sn}
+          attachment={lightbox.attachment}
+          onClose={() => setLightbox(null)}
+        />
       )}
     </div>
   );

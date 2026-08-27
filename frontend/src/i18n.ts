@@ -128,12 +128,24 @@ const en = {
     progressLabel: (phase: string, current: number, total: number) =>
       `${phase}: ${current} of ${total}`,
     indeterminateLabel: (phase: string) => `${phase}: total not known yet`,
-    connectionLost: (error: string) => `Progress connection lost — retrying: ${error}`,
+    connectionLost: (error: string) =>
+      `Progress connection lost — the sync may still be running; retrying the status connection: ${error}`,
+    mayBeStalled: "Sync may be stalled",
+    staleWarning: (staleAfterSeconds?: number) =>
+      `No heartbeat${
+        staleAfterSeconds === undefined ? "" : ` within ${formatDuration(staleAfterSeconds)}`
+      }; the sync may be stalled. The server will safely check the current job before retrying.`,
     retryFailed: (error: string) => `Could not start the sync: ${error}`,
-    mirrorUnchanged: "The local mirror was not changed.",
+    componentMirrorPreserved:
+      "The previous complete component snapshot remains unchanged; no partial snapshot was committed.",
+    evidenceMirrorPreserved:
+      "Evidence and files already mirrored remain valid; retrying safely rechecks the remaining work.",
     openDetails: "Open component sync details",
     openEvidenceDetails: "Open evidence sync details",
     retry: "Retry sync",
+    retrying: "Starting retry…",
+    checkAndRetry: "Check and retry",
+    checkingAndRetrying: "Checking and retrying…",
     dismiss: "Dismiss",
     componentsUnit: "components",
     eventsUnit: "component histories",
@@ -149,10 +161,13 @@ const en = {
       downloaded: number,
       reused: number,
       failed: number,
+      skipped: number,
+      authenticationRequired: number,
       attachmentTotal: number,
     ) =>
       `Evidence and attachment mirror complete: ${components} components, ${total} test runs (${created} new, ${updated} updated, ${unchanged} unchanged); ` +
-      `${downloaded} attachments downloaded, ${reused} reused, ${failed} failed of ${attachmentTotal}.`,
+      `${downloaded} attachments downloaded, ${reused} reused, ${failed} failed, ${skipped} skipped` +
+      `${authenticationRequired > 0 ? ` (${authenticationRequired} require share access)` : ""} of ${attachmentTotal}.`,
   },
   components: {
     subtitle: "Browse and search the local PDB mirror. Scanner-first.",
@@ -366,14 +381,44 @@ const en = {
     noneReached: (stage: string) => `No component has reached ${stage} yet.`,
     noDwell: "Not enough stage transitions to measure dwell time.",
     noRework: "No rework recorded.",
+    requiredTestsTitle: "REQUIRED test coverage",
+    requiredTestsSubtitle:
+      "Configured stage-gate tests from confirmed mirrored evidence; drafts and submitted uploads do not count.",
+    requiredTestsCohort: (institute: string) =>
+      `${institute} · cohort: components at or beyond each configured stage`,
+    requiredTestsEmpty: "No REQUIRED tests are configured for this institute.",
+    requiredTestsLoadError: "Could not load REQUIRED test coverage",
+    requiredTestsStage: "Stage",
+    requiredTestsTest: "Required test",
+    requiredTestsComponents: "Components",
+    requiredTestsPassed: "Passed",
+    requiredTestsFailed: "Failed",
+    requiredTestsMissing: "Missing",
+    requiredTestsCoverage: "Coverage",
+    requiredTestsCoverageAria: (
+      testType: string,
+      stage: string,
+      passed: number,
+      failed: number,
+      missing: number,
+      total: number,
+    ) =>
+      `${testType} at ${stage}: ${passed} passed, ${failed} failed, ${missing} missing out of ${total} components`,
     collectiveCurvesTitle: "Collective IV and CV curves",
     collectiveCurvesSubtitle:
       "Each panel overlays one compatible mirrored PDB schema. Schemas stay separate because units and sweep protocols can differ.",
     collectiveIvTitle: "Collective IV curves",
-    collectiveIvSubtitle: "Current against voltage, one line per mirrored test run.",
+    collectiveIvSubtitle: "Current against voltage across mirrored test runs.",
     collectiveCvTitle: "Collective CV curves",
-    collectiveCvSubtitle: "Capacitance against voltage, one line per mirrored test run.",
+    collectiveCvSubtitle: "Capacitance against voltage across mirrored test runs.",
     collectiveDatasetLabel: "PDB test schema",
+    collectiveDisplayLabel: "Curve display",
+    collectiveRepresentative: "Representative curves",
+    collectiveAllReturned: "All returned curves",
+    collectiveRepresentativeCount: (shown: number, paired: number, returned: number) =>
+      `Showing ${shown} representative ${shown === 1 ? "curve" : "curves"} from ${paired} pairable of ${returned} returned ${returned === 1 ? "run" : "runs"}; failed runs are included when present.`,
+    collectiveAllCount: (shown: number, _paired: number, returned: number) =>
+      `Showing all ${shown} pairable ${shown === 1 ? "curve" : "curves"} from ${returned} returned ${returned === 1 ? "run" : "runs"}.`,
     collectiveIvEmpty:
       "No mirrored test schema contains paired current and voltage arrays yet.",
     collectiveCvEmpty:
@@ -394,6 +439,7 @@ const en = {
     measurementXLabel: "X axis",
     measurementXIndex: "Sample index",
     measurementLoadError: "Could not load measurements",
+    measurementRefreshError: "Cached measurements are shown; background refresh failed",
     measurementEmpty: "No mirrored measurements for this selection yet. Run a test evidence sync first.",
     measurementCurves: (n: number) => `${n} ${n === 1 ? "run" : "runs"} overlaid`,
     measurementPassed: (n: number) => `passed (${n})`,
@@ -673,13 +719,9 @@ const en = {
     conditions: "Conditions",
     curvePoints: (count: number) => `${count} points`,
     categoryPlotAria: (result: string, count: number) =>
-      `Generated categorical plot for ${result}, ${count} points`,
+      `Generated categorical bar chart for ${result}, ${count} bars`,
     categoryPlotCaption: (result: string, count: number) =>
-      `${result} / position or key · ${count} points`,
-    pairPlotAria: (result: string, count: number) =>
-      `Generated numeric-pair scatter plot for ${result}, ${count} points`,
-    pairPlotCaption: (result: string, count: number) =>
-      `${result} · second value / first value · ${count} points`,
+      `${result} / position or key · ${count} bars`,
     numericPair: (first: string, second: string) => `[${first}, ${second}]`,
     voltage: "Voltage [V]",
     current: "Current [nA]",
@@ -707,6 +749,7 @@ const en = {
     mapEntries: (entries: number) => `⌁ ${entries} entries`,
     expandRow: (testType: string) => `Show ${testType} runs`,
     collapseRow: (testType: string) => `Hide ${testType} runs`,
+    runsAndPlots: "Runs & plots",
     runsLoadError: "Could not load the mirrored test runs",
     noMirroredRuns: "No mirrored runs for this test type yet.",
     runNumber: (value: string) => `run ${value}`,
@@ -1142,6 +1185,10 @@ const en = {
     localOnlyHint:
       "This view reads itkFlow's local database only. Refreshing it never contacts the PDB.",
     loadFailed: (message: string) => `Could not load operations health: ${message}`,
+    diagnosticsTitle: "Desktop diagnostics",
+    diagnosticsHint:
+      "Download a local ZIP containing bounded rotated itkFlow logs and sanitized sync metadata. Review it before sharing; it can still contain component identifiers from application activity.",
+    downloadDiagnostics: "Download diagnostics",
     overall: {
       healthy: "Healthy",
       warning: "Needs attention",
@@ -1546,6 +1593,29 @@ const en = {
     savedToast: "Personal PDB connection updated.",
     testPassedToast: "PDB connection verified.",
     disconnectedToast: "Personal PDB connection removed.",
+    sharesTitle: "CERNBox and public shares",
+    sharesDescription:
+      "Save a password for a password-protected public share. Access is checked only when evidence sync needs the link.",
+    sharesPublicOnly:
+      "Public HTTPS share links only. Private CERNBox account links require CERN sign-in; itkFlow never asks for or stores your CERN account password.",
+    shareUrlLabel: "Public share link",
+    shareUrlPlaceholder: "https://cernbox.cern.ch/s/...",
+    sharePasswordLabel: "Share password",
+    shareSecretNote:
+      "The public-link format is validated locally before saving. The password is encrypted, never returned to this browser, and checked during evidence sync.",
+    saveShare: "Save password",
+    savingShare: "Saving...",
+    savedSharesTitle: "Saved public shares",
+    noSavedShares: "No public-share passwords saved yet.",
+    shareUpdatedLabel: "Saved",
+    removeShare: "Remove",
+    removingShare: "Removing...",
+    shareFieldsRequired: "Enter both a public share link and its password.",
+    sharesLoadFailed: "Could not load saved public shares",
+    shareSaveFailed: "Could not save the public share",
+    shareRemoveFailed: "Could not remove the public share",
+    shareSavedToast: "Public-share password saved. Access will be checked during evidence sync.",
+    shareRemovedToast: "Public-share password removed.",
     preferencesTitle: "Preferences",
     previewTitle: "Staged preview",
     previewDescription:

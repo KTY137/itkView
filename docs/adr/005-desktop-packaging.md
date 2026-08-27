@@ -18,9 +18,9 @@ keine reduzierte Zweitfassung, die auseinanderdriftet.
 
 1. **Eine Shell, kein zweites Frontend.** Eine Tauri-Anwendung (`desktop/`)
    startet den gepackten Backend-Prozess und zeigt dessen Oberfläche in einem
-   Webview. Die Shell hat keine eigene UI außer einem Splash und stellt der
-   Seite **kein** Tauri-IPC zur Verfügung; die Seite bleibt eine gewöhnliche
-   Web-App.
+   Webview. Die Shell hat keine eigene Produkt-UI außer Splash und einem
+   lokalen Start-/Ausfallhinweis und stellt der Seite **kein** Tauri-IPC zur
+   Verfügung; die Seite bleibt eine gewöhnliche Web-App.
 2. **Das Backend serviert die SPA selbst** (`app/static_spa.py`, Setting
    `static_dir`). Damit liegen UI und API auf einer Origin, und der bestehende
    Session-Cookie- plus CSRF-Fluss funktioniert unverändert. Die Alternative —
@@ -62,8 +62,17 @@ keine reduzierte Zweitfassung, die auseinanderdriftet.
   Desktop-Variante ist Einzelplatz: sie ersetzt das Institutsdeployment nicht,
   weil Rollen, Audit und Outbox-Worker auf einen gemeinsamen Server zielen.
 - Der Sidecar ist ein Windowed-Build ohne nutzbares stdout. Ein frozener Lauf
-  schreibt deshalb immer in `<datadir>/logs/server.log`; ohne das wäre ein
-  Absturz spurlos.
+  schreibt deshalb immer in `<datadir>/logs/server.log`; der Tauri-Host
+  schreibt getrennt strukturierte Lifecycle-Daten nach `desktop.log` und
+  kopiert niemals rohe Sidecar-Ausgabe. Beide Logs rotieren beim naechsten
+  Start (`server.log`: 5 MiB, `desktop.log`: 1 MiB, jeweils drei Backups),
+  Python-Faulthandler schreibt Thread-Stacks in den Server-Log. Ein
+  unerwartetes Sidecar-Ende nach der Navigation ersetzt die Seite durch einen
+  lokalen Fehlerhinweis, startet aber keine unkontrollierte Restart-Schleife.
+  Globale Admins koennen im paketierten Desktop ein begrenztes Diagnose-ZIP
+  aus genau diesen Logs und sanitisierten Sync-Metadaten laden; Webbetrieb und
+  Institutsadmins haben diesen Endpoint nicht. Die READY-Zeile enthaelt keinen
+  Datenverzeichnispfad.
 - Onefile heißt zwei Prozesse: der gestartete Bootstrap re-exekutiert sich als
   eigentlicher Server. Beim Beenden killt die Shell deshalb den ganzen
   Prozessbaum (`taskkill /T` unter Windows) — nur den Bootstrap zu killen ließ

@@ -55,11 +55,11 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 | `backend/app/auth.py`, `models.User`/`UserSession`, `/api/auth`, `/api/users` | [`06`](06-users-roles-audit.md) |
 | `backend/app/pdb_gateway.py`, `pdb_sync.py`, `sync.py` (Mirror) | [`02`](02-revamp-plan.md) (Phase 1), [`09`](09-pdb-production-strategy.md) |
 | `backend/app/pdb_test_evidence.py`, `test_run_evidence.py`, `models.TestRunEvidence` | [`04`](04-roadmap.md), [`09`](09-pdb-production-strategy.md) |
-| `backend/app/attachment_store.py`, `models.TestRunAttachment`, `pdb_attachments.py` | [`12`](12-attachments-and-images.md), [`13`](13-metrology-artifacts.md), [`04`](04-roadmap.md), [`09`](09-pdb-production-strategy.md) |
+| `backend/app/attachment_store.py`, `share_credentials.py`, `models.TestRunAttachment`/`ExternalShareCredential`, `pdb_attachments.py` | [`12`](12-attachments-and-images.md), [`13`](13-metrology-artifacts.md), [`04`](04-roadmap.md), [`09`](09-pdb-production-strategy.md) |
 | `backend/app/preview.py`, Component-Preview-Schemas und `/api/components/{sn}/preview` | [`adr/006`](adr/006-staged-first-ui-auto-mirror.md), [`04`](04-roadmap.md), [`05`](05-ui-design-reference.md) |
 | `models.TestTypeSchema`, `backend/app/pdb_test_types.py`, `test_type_schemas.py` und `/api/test-types` | [`adr/006`](adr/006-staged-first-ui-auto-mirror.md), [`04`](04-roadmap.md) |
 | Evidence-Job in `backend/app/sync_jobs.py`, EOS-/Share-Link-Mirror | [`adr/006`](adr/006-staged-first-ui-auto-mirror.md), [`04`](04-roadmap.md), [`09`](09-pdb-production-strategy.md) |
-| `backend/app/desktop_server.py`, `static_spa.py`, `desktop/` (Tauri) | [`adr/005`](adr/005-desktop-packaging.md), [README](../deploy/README.md) |
+| `backend/app/desktop_server.py`, `diagnostics.py`, `static_spa.py`, `desktop/` (Tauri) | [`adr/005`](adr/005-desktop-packaging.md), [`04`](04-roadmap.md), [`05`](05-ui-design-reference.md), [README](../deploy/README.md) |
 | `backend/app/pdb_credentials.py`, `models.PdbCredential` | [`06`](06-users-roles-audit.md), [`adr/004`](adr/004-personal-pdb-credentials.md) |
 | `backend/app/pdb_scope.py` | [`adr/003`](adr/003-pdb-dummy-write-scope.md), [`09`](09-pdb-production-strategy.md) |
 | `backend/app/outbox_worker.py`, `run_worker.py` | [`adr/002`](adr/002-async-outbox-worker.md) |
@@ -67,7 +67,7 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 | `models.OutboxAction`/`AuditEvent`, Outbox-Status | [`adr/001`](adr/001-outbox-status-contract.md) |
 | `backend/app/ingestion.py`, `pdb_upload.py` | [`02`](02-revamp-plan.md) (Phase 2) |
 | `backend/app/domain/stages.py`, `backend/app/stage_service.py`, Stage-Suggestion | [`04`](04-roadmap.md), [`05`](05-ui-design-reference.md), [`10`](10-itk-domain-reference.md) §7 |
-| `backend/app/stats.py`, `backend/app/measurement_stats.py`, `/api/stats` | [`04`](04-roadmap.md) |
+| `backend/app/stats.py`, `measurement_stats.py`, `required_test_stats.py`, `/api/stats` | [`04`](04-roadmap.md), [`05`](05-ui-design-reference.md) |
 | `backend/app/tool_sync.py`, `models.Tool`, `/api/tools` | [`07`](07-jig-tool-quickselect.md) |
 | `backend/app/domain/glue.py`, `backend/app/glue_service.py`, `models.GlueBatch`/`GlueUsage`, `/api/glue-batches` | [`11`](11-logistics-operations.md) |
 | `backend/app/assembly.py`, Assembly-Wizard-Dry-Run | [`07`](07-jig-tool-quickselect.md), [`11`](11-logistics-operations.md) |
