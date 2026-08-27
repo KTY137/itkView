@@ -8,6 +8,15 @@ const MAX_GLUE_POT_LIFE_MINUTES = 1_440;
 const STAGE_NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/u;
 const TEST_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/u;
 const TEST_TYPE_LIST_ID = "admin-stage-test-types";
+/** A PDB result code, e.g. the code a scale reading is stored under. */
+const RESULT_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/u;
+/** A derivation step key (plan §9.2/§9.3) — profile-defined, case as typed. */
+const GLUE_STEP_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/u;
+const GLUE_PROCESS_PATTERN = /^[A-Z][A-Z0-9_]{0,31}$/u;
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
+const GLUE_STEP_LIST_ID = "admin-glue-step-keys";
+/** A glue target/tolerance in mg; generous, but rules out a stray gram value. */
+const MAX_GLUE_TARGET_MG = 100_000;
 /** Guard against a pathological mirror; a real profile has a handful of types. */
 const MAX_SCHEMA_COMPONENT_TYPES = 8;
 
@@ -86,6 +95,50 @@ type ReceptionTestRow = {
   testType: string;
 };
 
+/**
+ * One derivation step of the glue-weight formula, expressed as data
+ * (plan §9.2): "which measurement, minus which measurements, stored under
+ * which result code". Which PDB codes those are is institute and schema
+ * business, never code — the editor only knows the shape.
+ */
+type GlueInputRow = {
+  key: string;
+  /** Profile-defined step key; the glue targets below refer to it. */
+  stepKey: string;
+  /** What the operator reads as the step's name in the worksheet verdict. */
+  label: string;
+  /** Which test type carries this step's readings; blank = the profile default. */
+  testType: string;
+  measured: string;
+  subtract: TextRow[];
+  /** Optional: without it the step is judged but never uploaded. */
+  resultCode: string;
+};
+
+/** One target/tolerance cell: module type × step, inside one rule set. */
+type GlueTargetCellRow = {
+  key: string;
+  moduleType: string;
+  stepKey: string;
+  targetMg: string;
+  toleranceMg: string;
+};
+
+/**
+ * One glue-target rule set (plan §9.1). `validFrom` is what makes historical
+ * runs judgeable: the live production sheet really does run two generations
+ * of the same rule side by side, and a profile that knows only one set of
+ * constants misjudges every run recorded under the other.
+ */
+type GlueRuleSetRow = {
+  key: string;
+  process: string;
+  label: string;
+  /** ISO date, or "" for the always-valid fallback (`valid_from: null`). */
+  validFrom: string;
+  targets: GlueTargetCellRow[];
+};
+
 type StageRow = {
   key: string;
   name: string;
@@ -106,6 +159,20 @@ type SettingsDraft = {
   receptionChecklist: TextRow[];
   receptionTests: ReceptionTestRow[];
   gluePotLife: GluePotLifeRow[];
+  glueInputs: GlueInputRow[];
+  glueRuleSets: GlueRuleSetRow[];
+  glueDefaultProcess: string;
+  glueProcessProperty: string;
+  /**
+   * Whether the loaded profile already carried the key. An institute that has
+   * never configured a glue derivation must not have one silently written as
+   * "explicitly empty" by an unrelated save — that would switch the judgement
+   * off for every module without anybody asking for it.
+   */
+  hadGlueInputs: boolean;
+  hadGlueTargets: boolean;
+  hadGlueDefaultProcess: boolean;
+  hadGlueProcessProperty: boolean;
   evidenceComponentTypes: TextRow[];
   escalationAfterMinutes: string;
   escalationChannel: string;
@@ -133,12 +200,49 @@ export type AdminOperationalSettings = {
   shipment_reception_checklist: string[];
   shipment_reception_tests: Record<string, string[]>;
   glue_pot_life_minutes: Record<string, number>;
+  /**
+   * The glue-weight formula as data (plan §9.2), keyed by derivation step:
+   * `measured − Σ subtract`, stored under `result_code`. Omitted entirely
+   * while the institute has never configured one, so an unrelated save never
+   * turns "not configured" into "explicitly none"; `null` when the admin
+   * empties a configured one, which is how the API restores the seed
+   * defaults — an empty object is rejected there on purpose.
+   */
+  glue_weight_inputs?: Record<string, GlueWeightInputMapping> | null;
+  /**
+   * Glue targets per process × module type × step, with a validity date
+   * (plan §9.1). A list, not a map: several generations of the same process
+   * coexist and the run's measurement date picks the rule set. Same
+   * omitted / `null` contract as above.
+   */
+  glue_targets?: GlueTargetRuleSet[] | null;
+  /** Explicit fallback when a run does not carry a process property. */
+  glue_default_process?: string | null;
+  /** Optional PDB property/result code that identifies the process per run. */
+  glue_process_property?: string | null;
   evidence_component_types: string[];
   reminder_escalation: { after_minutes: number; channel: string } | null;
   /** Complete ordered stage list; written together with `stage_requirements`. */
   stage_order: string[];
   /** One entry per listed stage, so the saved profile is fully explicit. */
   stage_requirements: Record<string, string[]>;
+};
+
+export type GlueWeightInputMapping = {
+  measured: string;
+  subtract: string[];
+  /** Absent when the step is judged locally but never uploaded. */
+  result_code?: string;
+  label?: string;
+  test_type?: string;
+};
+
+export type GlueTargetRuleSet = {
+  process: string;
+  label: string;
+  /** null = always valid; the fallback when no dated rule set matches. */
+  valid_from: string | null;
+  module_types: Record<string, Record<string, { target_mg: number; tolerance_mg: number }>>;
 };
 
 export type AdminSettingsUpdate = {
@@ -242,6 +346,65 @@ export type AdminSettingsLabels = {
   glueTypePlaceholder: string;
   potLifeLabel: string;
   minutesUnit: string;
+  glueInputsTitle: string;
+  glueInputsHint: string;
+  glueInputsImpact: string;
+  glueInputsEmpty: string;
+  addGlueInput: string;
+  glueInputRowLabel: (index: number) => string;
+  glueStepKeyLabel: string;
+  glueStepKeyPlaceholder: string;
+  glueStepLabelLabel: string;
+  glueStepLabelPlaceholder: string;
+  glueStepTestTypeLabel: string;
+  glueStepTestTypePlaceholder: string;
+  glueMeasuredLabel: string;
+  glueMeasuredPlaceholder: string;
+  glueSubtractLabel: string;
+  glueSubtractEmpty: string;
+  addGlueSubtract: string;
+  glueSubtractItemLabel: (index: number) => string;
+  glueSubtractPlaceholder: string;
+  removeGlueSubtract: (index: number) => string;
+  glueResultCodeLabel: string;
+  glueResultCodePlaceholder: string;
+  /** `result` is "" when the step is judged locally but never uploaded. */
+  glueFormulaPreview: (measured: string, subtract: string[], result: string) => string;
+  glueFormulaIncomplete: string;
+  glueTargetsTitle: string;
+  glueTargetsHint: string;
+  glueTargetsImpact: string;
+  glueTargetsEmpty: string;
+  glueJudgementDirtyWarning: string;
+  glueProcessResolutionTitle: string;
+  glueProcessResolutionHint: string;
+  glueDefaultProcessLabel: string;
+  glueDefaultProcessUnset: string;
+  glueProcessPropertyLabel: string;
+  glueProcessPropertyPlaceholder: string;
+  addGlueRuleSet: string;
+  glueRuleSetRowLabel: (index: number) => string;
+  glueProcessLabel: string;
+  glueProcessPlaceholder: string;
+  glueProcessDisplayLabel: string;
+  glueProcessDisplayPlaceholder: string;
+  glueValidFromLabel: string;
+  glueValidFromAlways: string;
+  removeGlueRuleSet: string;
+  glueTargetRowsLabel: string;
+  glueTargetRowsEmpty: string;
+  addGlueTargetRow: string;
+  glueTargetRowLabel: (index: number) => string;
+  glueModuleTypeLabel: string;
+  glueModuleTypePlaceholder: string;
+  glueTargetMgLabel: string;
+  glueToleranceMgLabel: string;
+  milligramsUnit: string;
+  removeGlueTargetRow: (index: number) => string;
+  glueStepUnknown: string;
+  glueStepUnknownHint: string;
+  glueNumberRequired: (fieldLabel: string, maximum: number) => string;
+  glueDateRequired: (fieldLabel: string) => string;
   evidenceTitle: string;
   evidenceHint: string;
   evidenceEmpty: string;
@@ -333,6 +496,20 @@ function asObject(value: unknown): Record<string, unknown> | null {
 function stringSetting(settings: Record<string, unknown>, key: string): string {
   const value = settings[key];
   return typeof value === "string" ? value : "";
+}
+
+function optionalStringSetting(
+  settings: Record<string, unknown>,
+  key: string,
+  legacyKey?: string,
+): { value: string; configured: boolean } {
+  if (Object.prototype.hasOwnProperty.call(settings, key)) {
+    return { value: stringSetting(settings, key), configured: true };
+  }
+  if (legacyKey !== undefined && Object.prototype.hasOwnProperty.call(settings, legacyKey)) {
+    return { value: stringSetting(settings, legacyKey), configured: true };
+  }
+  return { value: "", configured: false };
 }
 
 function stringList(value: unknown, prefix: string): TextRow[] {
@@ -431,6 +608,91 @@ function receptionTestRows(value: unknown): ReceptionTestRow[] {
   });
 }
 
+/** Numbers survive a round-trip through the form as text; keep them verbatim
+ * so a saved `151` never comes back as `151.00000000000003`. */
+function numberText(value: unknown): string {
+  return typeof value === "number" || typeof value === "string" ? String(value) : "";
+}
+
+/** `glue_weight_inputs` (plan §9.2) → editor rows. Anything unreadable is
+ * dropped rather than guessed: a half-understood formula is worse than none. */
+function glueInputRows(value: unknown): GlueInputRow[] {
+  const mapping = asObject(value);
+  if (mapping === null) return [];
+  return Object.entries(mapping).flatMap(([stepKey, rawStep]) => {
+    const step = asObject(rawStep);
+    if (step === null) return [];
+    const subtract = Array.isArray(step.subtract)
+      ? step.subtract.filter((item): item is string => typeof item === "string")
+      : [];
+    return [
+      {
+        key: rowId("admin-glue-input"),
+        stepKey,
+        label: typeof step.label === "string" ? step.label : "",
+        testType: typeof step.test_type === "string" ? step.test_type : "",
+        measured: typeof step.measured === "string" ? step.measured : "",
+        subtract: subtract.map((code) => ({ key: rowId("admin-glue-subtract"), value: code })),
+        resultCode: typeof step.result_code === "string" ? step.result_code : "",
+      },
+    ];
+  });
+}
+
+/**
+ * The date part of a stored `valid_from`. The API normalises it to a full UTC
+ * timestamp (`2023-10-24T00:00:00+00:00`), which a `<input type="date">` would
+ * silently refuse and render as blank — the rule would then look undated and
+ * be saved as the always-valid fallback, quietly re-judging every historical
+ * run against it.
+ */
+function validFromDate(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  return ISO_DATE_PATTERN.test(trimmed.slice(0, 10)) ? trimmed.slice(0, 10) : "";
+}
+
+/**
+ * `glue_targets` (plan §9.1) → editor rows. The stored shape nests
+ * process → module type → step → {target, tolerance}; the editor flattens the
+ * inner two levels into one row per cell, which is how an operator reads the
+ * table on the sheet and keeps every field reachable with the keyboard.
+ */
+function glueRuleSetRows(value: unknown): GlueRuleSetRow[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((rawRuleSet) => {
+    const ruleSet = asObject(rawRuleSet);
+    if (ruleSet === null) return [];
+    const process = typeof ruleSet.process === "string" ? ruleSet.process : "";
+    const moduleTypes = asObject(ruleSet.module_types) ?? {};
+    const targets: GlueTargetCellRow[] = [];
+    for (const [moduleType, rawSteps] of Object.entries(moduleTypes)) {
+      const steps = asObject(rawSteps);
+      if (steps === null) continue;
+      for (const [stepKey, rawCell] of Object.entries(steps)) {
+        const cell = asObject(rawCell);
+        if (cell === null) continue;
+        targets.push({
+          key: rowId("admin-glue-target"),
+          moduleType,
+          stepKey,
+          targetMg: numberText(cell.target_mg),
+          toleranceMg: numberText(cell.tolerance_mg),
+        });
+      }
+    }
+    return [
+      {
+        key: rowId("admin-glue-ruleset"),
+        process,
+        label: typeof ruleSet.label === "string" ? ruleSet.label : "",
+        validFrom: validFromDate(ruleSet.valid_from),
+        targets,
+      },
+    ];
+  });
+}
+
 function stringArray(value: unknown): string[] | null {
   if (!Array.isArray(value)) return null;
   return value.every((item) => typeof item === "string" && item !== "")
@@ -487,6 +749,12 @@ function stageRowsFromSettings(settings: Record<string, unknown>): StageRow[] {
 function draftFromInstitute(institute: Institute): SettingsDraft {
   const settings = asObject(institute.settings) ?? {};
   const escalation = asObject(settings.reminder_escalation);
+  const glueDefaultProcess = optionalStringSetting(
+    settings,
+    "glue_default_process",
+    "glue_process_default",
+  );
+  const glueProcessProperty = optionalStringSetting(settings, "glue_process_property");
   return {
     name: institute.name,
     localNamePrefix: institute.local_name_prefix,
@@ -500,6 +768,14 @@ function draftFromInstitute(institute: Institute): SettingsDraft {
     ),
     receptionTests: receptionTestRows(settings.shipment_reception_tests),
     gluePotLife: glueRows(settings.glue_pot_life_minutes),
+    glueInputs: glueInputRows(settings.glue_weight_inputs),
+    glueRuleSets: glueRuleSetRows(settings.glue_targets),
+    glueDefaultProcess: glueDefaultProcess.value.trim().toUpperCase(),
+    glueProcessProperty: glueProcessProperty.value.trim().toUpperCase(),
+    hadGlueInputs: Object.prototype.hasOwnProperty.call(settings, "glue_weight_inputs"),
+    hadGlueTargets: Object.prototype.hasOwnProperty.call(settings, "glue_targets"),
+    hadGlueDefaultProcess: glueDefaultProcess.configured,
+    hadGlueProcessProperty: glueProcessProperty.configured,
     evidenceComponentTypes: stringList(
       settings.evidence_component_types,
       "admin-evidence",
@@ -524,6 +800,14 @@ function emptyDraft(): SettingsDraft {
     receptionChecklist: [],
     receptionTests: [],
     gluePotLife: [],
+    glueInputs: [],
+    glueRuleSets: [],
+    glueDefaultProcess: "",
+    glueProcessProperty: "",
+    hadGlueInputs: false,
+    hadGlueTargets: false,
+    hadGlueDefaultProcess: false,
+    hadGlueProcessProperty: false,
     evidenceComponentTypes: [],
     escalationAfterMinutes: "",
     escalationChannel: "",
@@ -541,6 +825,14 @@ function cloneDraft(draft: SettingsDraft): SettingsDraft {
     receptionChecklist: draft.receptionChecklist.map((row) => ({ ...row })),
     receptionTests: draft.receptionTests.map((row) => ({ ...row })),
     gluePotLife: draft.gluePotLife.map((row) => ({ ...row })),
+    glueInputs: draft.glueInputs.map((row) => ({
+      ...row,
+      subtract: row.subtract.map((item) => ({ ...item })),
+    })),
+    glueRuleSets: draft.glueRuleSets.map((row) => ({
+      ...row,
+      targets: row.targets.map((target) => ({ ...target })),
+    })),
     evidenceComponentTypes: draft.evidenceComponentTypes.map((row) => ({ ...row })),
   };
 }
@@ -550,6 +842,29 @@ function comparableStages(draft: SettingsDraft): { stage: string; tests: string[
     stage: row.name,
     tests: row.tests.map((test) => test.value),
   }));
+}
+
+/** Everything that decides how a glue result is judged, in one comparable
+ * shape — the dirty warning has to fire for the formula *and* the targets. */
+function comparableGlueJudgement(draft: SettingsDraft): unknown {
+  return {
+    defaultProcess: draft.glueDefaultProcess,
+    processProperty: draft.glueProcessProperty,
+    inputs: draft.glueInputs.map((row) => ({
+      stepKey: row.stepKey,
+      label: row.label,
+      testType: row.testType,
+      measured: row.measured,
+      subtract: row.subtract.map((item) => item.value),
+      resultCode: row.resultCode,
+    })),
+    ruleSets: draft.glueRuleSets.map((row) => ({
+      process: row.process,
+      label: row.label,
+      validFrom: row.validFrom,
+      targets: row.targets.map(({ key: _key, ...target }) => target),
+    })),
+  };
 }
 
 function comparableDraft(draft: SettingsDraft): string {
@@ -569,6 +884,7 @@ function comparableDraft(draft: SettingsDraft): string {
       glueType: row.glueType,
       minutes: row.minutes,
     })),
+    glueJudgement: comparableGlueJudgement(draft),
     evidenceComponentTypes: draft.evidenceComponentTypes.map((row) => row.value),
     escalationAfterMinutes: draft.escalationAfterMinutes,
     escalationChannel: draft.escalationChannel,
@@ -819,6 +1135,154 @@ function validateAndBuildUpdate(
     gluePotLifeMinutes[glueType] = minutes;
   }
 
+  // ---- Glue-weight judgement (plan §9.1/§9.2) -------------------------------
+  // The formula and the targets are profile data. Nothing here knows a module
+  // type, a glue process or a PDB result code: every one of them is typed by
+  // the admin and travels in the payload.
+  const glueWeightInputs = Object.create(null) as Record<string, GlueWeightInputMapping>;
+  const glueStepKeys = new Set<string>();
+  for (const row of draft.glueInputs) {
+    const stepKey = row.stepKey.trim();
+    if (stepKey === "" || !GLUE_STEP_KEY_PATTERN.test(stepKey)) {
+      return { error: labels.required(labels.glueStepKeyLabel) };
+    }
+    if (glueStepKeys.has(stepKey)) {
+      return { error: labels.duplicate(labels.glueStepKeyLabel, stepKey) };
+    }
+    glueStepKeys.add(stepKey);
+    const measured = row.measured.trim().toUpperCase();
+    if (!RESULT_CODE_PATTERN.test(measured)) {
+      return { error: labels.required(labels.glueMeasuredLabel) };
+    }
+    const subtract: string[] = [];
+    for (const item of row.subtract) {
+      const code = item.value.trim().toUpperCase();
+      if (!RESULT_CODE_PATTERN.test(code)) {
+        return { error: labels.required(labels.glueSubtractLabel) };
+      }
+      // Subtracting the measured weight from itself, or the same code twice,
+      // silently produces a glue weight nobody meant.
+      if (code === measured || subtract.includes(code)) {
+        return { error: labels.duplicate(labels.glueSubtractLabel, code) };
+      }
+      subtract.push(code);
+    }
+    // Optional: a step without a result code is still judged, it is just
+    // never part of the uploaded run.
+    const resultCode = row.resultCode.trim().toUpperCase();
+    if (resultCode !== "" && !RESULT_CODE_PATTERN.test(resultCode)) {
+      return { error: labels.required(labels.glueResultCodeLabel) };
+    }
+    // Writing the result into one of its own inputs makes the next derivation
+    // read its own output.
+    if (resultCode !== "" && (resultCode === measured || subtract.includes(resultCode))) {
+      return { error: labels.duplicate(labels.glueResultCodeLabel, resultCode) };
+    }
+    const stepLabel = row.label.trim();
+    if (stepLabel.length > 60) {
+      return { error: labels.tooLong(labels.glueStepLabelLabel, 60) };
+    }
+    const testType = row.testType.trim().toUpperCase();
+    if (testType !== "" && !TEST_TYPE_PATTERN.test(testType)) {
+      return { error: labels.required(labels.glueStepTestTypeLabel) };
+    }
+    glueWeightInputs[stepKey] = {
+      measured,
+      subtract,
+      ...(resultCode === "" ? {} : { result_code: resultCode }),
+      ...(stepLabel === "" ? {} : { label: stepLabel }),
+      ...(testType === "" ? {} : { test_type: testType }),
+    };
+  }
+
+  const glueTargets: GlueTargetRuleSet[] = [];
+  const ruleSetKeys = new Set<string>();
+  for (const row of draft.glueRuleSets) {
+    const process = row.process.trim().toUpperCase();
+    if (process === "" || !GLUE_PROCESS_PATTERN.test(process)) {
+      return { error: labels.required(labels.glueProcessLabel) };
+    }
+    const label = row.label.trim();
+    if (label.length > 120) {
+      return { error: labels.tooLong(labels.glueProcessDisplayLabel, 120) };
+    }
+    const validFromText = row.validFrom.trim();
+    let validFrom: string | null = null;
+    if (validFromText !== "") {
+      if (
+        !ISO_DATE_PATTERN.test(validFromText) ||
+        Number.isNaN(new Date(`${validFromText}T00:00:00Z`).getTime())
+      ) {
+        return { error: labels.glueDateRequired(labels.glueValidFromLabel) };
+      }
+      validFrom = validFromText;
+    }
+    // Two rule sets of the same process starting on the same day would make
+    // the "newest valid_from wins" selection arbitrary.
+    const ruleSetKey = `${process}\u0000${validFrom ?? ""}`;
+    if (ruleSetKeys.has(ruleSetKey)) {
+      return { error: labels.duplicate(labels.glueProcessLabel, process) };
+    }
+    ruleSetKeys.add(ruleSetKey);
+
+    const moduleTypes = Object.create(null) as GlueTargetRuleSet["module_types"];
+    const targetKeys = new Set<string>();
+    for (const target of row.targets) {
+      const moduleType = target.moduleType.trim().toUpperCase();
+      if (moduleType === "") {
+        return { error: labels.required(labels.glueModuleTypeLabel) };
+      }
+      if (moduleType.length > 32) {
+        return { error: labels.tooLong(labels.glueModuleTypeLabel, 32) };
+      }
+      const stepKey = target.stepKey.trim();
+      if (stepKey === "" || !GLUE_STEP_KEY_PATTERN.test(stepKey)) {
+        return { error: labels.required(labels.glueStepKeyLabel) };
+      }
+      const pair = `${moduleType}\u0000${stepKey}`;
+      if (targetKeys.has(pair)) {
+        return {
+          error: labels.duplicate(labels.glueModuleTypeLabel, `${moduleType} / ${stepKey}`),
+        };
+      }
+      targetKeys.add(pair);
+      const targetMg = Number(target.targetMg.trim());
+      if (
+        target.targetMg.trim() === "" ||
+        !Number.isFinite(targetMg) ||
+        targetMg < 0 ||
+        targetMg > MAX_GLUE_TARGET_MG
+      ) {
+        return { error: labels.glueNumberRequired(labels.glueTargetMgLabel, MAX_GLUE_TARGET_MG) };
+      }
+      const toleranceMg = Number(target.toleranceMg.trim());
+      if (
+        target.toleranceMg.trim() === "" ||
+        !Number.isFinite(toleranceMg) ||
+        toleranceMg < 0 ||
+        toleranceMg > MAX_GLUE_TARGET_MG
+      ) {
+        return {
+          error: labels.glueNumberRequired(labels.glueToleranceMgLabel, MAX_GLUE_TARGET_MG),
+        };
+      }
+      (moduleTypes[moduleType] ??= Object.create(null) as Record<
+        string,
+        { target_mg: number; tolerance_mg: number }
+      >)[stepKey] = { target_mg: targetMg, tolerance_mg: toleranceMg };
+    }
+    glueTargets.push({ process, label, valid_from: validFrom, module_types: moduleTypes });
+  }
+
+  const glueDefaultProcess = draft.glueDefaultProcess.trim().toUpperCase();
+  if (glueDefaultProcess !== "" && !GLUE_PROCESS_PATTERN.test(glueDefaultProcess)) {
+    return { error: labels.required(labels.glueDefaultProcessLabel) };
+  }
+  const glueProcessProperty = draft.glueProcessProperty.trim().toUpperCase();
+  if (glueProcessProperty !== "" && !RESULT_CODE_PATTERN.test(glueProcessProperty)) {
+    return { error: labels.required(labels.glueProcessPropertyLabel) };
+  }
+
   // One entry per listed stage — including empty ones. Writing the map in full
   // keeps the saved profile self-explanatory: no stage silently keeps a seed
   // requirement that the editor is no longer showing.
@@ -900,6 +1364,24 @@ function validateAndBuildUpdate(
         shipment_reception_checklist: receptionChecklist,
         shipment_reception_tests: receptionTests,
         glue_pot_life_minutes: gluePotLifeMinutes,
+        // Written only once the institute has something to say about the glue
+        // judgement, or already had the key: emitting anything on an unrelated
+        // save would change how every module's glue result is judged without
+        // anybody asking. When the admin empties a configured block the value
+        // is `null` — the API reads that as "restore the seed defaults" and
+        // rejects an empty object or list outright.
+        ...(draft.hadGlueInputs || draft.glueInputs.length > 0
+          ? { glue_weight_inputs: draft.glueInputs.length === 0 ? null : glueWeightInputs }
+          : {}),
+        ...(draft.hadGlueTargets || draft.glueRuleSets.length > 0
+          ? { glue_targets: draft.glueRuleSets.length === 0 ? null : glueTargets }
+          : {}),
+        ...(draft.hadGlueDefaultProcess || glueDefaultProcess !== ""
+          ? { glue_default_process: glueDefaultProcess === "" ? null : glueDefaultProcess }
+          : {}),
+        ...(draft.hadGlueProcessProperty || glueProcessProperty !== ""
+          ? { glue_process_property: glueProcessProperty === "" ? null : glueProcessProperty }
+          : {}),
         evidence_component_types: evidenceComponentTypes,
         reminder_escalation: reminderEscalation,
         stage_order: stageOrder,
@@ -1031,8 +1513,49 @@ export default function AdminSettingsScreen({
     return knownTestTypes.includes(value.trim().toUpperCase());
   }
 
+  function changeGlueInputs(updater: (rows: GlueInputRow[]) => GlueInputRow[]) {
+    changeDraft((current) => ({ ...current, glueInputs: updater(current.glueInputs) }));
+  }
+
+  function updateGlueInput(key: string, updater: (row: GlueInputRow) => GlueInputRow) {
+    changeGlueInputs((rows) => rows.map((row) => (row.key === key ? updater(row) : row)));
+  }
+
+  function changeGlueRuleSets(updater: (rows: GlueRuleSetRow[]) => GlueRuleSetRow[]) {
+    changeDraft((current) => ({ ...current, glueRuleSets: updater(current.glueRuleSets) }));
+  }
+
+  function updateGlueRuleSet(key: string, updater: (row: GlueRuleSetRow) => GlueRuleSetRow) {
+    changeGlueRuleSets((rows) => rows.map((row) => (row.key === key ? updater(row) : row)));
+  }
+
+  /** The step keys the formula defines; the targets below refer to them. */
+  const glueStepKeys = useMemo(
+    () =>
+      [
+        ...new Set(
+          draft.glueInputs.map((row) => row.stepKey.trim()).filter((stepKey) => stepKey !== ""),
+        ),
+      ].sort((left, right) => left.localeCompare(right)),
+    [draft.glueInputs],
+  );
+  const glueProcesses = useMemo(
+    () =>
+      [
+        ...new Set(
+          draft.glueRuleSets
+            .map((row) => row.process.trim().toUpperCase())
+            .filter((process) => process !== ""),
+        ),
+      ].sort((left, right) => left.localeCompare(right)),
+    [draft.glueRuleSets],
+  );
+
   const stageModelDirty =
     JSON.stringify(comparableStages(draft)) !== JSON.stringify(comparableStages(savedDraft));
+  const glueJudgementDirty =
+    JSON.stringify(comparableGlueJudgement(draft)) !==
+    JSON.stringify(comparableGlueJudgement(savedDraft));
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2118,6 +2641,604 @@ export default function AdminSettingsScreen({
                     >
                       {labels.remove}
                     </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* The glue-weight judgement (plan §9.1/§9.2): the formula as data
+              and the targets it is judged against. Together these are the
+              only reason a module's glue result can be called good or bad —
+              the PDB grades nothing (automaticGrading is false on every
+              module schema), so switching the production sheet off without
+              porting these tables loses the verdict outright. */}
+          <section
+            className="panel admin-settings-section"
+            aria-labelledby="admin-glue-inputs-title"
+          >
+            <div className="admin-settings-section-head">
+              <div>
+                <h2 className="section-title" id="admin-glue-inputs-title">
+                  {labels.glueInputsTitle}
+                </h2>
+                <p className="muted admin-settings-copy">{labels.glueInputsHint}</p>
+                <p className="muted admin-settings-copy">{labels.glueInputsImpact}</p>
+              </div>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy}
+                onClick={() =>
+                  changeGlueInputs((rows) => [
+                    ...rows,
+                    {
+                      key: rowId("admin-glue-input"),
+                      stepKey: "",
+                      label: "",
+                      testType: "",
+                      measured: "",
+                      subtract: [],
+                      resultCode: "",
+                    },
+                  ])
+                }
+              >
+                {labels.addGlueInput}
+              </button>
+            </div>
+            {glueJudgementDirty && (
+              <div className="info-banner admin-settings-message" role="status">
+                <span>{labels.glueJudgementDirtyWarning}</span>
+              </div>
+            )}
+            {draft.glueInputs.length === 0 ? (
+              <p className="state-note admin-settings-empty">{labels.glueInputsEmpty}</p>
+            ) : (
+              <div className="admin-settings-list">
+                {draft.glueInputs.map((row, index) => {
+                  const measured = row.measured.trim().toUpperCase();
+                  const resultCode = row.resultCode.trim().toUpperCase();
+                  const subtract = row.subtract
+                    .map((item) => item.value.trim().toUpperCase())
+                    .filter((code) => code !== "");
+                  return (
+                    <div
+                      className="admin-settings-row"
+                      role="group"
+                      aria-label={labels.glueInputRowLabel(index + 1)}
+                      key={row.key}
+                    >
+                      <div className="admin-settings-channel-row">
+                        <label className="admin-settings-field">
+                          <span className="field-label">{labels.glueStepKeyLabel}</span>
+                          <input
+                            className="text-input mono"
+                            value={row.stepKey}
+                            maxLength={32}
+                            placeholder={labels.glueStepKeyPlaceholder}
+                            disabled={busy}
+                            onChange={(event) =>
+                              updateGlueInput(row.key, (current) => ({
+                                ...current,
+                                stepKey: event.target.value,
+                              }))
+                            }
+                          />
+                        </label>
+                        <label className="admin-settings-field">
+                          <span className="field-label">{labels.glueStepLabelLabel}</span>
+                          <input
+                            className="text-input"
+                            value={row.label}
+                            maxLength={60}
+                            placeholder={labels.glueStepLabelPlaceholder}
+                            disabled={busy}
+                            onChange={(event) =>
+                              updateGlueInput(row.key, (current) => ({
+                                ...current,
+                                label: event.target.value,
+                              }))
+                            }
+                          />
+                        </label>
+                        <label className="admin-settings-field">
+                          <span className="field-label">{labels.glueStepTestTypeLabel}</span>
+                          <input
+                            className="text-input mono"
+                            list={TEST_TYPE_LIST_ID}
+                            value={row.testType}
+                            maxLength={64}
+                            placeholder={labels.glueStepTestTypePlaceholder}
+                            disabled={busy}
+                            onChange={(event) =>
+                              updateGlueInput(row.key, (current) => ({
+                                ...current,
+                                testType: event.target.value.toUpperCase(),
+                              }))
+                            }
+                          />
+                        </label>
+                        <label className="admin-settings-field">
+                          <span className="field-label">{labels.glueMeasuredLabel}</span>
+                          <input
+                            className="text-input mono"
+                            value={row.measured}
+                            maxLength={64}
+                            placeholder={labels.glueMeasuredPlaceholder}
+                            disabled={busy}
+                            onChange={(event) =>
+                              updateGlueInput(row.key, (current) => ({
+                                ...current,
+                                measured: event.target.value.toUpperCase(),
+                              }))
+                            }
+                          />
+                        </label>
+                        <label className="admin-settings-field">
+                          <span className="field-label">{labels.glueResultCodeLabel}</span>
+                          <input
+                            className="text-input mono"
+                            value={row.resultCode}
+                            maxLength={64}
+                            placeholder={labels.glueResultCodePlaceholder}
+                            disabled={busy}
+                            onChange={(event) =>
+                              updateGlueInput(row.key, (current) => ({
+                                ...current,
+                                resultCode: event.target.value.toUpperCase(),
+                              }))
+                            }
+                          />
+                        </label>
+                        <div className="admin-settings-row-actions">
+                          <button
+                            type="button"
+                            className="btn danger"
+                            disabled={busy}
+                            onClick={() =>
+                              changeGlueInputs((rows) =>
+                                rows.filter((candidate) => candidate.key !== row.key),
+                              )
+                            }
+                          >
+                            {labels.remove}
+                          </button>
+                        </div>
+                      </div>
+                      <span className="field-label">{labels.glueSubtractLabel}</span>
+                      {row.subtract.length === 0 ? (
+                        <p className="state-note admin-settings-empty">
+                          {labels.glueSubtractEmpty}
+                        </p>
+                      ) : (
+                        <div className="admin-settings-list">
+                          {row.subtract.map((item, itemIndex) => (
+                            <div className="admin-settings-simple-row" key={item.key}>
+                              <div className="admin-settings-field admin-settings-field-wide">
+                                <label className="field-label" htmlFor={item.key}>
+                                  {labels.glueSubtractItemLabel(itemIndex + 1)}
+                                </label>
+                                <input
+                                  id={item.key}
+                                  className="text-input mono"
+                                  value={item.value}
+                                  maxLength={64}
+                                  placeholder={labels.glueSubtractPlaceholder}
+                                  disabled={busy}
+                                  onChange={(event) =>
+                                    updateGlueInput(row.key, (current) => ({
+                                      ...current,
+                                      subtract: updateTextRow(
+                                        current.subtract,
+                                        item.key,
+                                        event.target.value.toUpperCase(),
+                                      ),
+                                    }))
+                                  }
+                                />
+                              </div>
+                              <button
+                                type="button"
+                                className="btn danger"
+                                disabled={busy}
+                                onClick={() =>
+                                  updateGlueInput(row.key, (current) => ({
+                                    ...current,
+                                    subtract: current.subtract.filter(
+                                      (candidate) => candidate.key !== item.key,
+                                    ),
+                                  }))
+                                }
+                              >
+                                {labels.removeGlueSubtract(itemIndex + 1)}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="admin-settings-row-actions">
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={busy}
+                          onClick={() =>
+                            updateGlueInput(row.key, (current) => ({
+                              ...current,
+                              subtract: [
+                                ...current.subtract,
+                                { key: rowId("admin-glue-subtract"), value: "" },
+                              ],
+                            }))
+                          }
+                        >
+                          {labels.addGlueSubtract}
+                        </button>
+                      </div>
+                      {/* The formula the admin just described, read back in
+                          one line — "which measurement minus which
+                          measurements", never raw JSON. */}
+                      <p className="mono admin-settings-formula">
+                        {measured === ""
+                          ? labels.glueFormulaIncomplete
+                          : labels.glueFormulaPreview(measured, subtract, resultCode)}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
+          <section
+            className="panel admin-settings-section"
+            aria-labelledby="admin-glue-targets-title"
+          >
+            <div className="admin-settings-section-head">
+              <div>
+                <h2 className="section-title" id="admin-glue-targets-title">
+                  {labels.glueTargetsTitle}
+                </h2>
+                <p className="muted admin-settings-copy">{labels.glueTargetsHint}</p>
+                <p className="muted admin-settings-copy">{labels.glueTargetsImpact}</p>
+              </div>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy}
+                onClick={() =>
+                  changeGlueRuleSets((rows) => [
+                    ...rows,
+                    {
+                      key: rowId("admin-glue-ruleset"),
+                      process: "",
+                      label: "",
+                      validFrom: "",
+                      targets: [],
+                    },
+                  ])
+                }
+              >
+                {labels.addGlueRuleSet}
+              </button>
+            </div>
+            <div
+              className="admin-settings-row"
+              role="group"
+              aria-label={labels.glueProcessResolutionTitle}
+            >
+              <span className="field-label">{labels.glueProcessResolutionTitle}</span>
+              <p className="muted admin-settings-copy">{labels.glueProcessResolutionHint}</p>
+              <div className="admin-settings-channel-row">
+                <label className="admin-settings-field">
+                  <span className="field-label">{labels.glueDefaultProcessLabel}</span>
+                  <select
+                    className="select-input mono"
+                    value={draft.glueDefaultProcess}
+                    disabled={busy}
+                    onChange={(event) =>
+                      changeDraft((current) => ({
+                        ...current,
+                        glueDefaultProcess: event.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">{labels.glueDefaultProcessUnset}</option>
+                    {glueProcesses.map((process) => (
+                      <option value={process} key={process}>
+                        {process}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="admin-settings-field">
+                  <span className="field-label">{labels.glueProcessPropertyLabel}</span>
+                  <input
+                    className="text-input mono"
+                    value={draft.glueProcessProperty}
+                    maxLength={64}
+                    placeholder={labels.glueProcessPropertyPlaceholder}
+                    disabled={busy}
+                    onChange={(event) =>
+                      changeDraft((current) => ({
+                        ...current,
+                        glueProcessProperty: event.target.value.toUpperCase(),
+                      }))
+                    }
+                  />
+                </label>
+              </div>
+            </div>
+            <datalist id={GLUE_STEP_LIST_ID}>
+              {glueStepKeys.map((stepKey) => (
+                <option value={stepKey} key={stepKey} />
+              ))}
+            </datalist>
+            {draft.glueRuleSets.length === 0 ? (
+              <p className="state-note admin-settings-empty">{labels.glueTargetsEmpty}</p>
+            ) : (
+              <div className="admin-settings-list">
+                {draft.glueRuleSets.map((row, index) => (
+                  <div
+                    className="admin-settings-row"
+                    role="group"
+                    aria-label={labels.glueRuleSetRowLabel(index + 1)}
+                    key={row.key}
+                  >
+                    <div className="admin-settings-channel-row">
+                      <label className="admin-settings-field">
+                        <span className="field-label">{labels.glueProcessLabel}</span>
+                        <input
+                          className="text-input mono"
+                          value={row.process}
+                          maxLength={32}
+                          placeholder={labels.glueProcessPlaceholder}
+                          disabled={busy}
+                          onChange={(event) =>
+                            updateGlueRuleSet(row.key, (current) => ({
+                              ...current,
+                              process: event.target.value.toUpperCase(),
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="admin-settings-field">
+                        <span className="field-label">{labels.glueProcessDisplayLabel}</span>
+                        <input
+                          className="text-input"
+                          value={row.label}
+                          maxLength={120}
+                          placeholder={labels.glueProcessDisplayPlaceholder}
+                          disabled={busy}
+                          onChange={(event) =>
+                            updateGlueRuleSet(row.key, (current) => ({
+                              ...current,
+                              label: event.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="admin-settings-field">
+                        <span className="field-label">{labels.glueValidFromLabel}</span>
+                        <input
+                          className="text-input mono"
+                          type="date"
+                          value={row.validFrom}
+                          disabled={busy}
+                          onChange={(event) =>
+                            updateGlueRuleSet(row.key, (current) => ({
+                              ...current,
+                              validFrom: event.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                      <div className="chip-row">
+                        {row.validFrom.trim() === "" && (
+                          <span className="chip neutral">{labels.glueValidFromAlways}</span>
+                        )}
+                      </div>
+                      <div className="admin-settings-row-actions">
+                        <button
+                          type="button"
+                          className="btn danger"
+                          disabled={busy}
+                          onClick={() =>
+                            changeGlueRuleSets((rows) =>
+                              rows.filter((candidate) => candidate.key !== row.key),
+                            )
+                          }
+                        >
+                          {labels.removeGlueRuleSet}
+                        </button>
+                      </div>
+                    </div>
+                    <span className="field-label">{labels.glueTargetRowsLabel}</span>
+                    {row.targets.length === 0 ? (
+                      <p className="state-note admin-settings-empty">
+                        {labels.glueTargetRowsEmpty}
+                      </p>
+                    ) : (
+                      <div className="admin-settings-list">
+                        {row.targets.map((target, targetIndex) => {
+                          const stepKey = target.stepKey.trim();
+                          const unknownStep =
+                            stepKey !== "" && !glueStepKeys.includes(stepKey);
+                          return (
+                            <div
+                              className="admin-settings-row admin-settings-glue-target-row"
+                              role="group"
+                              aria-label={labels.glueTargetRowLabel(targetIndex + 1)}
+                              key={target.key}
+                            >
+                              <label className="admin-settings-field">
+                                <span className="field-label">{labels.glueModuleTypeLabel}</span>
+                                <input
+                                  className="text-input mono"
+                                  value={target.moduleType}
+                                  maxLength={32}
+                                  placeholder={labels.glueModuleTypePlaceholder}
+                                  disabled={busy}
+                                  onChange={(event) =>
+                                    updateGlueRuleSet(row.key, (current) => ({
+                                      ...current,
+                                      targets: current.targets.map((candidate) =>
+                                        candidate.key === target.key
+                                          ? {
+                                              ...candidate,
+                                              moduleType: event.target.value.toUpperCase(),
+                                            }
+                                          : candidate,
+                                      ),
+                                    }))
+                                  }
+                                />
+                              </label>
+                              <div className="admin-settings-field">
+                                <label className="field-label" htmlFor={target.key}>
+                                  {labels.glueStepKeyLabel}
+                                </label>
+                                <input
+                                  id={target.key}
+                                  className="text-input mono"
+                                  list={GLUE_STEP_LIST_ID}
+                                  value={target.stepKey}
+                                  maxLength={32}
+                                  placeholder={labels.glueStepKeyPlaceholder}
+                                  disabled={busy}
+                                  aria-describedby={
+                                    unknownStep ? `${target.key}-unknown-step` : undefined
+                                  }
+                                  onChange={(event) =>
+                                    updateGlueRuleSet(row.key, (current) => ({
+                                      ...current,
+                                      targets: current.targets.map((candidate) =>
+                                        candidate.key === target.key
+                                          ? { ...candidate, stepKey: event.target.value }
+                                          : candidate,
+                                      ),
+                                    }))
+                                  }
+                                />
+                                {unknownStep && (
+                                  <span
+                                    className="muted admin-settings-secret-hint"
+                                    id={`${target.key}-unknown-step`}
+                                  >
+                                    <span className="chip amber">{labels.glueStepUnknown}</span>{" "}
+                                    {labels.glueStepUnknownHint}
+                                  </span>
+                                )}
+                              </div>
+                              {/* The unit sits beside the control rather than
+                                  inside the label, so the accessible name
+                                  stays "Target" and not "Target mg". */}
+                              <div className="admin-settings-field">
+                                <label
+                                  className="field-label"
+                                  htmlFor={`${target.key}-target`}
+                                >
+                                  {labels.glueTargetMgLabel}
+                                </label>
+                                <span className="admin-settings-input-unit">
+                                  <input
+                                    id={`${target.key}-target`}
+                                    className="short-input mono"
+                                    type="number"
+                                    min={0}
+                                    max={MAX_GLUE_TARGET_MG}
+                                    step="any"
+                                    value={target.targetMg}
+                                    disabled={busy}
+                                    onChange={(event) =>
+                                      updateGlueRuleSet(row.key, (current) => ({
+                                        ...current,
+                                        targets: current.targets.map((candidate) =>
+                                          candidate.key === target.key
+                                            ? { ...candidate, targetMg: event.target.value }
+                                            : candidate,
+                                        ),
+                                      }))
+                                    }
+                                  />
+                                  <span className="muted">{labels.milligramsUnit}</span>
+                                </span>
+                              </div>
+                              <div className="admin-settings-field">
+                                <label
+                                  className="field-label"
+                                  htmlFor={`${target.key}-tolerance`}
+                                >
+                                  {labels.glueToleranceMgLabel}
+                                </label>
+                                <span className="admin-settings-input-unit">
+                                  <input
+                                    id={`${target.key}-tolerance`}
+                                    className="short-input mono"
+                                    type="number"
+                                    min={0}
+                                    max={MAX_GLUE_TARGET_MG}
+                                    step="any"
+                                    value={target.toleranceMg}
+                                    disabled={busy}
+                                    onChange={(event) =>
+                                      updateGlueRuleSet(row.key, (current) => ({
+                                        ...current,
+                                        targets: current.targets.map((candidate) =>
+                                          candidate.key === target.key
+                                            ? { ...candidate, toleranceMg: event.target.value }
+                                            : candidate,
+                                        ),
+                                      }))
+                                    }
+                                  />
+                                  <span className="muted">{labels.milligramsUnit}</span>
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                className="btn danger"
+                                disabled={busy}
+                                onClick={() =>
+                                  updateGlueRuleSet(row.key, (current) => ({
+                                    ...current,
+                                    targets: current.targets.filter(
+                                      (candidate) => candidate.key !== target.key,
+                                    ),
+                                  }))
+                                }
+                              >
+                                {labels.removeGlueTargetRow(targetIndex + 1)}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <div className="admin-settings-row-actions">
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy}
+                        onClick={() =>
+                          updateGlueRuleSet(row.key, (current) => ({
+                            ...current,
+                            targets: [
+                              ...current.targets,
+                              {
+                                key: rowId("admin-glue-target"),
+                                moduleType: "",
+                                stepKey: "",
+                                targetMg: "",
+                                toleranceMg: "",
+                              },
+                            ],
+                          }))
+                        }
+                      >
+                        {labels.addGlueTargetRow}
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>

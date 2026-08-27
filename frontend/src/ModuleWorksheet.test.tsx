@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +10,7 @@ import type {
   OutboxAction,
   TestRunDetail,
   TestTypeSchema,
+  WorksheetDerivedStep,
 } from "./api";
 import {
   ApiError,
@@ -109,6 +110,7 @@ const mirroredRun: TestRunDetail = {
   external_ref: "run-glue-1",
   measured_at: "2026-08-20T10:00:00Z",
   run_number: "3",
+  run_state: null,
   results: { GW1: 0.1664, GW2: 0.17 },
   result_meta: {},
   properties: { OPERATOR: "Anna Abel" },
@@ -226,6 +228,7 @@ const metrologyRunWithMap: TestRunDetail = {
   external_ref: "run-metrology-1",
   measured_at: "2026-08-20T10:00:00Z",
   run_number: "1",
+  run_state: null,
   results: {
     HYBRID_GLUE_THICKNESS: { ABC_R5H1_0: 12.3, ABC_R5H1_1: 11.9 },
     SCALAR_X: 5,
@@ -443,6 +446,26 @@ describe("ModuleWorksheet", () => {
     expect(await screen.findByTestId("run-curves")).toHaveTextContent("GLUE_WEIGHT");
     expect(screen.getByTestId("run-scalars")).toHaveTextContent("0.1664");
     expect(screen.getByTestId("run-conditions")).toBeInTheDocument();
+  });
+
+  it("labels only the terminal deleted state as withdrawn instead of presenting its old verdict as valid", async () => {
+    const user = userEvent.setup();
+    vi.mocked(getComponentTests).mockResolvedValue([
+      { ...mirroredRun, external_ref: "run-withdrawn", run_state: "deleted" },
+      { ...mirroredRun, external_ref: "run-requested", run_state: "requestedToDelete" },
+    ]);
+    const { container } = renderWorksheet();
+
+    await user.click(screen.getByRole("button", { name: "Show GLUE_WEIGHT runs" }));
+
+    expect(await screen.findByText(t.worksheet.statusWithdrawn)).toHaveAttribute(
+      "title",
+      t.worksheet.withdrawnHint,
+    );
+    // A pending deletion request is deliberately still a live run.
+    const runList = container.querySelector(".run-list");
+    expect(runList).not.toBeNull();
+    expect(within(runList as HTMLElement).getByText(t.worksheet.statusPassed)).toBeInTheDocument();
   });
 
   it("stages an in-row edit through ingest -> dry-run -> propose-outbox, prefilled from the latest run", async () => {
@@ -702,5 +725,231 @@ describe("ModuleWorksheet", () => {
       renderWorksheet();
       expect(screen.queryByText(t.worksheet.childrenTitle)).not.toBeInTheDocument();
     });
+  });
+});
+
+// ---- The server-derived glue judgement (plan §9.3) --------------------------
+//
+// On the owner's production sheet a row of scale readings becomes a glue
+// weight, a target, a tolerance and a verdict. That judgement exists nowhere
+// in itkFlow today, and nowhere in the PDB either (automatic grading is off on
+// every module schema). These tests pin two things: that the verdict is
+// visible without opening the row, and that every number on screen came out of
+// the payload — the browser must never re-derive any of it.
+
+function derivedStep(overrides: Partial<WorksheetDerivedStep> = {}): WorksheetDerivedStep {
+  return {
+    key: "hybrids",
+    label: "Hybrids",
+    measured_mg: 151.2,
+    target_mg: 151,
+    tolerance_mg: 22,
+    verdict: "ok",
+    reason: null,
+    inputs: [
+      { code: "GW_MODULE_H1H2", name: "Module after hybrid glueing", value: 9.3819 },
+      { code: "GW_SENSOR", name: "Sensor with tab", value: 7.0162 },
+    ],
+    ...overrides,
+  };
+}
+
+function derivedWorksheet(steps: WorksheetDerivedStep[]): ComponentPreviewWorksheet {
+  return {
+    groups: [
+      {
+        stage: "GLUED",
+        reached: true,
+        rows: [
+          {
+            test_type: "GLUE_WEIGHT",
+            status: "passed",
+            latest: {
+              external_ref: "run-glue-1",
+              measured_at: "2026-08-20T10:00:00Z",
+              run_number: "3",
+              passed: true,
+              scalars: [{ code: "GW_SENSOR", name: "Sensor with tab", value: 7.0162 }],
+              arrays: [],
+              attachment_count: 0,
+            },
+            staged: [],
+            run_count: 1,
+            derived: {
+              kind: "glue_weight",
+              process: "TRUEBLUE",
+              process_source: "profile_default",
+              steps,
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+describe("ModuleWorksheet derived glue judgement", () => {
+  beforeEach(() => {
+    vi.mocked(getComponentTests).mockResolvedValue([mirroredRun]);
+    vi.mocked(postIngestFile).mockResolvedValue(ingestFile);
+    vi.mocked(getIngestPreview).mockResolvedValue(dryRun);
+    vi.mocked(postIngestOutboxProposal).mockResolvedValue(action);
+  });
+
+  it("shows the verdict as a word in the collapsed row, with the measured-versus-target figure", () => {
+    renderWorksheet({ worksheet: derivedWorksheet([derivedStep()]) });
+
+    // No row expanded, no edit strip open: the judgement is readable at a glance.
+    expect(screen.queryByRole("button", { name: "Hide GLUE_WEIGHT runs" })).not.toBeInTheDocument();
+    expect(screen.getByText(t.worksheet.verdictOk)).toBeInTheDocument();
+    expect(screen.getByText("Hybrids")).toBeInTheDocument();
+    expect(screen.getByText(t.worksheet.derivedFigure("151.2", "151", "22"))).toBeInTheDocument();
+    // The requirement status is a different statement and keeps its own chip.
+    expect(screen.getByText(t.worksheet.statusPassed)).toBeInTheDocument();
+  });
+
+  it("names each bad verdict, and never resolves the tolerance into a band", () => {
+    const { unmount } = renderWorksheet({
+      worksheet: derivedWorksheet([derivedStep({ measured_mg: 112, verdict: "too_little" })]),
+    });
+    expect(screen.getByText(t.worksheet.verdictTooLittle)).toHaveClass("chip", "red");
+    // `151 - 22 = 129` on screen would mean the browser had done arithmetic.
+    expect(screen.queryByText(/129/u)).not.toBeInTheDocument();
+    unmount();
+
+    renderWorksheet({
+      worksheet: derivedWorksheet([derivedStep({ measured_mg: 200, verdict: "too_much" })]),
+    });
+    expect(screen.getByText(t.worksheet.verdictTooMuch)).toHaveClass("chip", "red");
+    expect(screen.queryByText(/173/u)).not.toBeInTheDocument();
+  });
+
+  it("puts the reason in words when there is no verdict, never a chip that could read as fine", () => {
+    const reasons: Array<[string | null, string]> = [
+      ["missing_inputs", t.worksheet.verdictMissingInputs],
+      ["no_target", t.worksheet.verdictNoTarget],
+      ["no_run", t.worksheet.verdictNoRun],
+      [null, t.worksheet.verdictUnknown],
+      ["profile_conflict", t.worksheet.verdictUnknownReason("profile_conflict")],
+    ];
+    for (const [reason, expected] of reasons) {
+      const { unmount } = renderWorksheet({
+        worksheet: derivedWorksheet([
+          derivedStep({ measured_mg: null, verdict: "unknown", reason }),
+        ]),
+      });
+      const chip = screen.getByText(expected);
+      // Amber, never green: on the sheet this replaces, 8 of 13 powerboard
+      // verdicts are arithmetic on blank cells and look exactly like results.
+      expect(chip).toHaveClass("chip", "amber");
+      expect(chip).not.toHaveClass("green");
+      // The target still shows; the missing measurement reads as an em dash.
+      expect(
+        screen.getByText(t.worksheet.derivedFigure(t.common.none, "151", "22")),
+      ).toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("keeps two steps as two verdicts on one row instead of collapsing them", () => {
+    renderWorksheet({
+      worksheet: derivedWorksheet([
+        derivedStep(),
+        derivedStep({
+          key: "powerboard",
+          label: "Powerboard",
+          measured_mg: 96,
+          target_mg: 70,
+          tolerance_mg: 11,
+          verdict: "too_much",
+        }),
+      ]),
+    });
+
+    expect(screen.getAllByRole("row")).toHaveLength(2); // header + the one test row
+    expect(screen.getByText("Hybrids")).toBeInTheDocument();
+    expect(screen.getByText("Powerboard")).toBeInTheDocument();
+    expect(screen.getByText(t.worksheet.verdictOk)).toBeInTheDocument();
+    expect(screen.getByText(t.worksheet.verdictTooMuch)).toBeInTheDocument();
+    expect(screen.getByText(t.worksheet.derivedFigure("151.2", "151", "22"))).toBeInTheDocument();
+    expect(screen.getByText(t.worksheet.derivedFigure("96", "70", "11"))).toBeInTheDocument();
+  });
+
+  it("renders only what the payload says: a verdict that contradicts the numbers still shows", () => {
+    // The point of the assertion. If any of this were computed in the browser,
+    // 9999 against 42 ± 1 could not possibly render as "OK" — the display
+    // follows the server, the only place the formula lives.
+    const { unmount } = renderWorksheet({ worksheet: derivedWorksheet([derivedStep()]) });
+    expect(screen.getByText(t.worksheet.derivedFigure("151.2", "151", "22"))).toBeInTheDocument();
+    unmount();
+
+    renderWorksheet({
+      worksheet: derivedWorksheet([
+        derivedStep({ measured_mg: 9999, target_mg: 42, tolerance_mg: 1, verdict: "ok" }),
+      ]),
+    });
+    expect(screen.getByText(t.worksheet.derivedFigure("9999", "42", "1"))).toBeInTheDocument();
+    expect(screen.getByText(t.worksheet.verdictOk)).toBeInTheDocument();
+    expect(screen.queryByText(t.worksheet.verdictTooMuch)).not.toBeInTheDocument();
+  });
+
+  it("leaves a row without a derivation exactly as it was", () => {
+    renderWorksheet();
+
+    expect(screen.getByText("Glue weight H1")).toBeInTheDocument();
+    expect(screen.getByText("0.1664")).toBeInTheDocument();
+    expect(screen.queryByText(t.worksheet.verdictOk)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.worksheet.verdictNoRun)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.worksheet.derivedTitle)).not.toBeInTheDocument();
+  });
+
+  it("shows the last run's derivation read-only in the edit strip, and says where it came from", async () => {
+    const user = userEvent.setup();
+    renderWorksheet({ worksheet: derivedWorksheet([derivedStep()]) });
+
+    await user.click(screen.getByRole("button", { name: "Record GLUE_WEIGHT" }));
+
+    expect(await screen.findByText(t.worksheet.derivedTitle)).toBeInTheDocument();
+    expect(screen.getByText(t.worksheet.derivedFromLatestRun)).toBeInTheDocument();
+    expect(screen.getByText(t.worksheet.derivedMg("151.2"))).toBeInTheDocument();
+    expect(screen.getByText(t.worksheet.derivedMg("151"))).toBeInTheDocument();
+    expect(screen.getByText(t.worksheet.derivedToleranceMg("22"))).toBeInTheDocument();
+    // The readings the server actually used, so the arithmetic is retraceable.
+    expect(screen.getByText("Module after hybrid glueing")).toBeInTheDocument();
+    expect(screen.getByText("9.3819")).toBeInTheDocument();
+    // Read-only: the derived figures are never editable form controls.
+    expect(screen.queryByLabelText(t.worksheet.derivedWeightLabel)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(t.worksheet.derivedTargetLabel)).not.toBeInTheDocument();
+  });
+
+  it("replaces it with the dry-run's own derivation once the server has judged the entered values", async () => {
+    const user = userEvent.setup();
+    vi.mocked(getIngestPreview).mockResolvedValue({
+      ...dryRun,
+      upload_ready: false,
+      issues: ["Component stage mismatch"],
+      derived: {
+        kind: "glue_weight",
+        process: "TRUEBLUE",
+        process_source: "run",
+        steps: [derivedStep({ measured_mg: 118, verdict: "too_little" })],
+      },
+    });
+    renderWorksheet({ worksheet: derivedWorksheet([derivedStep()]) });
+
+    await user.click(screen.getByRole("button", { name: "Record GLUE_WEIGHT" }));
+    await screen.findByLabelText(/GW1/);
+    fireEvent.change(screen.getByLabelText(/Run number/), { target: { value: "7" } });
+    fireEvent.change(screen.getByLabelText(/Measurement date/), {
+      target: { value: "2026-08-26T10:00" },
+    });
+    await user.click(screen.getByRole("button", { name: "Stage test result" }));
+
+    expect(await screen.findByText(t.worksheet.derivedFromPreview)).toBeInTheDocument();
+    expect(screen.getByText(t.worksheet.derivedMg("118"))).toBeInTheDocument();
+    expect(screen.getByText(t.worksheet.verdictTooLittle)).toBeInTheDocument();
+    // The stale judgement from the last run is gone, and so is its label.
+    expect(screen.queryByText(t.worksheet.derivedFromLatestRun)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.worksheet.derivedMg("151.2"))).not.toBeInTheDocument();
   });
 });

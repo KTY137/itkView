@@ -37,6 +37,12 @@ from sqlalchemy.orm import Session
 from app.assembly import ASSEMBLY_ACTION_KIND, evaluate_assembly
 from app.attachment_store import known_attachments
 from app.domain.stages import StageModel, stage_model_from_settings
+from app.glue_service import (
+    GlueDerivationModel,
+    derivation_payload,
+    derive_evidence,
+    glue_model_from_settings,
+)
 from app.models import (
     Component,
     IngestFile,
@@ -396,9 +402,19 @@ def _worksheet_row(
     staged_by_test: Mapping[str, list[dict[str, Any]]],
     evidence_by_type: Mapping[str, list[TestRunEvidence]],
     attachment_counts: Mapping[str | None, int],
+    glue_model: GlueDerivationModel,
+    type_code: str | None,
 ) -> dict[str, Any]:
+    """One worksheet row, plus whatever the institute profile derives from it.
+
+    The derivation runs on exactly the run shown as ``latest`` — the same
+    winner, never a second selection that could disagree with it — and is
+    emitted even when there is none, so the row can still state the target the
+    next measurement will be judged against.
+    """
     live, withdrawn = _partition_withdrawn(evidence_by_type.get(test_type, ()))
-    latest = _worksheet_latest_run(max(live, key=_run_rank), attachment_counts) if live else None
+    winner = max(live, key=_run_rank) if live else None
+    latest = _worksheet_latest_run(winner, attachment_counts) if winner is not None else None
     return {
         "test_type": test_type,
         "status": _status_for(test_type, results, pending),
@@ -406,6 +422,14 @@ def _worksheet_row(
         "staged": list(staged_by_test.get(test_type, ())),
         "run_count": len(live),
         "withdrawn_count": withdrawn,
+        "derived": derivation_payload(
+            derive_evidence(
+                glue_model,
+                test_type=test_type,
+                type_code=type_code,
+                evidence=winner,
+            )
+        ),
     }
 
 
@@ -418,6 +442,7 @@ def _build_worksheet(
     staged_by_test: Mapping[str, list[dict[str, Any]]],
     evidence_rows: list[TestRunEvidence],
     attachment_counts: Mapping[str | None, int],
+    glue_model: GlueDerivationModel,
 ) -> dict[str, Any]:
     """One group per stage in the institute's model (incl. future stages).
 
@@ -443,6 +468,8 @@ def _build_worksheet(
             staged_by_test=staged_by_test,
             evidence_by_type=evidence_by_type,
             attachment_counts=attachment_counts,
+            glue_model=glue_model,
+            type_code=component.type_code,
         )
 
     groups: list[dict[str, Any]] = []
@@ -470,11 +497,16 @@ def _build_worksheet(
         )
 
     # Union of everything that could show a row: mirrored evidence, open staged
-    # uploads and confirmed-but-not-yet-mirrored results (`results` also holds
-    # confirmed local uploads, see `satisfied_test_results`) — not evidence
-    # alone, or a staged/confirmed non-required test type has nowhere to
-    # render and the operator's work becomes invisible.
-    additional_test_types = set(evidence_by_type) | set(staged_by_test) | set(results)
+    # uploads, confirmed-but-not-yet-mirrored results (`results` also holds
+    # confirmed local uploads, see `satisfied_test_results`) and configured
+    # glue derivations. The last set matters before the first run exists: its
+    # row must already state the target and the explicit `no_run` verdict.
+    additional_test_types = (
+        set(evidence_by_type)
+        | set(staged_by_test)
+        | set(results)
+        | set(glue_model.test_types)
+    )
     additional = sorted(additional_test_types - required_test_types)
     if additional:
         groups.append(
@@ -626,6 +658,10 @@ def build_component_preview(
     # worksheet must reason about the exact same stage model, structurally,
     # not merely by chance re-parsing identical settings three times.
     model = stage_model_from_settings(profile_settings)
+    # Same reason the stage model is built once: every row must judge against
+    # the identical glue rules structurally, not by re-parsing the same profile
+    # per row. The server derives, the page renders — the formula exists once.
+    glue_model = glue_model_from_settings(profile_settings)
     results = satisfied_test_results(session, component.sn)
 
     actions = _open_actions_for(session, component.sn)
@@ -723,6 +759,7 @@ def build_component_preview(
         staged_by_test=staged_by_test,
         evidence_rows=evidence_rows,
         attachment_counts=attachment_counts,
+        glue_model=glue_model,
     )
     children = list(
         session.scalars(

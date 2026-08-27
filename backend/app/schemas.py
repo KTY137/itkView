@@ -257,6 +257,58 @@ class WorksheetStagedRefOut(BaseModel):
     status: str
 
 
+class DerivedInputOut(BaseModel):
+    """One raw reading a derived value was computed from.
+
+    ``value`` is the number exactly as the PDB holds it — grams for every
+    ``GW_`` code — so the operator can check the arithmetic against the scale.
+    ``None`` means the reading is absent, which is why the step could not be
+    judged; it is never shown as a zero.
+    """
+
+    code: str
+    name: str
+    value: float | None
+
+
+class DerivedStepOut(BaseModel):
+    """One derived quantity with the institute's verdict on it.
+
+    Milligrams throughout: the PDB's grams are converted once, server-side, in
+    ``app.glue_service``. ``verdict="unknown"`` always carries a ``reason`` —
+    no target configured, an input missing, or nothing measured yet. The
+    alternative, a blank cell that looks like a result, is exactly how 8 of 13
+    powerboard verdicts on the sheet this replaces became arithmetic on empty
+    inputs.
+    """
+
+    key: str
+    label: str
+    measured_mg: float | None
+    target_mg: float | None
+    tolerance_mg: float | None
+    verdict: Literal["ok", "too_little", "too_much", "unknown"]
+    reason: Literal["no_target", "missing_inputs", "no_run"] | None
+    result_code: str | None
+    inputs: list[DerivedInputOut]
+
+
+class DerivedValuesOut(BaseModel):
+    """Server-computed values for one row, present only where a profile derives them.
+
+    The PDB does not judge glue weights — ``automaticGrading`` is false on every
+    module schema with all thresholds null — so target, tolerance and verdict
+    come from the institute profile and are computed here, never in the browser.
+    ``process_source`` says whether the run named its own glue process, the
+    profile's default was applied, or neither could be established.
+    """
+
+    kind: Literal["glue_weight"]
+    process: str | None
+    process_source: Literal["run", "profile_default", "unknown"]
+    steps: list[DerivedStepOut]
+
+
 class WorksheetRowOut(BaseModel):
     """``run_count`` counts only runs the PDB still stands behind.
 
@@ -265,6 +317,11 @@ class WorksheetRowOut(BaseModel):
     requirement ``status`` — a retracted measurement is not evidence — but they
     are counted rather than erased, because silently hiding data the PDB still
     holds is its own kind of false statement.
+
+    ``derived`` is set only where the institute profile defines a derivation for
+    this test type. It is present even on a row with no run at all — the targets
+    are worth showing to whoever is about to perform the measurement, and every
+    step then states ``reason="no_run"`` instead of leaving a blank.
     """
 
     test_type: str
@@ -273,6 +330,7 @@ class WorksheetRowOut(BaseModel):
     staged: list[WorksheetStagedRefOut]
     run_count: int
     withdrawn_count: int
+    derived: DerivedValuesOut | None = None
 
 
 class WorksheetGroupOut(BaseModel):
@@ -453,6 +511,10 @@ class IngestPreviewOut(BaseModel):
     results: list[ResultSummary]
     issues: list[str]
     warnings: list[str]
+    # Values the server computes from the payload before anything is staged, so
+    # the operator sees the verdict while the file can still be rejected. Null
+    # when the resolved institute derives nothing for this test type.
+    derived: DerivedValuesOut | None = None
 
 
 class TestTypeSchemaOut(BaseModel):

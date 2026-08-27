@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Institute } from "../api";
@@ -100,6 +100,67 @@ const labels: AdminSettingsLabels = {
   glueTypePlaceholder: "EPOXY",
   potLifeLabel: "Pot life",
   minutesUnit: "minutes",
+  glueInputsTitle: "Glue weight formula",
+  glueInputsHint: "Which weighing feeds each glue step.",
+  glueInputsImpact: "Result codes must match the schema.",
+  glueInputsEmpty: "No glue formula configured.",
+  addGlueInput: "Add glue step",
+  glueInputRowLabel: (index) => `Glue step ${index}`,
+  glueStepKeyLabel: "Step key",
+  glueStepKeyPlaceholder: "hybrids",
+  glueStepLabelLabel: "Step name",
+  glueStepLabelPlaceholder: "Hybrids",
+  glueStepTestTypeLabel: "Test type",
+  glueStepTestTypePlaceholder: "GLUE_WEIGHT",
+  glueMeasuredLabel: "Measured weight",
+  glueMeasuredPlaceholder: "GW_MODULE_H1H2",
+  glueSubtractLabel: "Minus these weights",
+  glueSubtractEmpty: "Nothing is subtracted.",
+  addGlueSubtract: "Add subtracted weight",
+  glueSubtractItemLabel: (index) => `Subtracted weight ${index}`,
+  glueSubtractPlaceholder: "GW_SENSOR",
+  removeGlueSubtract: (index) => `Remove subtracted weight ${index}`,
+  glueResultCodeLabel: "Store result as",
+  glueResultCodePlaceholder: "GW_GLUE_H1H2",
+  glueFormulaPreview: (measured, subtract, result) => {
+    const expression = subtract.length === 0 ? measured : `${measured} − ${subtract.join(" − ")}`;
+    return result === "" ? expression : `${result} = ${expression}`;
+  },
+  glueFormulaIncomplete: "Formula incomplete.",
+  glueTargetsTitle: "Glue targets",
+  glueTargetsHint: "Target and tolerance per process, module type and step.",
+  glueTargetsImpact: "Saving re-judges past runs.",
+  glueTargetsEmpty: "No glue targets configured.",
+  glueJudgementDirtyWarning: "Unsaved change to the glue judgement.",
+  glueProcessResolutionTitle: "Run process selection",
+  glueProcessResolutionHint: "Choose how runs identify their process.",
+  glueDefaultProcessLabel: "Default glue process",
+  glueDefaultProcessUnset: "No default process",
+  glueProcessPropertyLabel: "Run process property",
+  glueProcessPropertyPlaceholder: "GW_PROCESS",
+  addGlueRuleSet: "Add rule set",
+  glueRuleSetRowLabel: (index) => `Glue rule set ${index}`,
+  glueProcessLabel: "Glue process",
+  glueProcessPlaceholder: "TRUEBLUE",
+  glueProcessDisplayLabel: "Display name",
+  glueProcessDisplayPlaceholder: "Shown to operators",
+  glueValidFromLabel: "Valid from",
+  glueValidFromAlways: "Always valid",
+  removeGlueRuleSet: "Remove rule set",
+  glueTargetRowsLabel: "Targets",
+  glueTargetRowsEmpty: "No target in this rule set.",
+  addGlueTargetRow: "Add target",
+  glueTargetRowLabel: (index) => `Glue target ${index}`,
+  glueModuleTypeLabel: "Module type",
+  glueModuleTypePlaceholder: "R5M1",
+  glueTargetMgLabel: "Target",
+  glueToleranceMgLabel: "Tolerance",
+  milligramsUnit: "mg",
+  removeGlueTargetRow: (index) => `Remove glue target ${index}`,
+  glueStepUnknown: "Not in the formula",
+  glueStepUnknownHint: "Check the spelling.",
+  glueNumberRequired: (field, max) => `${field} must be 0-${max} mg.`,
+  glueDateRequired: (field) => `${field} must be a date.`,
   evidenceTitle: "Evidence mirror",
   evidenceHint: "Mirrored component types.",
   evidenceEmpty: "No evidence types.",
@@ -650,5 +711,360 @@ describe("AdminSettingsScreen reception test mapping", () => {
       MODULE: ["RECEPTION_IV", "RECEPTION_VISUAL"],
     });
     expect(screen.queryByRole("textbox", { name: /json/i })).not.toBeInTheDocument();
+  });
+});
+// ---- Glue-weight judgement editor (plan §9.1/§9.2) --------------------------
+//
+// Target, tolerance and verdict can only come from the institute profile: the
+// PDB grades nothing (automatic grading is off on every module schema, every
+// threshold null). These tests pin the saved shape, because that shape is the
+// contract the backend adapter reads.
+
+function glueGroup(index: number): HTMLElement {
+  return screen.getByRole("group", { name: `Glue step ${index}` });
+}
+
+function ruleSetGroup(index: number): HTMLElement {
+  return screen.getByRole("group", { name: `Glue rule set ${index}` });
+}
+
+function targetGroup(ruleSetIndex: number, index: number): HTMLElement {
+  return within(ruleSetGroup(ruleSetIndex)).getByRole("group", {
+    name: `Glue target ${index}`,
+  });
+}
+
+const configuredGlue = {
+  glue_weight_inputs: {
+    hybrids: {
+      label: "Hybrids",
+      test_type: "GLUE_WEIGHT",
+      measured: "GW_MODULE_H1H2",
+      subtract: ["GW_SENSOR", "GW_HYBRID1", "GW_HYBRID2"],
+      result_code: "GW_GLUE_H1H2",
+    },
+  },
+  glue_targets: [
+    {
+      process: "TRUEBLUE",
+      label: "True Blue / False Blue",
+      valid_from: null,
+      module_types: { R5M1: { hybrids: { target_mg: 151, tolerance_mg: 22 } } },
+    },
+  ],
+};
+
+describe("AdminSettingsScreen glue judgement", () => {
+  it("reads the stored formula back as words, not as JSON", async () => {
+    renderStages([stageInstitute(configuredGlue)], vi.fn().mockResolvedValue(undefined));
+
+    const step = await screen.findByRole("group", { name: "Glue step 1" });
+    expect(within(step).getByLabelText("Step key")).toHaveValue("hybrids");
+    expect(within(step).getByLabelText("Step name")).toHaveValue("Hybrids");
+    expect(within(step).getByLabelText("Test type")).toHaveValue("GLUE_WEIGHT");
+    expect(within(step).getByLabelText("Measured weight")).toHaveValue("GW_MODULE_H1H2");
+    expect(within(step).getByLabelText("Subtracted weight 1")).toHaveValue("GW_SENSOR");
+    expect(within(step).getByLabelText("Subtracted weight 3")).toHaveValue("GW_HYBRID2");
+    expect(within(step).getByLabelText("Store result as")).toHaveValue("GW_GLUE_H1H2");
+    expect(
+      within(step).getByText(
+        "GW_GLUE_H1H2 = GW_MODULE_H1H2 − GW_SENSOR − GW_HYBRID1 − GW_HYBRID2",
+      ),
+    ).toBeInTheDocument();
+
+    // The nested target map is flattened into one row per module type × step.
+    const ruleSet = ruleSetGroup(1);
+    expect(within(ruleSet).getByLabelText("Glue process")).toHaveValue("TRUEBLUE");
+    expect(within(ruleSet).getByText("Always valid")).toBeInTheDocument();
+    const target = targetGroup(1, 1);
+    expect(within(target).getByLabelText("Module type")).toHaveValue("R5M1");
+    expect(within(target).getByLabelText("Step key")).toHaveValue("hybrids");
+    expect(within(target).getByLabelText("Target")).toHaveValue(151);
+    expect(within(target).getByLabelText("Tolerance")).toHaveValue(22);
+  });
+
+  it("loads and saves the canonical process controls from configured rule-set options", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages(
+      [
+        stageInstitute({
+          ...configuredGlue,
+          glue_default_process: "TRUEBLUE",
+          glue_process_property: "GW_PROCESS",
+          glue_targets: [
+            ...configuredGlue.glue_targets,
+            {
+              ...configuredGlue.glue_targets[0],
+              process: "POLARIS",
+              label: "Polaris",
+            },
+          ],
+        }),
+      ],
+      onSave,
+    );
+
+    const defaultProcess = await screen.findByLabelText("Default glue process");
+    expect(defaultProcess).toHaveValue("TRUEBLUE");
+    expect(
+      within(defaultProcess).getAllByRole("option").map((option) => option.getAttribute("value")),
+    ).toEqual(["", "POLARIS", "TRUEBLUE"]);
+    expect(screen.getByLabelText("Run process property")).toHaveValue("GW_PROCESS");
+
+    await user.selectOptions(defaultProcess, "POLARIS");
+    const processProperty = screen.getByLabelText("Run process property");
+    await user.clear(processProperty);
+    await user.type(processProperty, "glue_process");
+    expect(screen.getByText("Unsaved change to the glue judgement.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const settings = onSave.mock.calls[0]?.[1].settings;
+    expect(settings.glue_default_process).toBe("POLARIS");
+    expect(settings.glue_process_property).toBe("GLUE_PROCESS");
+    expect(settings).not.toHaveProperty("glue_process_default");
+  });
+
+  it("serializes cleared configured process controls as null", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages(
+      [
+        stageInstitute({
+          ...configuredGlue,
+          glue_default_process: "TRUEBLUE",
+          glue_process_property: "GW_PROCESS",
+        }),
+      ],
+      onSave,
+    );
+
+    await user.selectOptions(await screen.findByLabelText("Default glue process"), "");
+    await user.clear(screen.getByLabelText("Run process property"));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const settings = onSave.mock.calls[0]?.[1].settings;
+    expect(settings.glue_default_process).toBeNull();
+    expect(settings.glue_process_property).toBeNull();
+  });
+
+  it("reads the legacy default but migrates it to the canonical key on save", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages(
+      [stageInstitute({ ...configuredGlue, glue_process_default: "trueblue" })],
+      onSave,
+    );
+
+    expect(await screen.findByLabelText("Default glue process")).toHaveValue("TRUEBLUE");
+    const nameInput = screen.getByLabelText("Institute name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Alpha Updated");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const settings = onSave.mock.calls[0]?.[1].settings;
+    expect(settings.glue_default_process).toBe("TRUEBLUE");
+    expect(settings).not.toHaveProperty("glue_process_default");
+    expect(settings).not.toHaveProperty("glue_process_property");
+  });
+
+  it("saves the §9.1/§9.2 shape, with valid_from making a second generation judgeable", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([stageInstitute(configuredGlue)], onSave);
+
+    // A second rule set for the same process, valid from a date: the live
+    // production sheet really does run two generations side by side.
+    await user.click(await screen.findByRole("button", { name: "Add rule set" }));
+    const added = ruleSetGroup(2);
+    await user.type(within(added).getByLabelText("Glue process"), "trueblue");
+    await user.type(within(added).getByLabelText("Display name"), "True Blue (2023 revision)");
+    fireEvent.change(within(added).getByLabelText("Valid from"), {
+      target: { value: "2023-10-24" },
+    });
+    await user.click(within(added).getByRole("button", { name: "Add target" }));
+    const newTarget = targetGroup(2, 1);
+    await user.type(within(newTarget).getByLabelText("Module type"), "r5m1");
+    await user.type(within(newTarget).getByLabelText("Step key"), "hybrids");
+    await user.type(within(newTarget).getByLabelText("Target"), "154");
+    await user.type(within(newTarget).getByLabelText("Tolerance"), "15.4");
+
+    expect(screen.getByText("Unsaved change to the glue judgement.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const settings = onSave.mock.calls[0]?.[1].settings;
+    expect(settings.glue_weight_inputs).toEqual({
+      hybrids: {
+        label: "Hybrids",
+        test_type: "GLUE_WEIGHT",
+        measured: "GW_MODULE_H1H2",
+        subtract: ["GW_SENSOR", "GW_HYBRID1", "GW_HYBRID2"],
+        result_code: "GW_GLUE_H1H2",
+      },
+    });
+    expect(settings.glue_targets).toEqual([
+      {
+        process: "TRUEBLUE",
+        label: "True Blue / False Blue",
+        valid_from: null,
+        module_types: { R5M1: { hybrids: { target_mg: 151, tolerance_mg: 22 } } },
+      },
+      {
+        process: "TRUEBLUE",
+        label: "True Blue (2023 revision)",
+        valid_from: "2023-10-24",
+        module_types: { R5M1: { hybrids: { target_mg: 154, tolerance_mg: 15.4 } } },
+      },
+    ]);
+  });
+
+  it("keeps a dated rule dated when the API hands back its canonical timestamp", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    // What the API actually stores after normalising "2023-10-24".
+    renderStages(
+      [
+        stageInstitute({
+          ...configuredGlue,
+          glue_targets: [
+            { ...configuredGlue.glue_targets[0], valid_from: "2023-10-24T00:00:00+00:00" },
+          ],
+        }),
+      ],
+      onSave,
+    );
+
+    const ruleSet = await screen.findByRole("group", { name: "Glue rule set 1" });
+    // A date input silently rejects a full timestamp and renders blank — the
+    // rule would then look undated and be saved as the always-valid fallback,
+    // re-judging every historical run against it.
+    expect(within(ruleSet).getByLabelText("Valid from")).toHaveValue("2023-10-24");
+    expect(within(ruleSet).queryByText("Always valid")).not.toBeInTheDocument();
+
+    await user.type(within(ruleSet).getByLabelText("Display name"), " v1");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[1].settings.glue_targets[0].valid_from).toBe("2023-10-24");
+  });
+
+  it("builds a whole formula from scratch and normalises what the admin typed", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([stageInstitute({})], onSave);
+
+    expect(await screen.findByText("No glue formula configured.")).toBeInTheDocument();
+    expect(screen.getByText("No glue targets configured.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Add glue step" }));
+    const step = glueGroup(1);
+    await user.type(within(step).getByLabelText("Step key"), "powerboard");
+    await user.type(within(step).getByLabelText("Measured weight"), "gw_module_h1h2pb");
+    await user.type(within(step).getByLabelText("Store result as"), "gw_glue_pb");
+    await user.click(within(step).getByRole("button", { name: "Add subtracted weight" }));
+    await user.type(within(step).getByLabelText("Subtracted weight 1"), "gw_module_h1h2");
+    await user.click(within(step).getByRole("button", { name: "Add subtracted weight" }));
+    await user.type(within(step).getByLabelText("Subtracted weight 2"), "gw_pb");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const settings = onSave.mock.calls[0]?.[1].settings;
+    expect(settings.glue_weight_inputs).toEqual({
+      powerboard: {
+        measured: "GW_MODULE_H1H2PB",
+        subtract: ["GW_MODULE_H1H2", "GW_PB"],
+        result_code: "GW_GLUE_PB",
+      },
+    });
+    // Nothing was entered under targets, and the profile never had the key —
+    // so it stays absent rather than being written as "explicitly none".
+    expect(settings).not.toHaveProperty("glue_targets");
+  });
+
+  it("does not touch a profile's glue keys during an unrelated save", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([stageInstitute({})], onSave);
+
+    const nameInput = await screen.findByLabelText("Institute name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Alpha Updated");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const settings = onSave.mock.calls[0]?.[1].settings;
+    // Writing anything here would change how every module's glue verdict is
+    // reached without anybody asking for it.
+    expect(settings).not.toHaveProperty("glue_weight_inputs");
+    expect(settings).not.toHaveProperty("glue_targets");
+    expect(settings).not.toHaveProperty("glue_default_process");
+    expect(settings).not.toHaveProperty("glue_process_default");
+    expect(settings).not.toHaveProperty("glue_process_property");
+    expect(screen.queryByText("Unsaved change to the glue judgement.")).not.toBeInTheDocument();
+  });
+
+  it("clears a configured formula with null, which is how the API restores the defaults", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([stageInstitute(configuredGlue)], onSave);
+
+    const step = await screen.findByRole("group", { name: "Glue step 1" });
+    await user.click(within(step).getByRole("button", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    // An empty object is rejected by the API on purpose; null is the only way
+    // back to the seed defaults.
+    expect(onSave.mock.calls[0]?.[1].settings.glue_weight_inputs).toBeNull();
+  });
+
+  it("flags a target whose step no formula produces, instead of saving a rule nothing can meet", async () => {
+    const user = userEvent.setup();
+    renderStages([stageInstitute(configuredGlue)], vi.fn().mockResolvedValue(undefined));
+
+    await screen.findByRole("group", { name: "Glue rule set 1" });
+    const target = targetGroup(1, 1);
+    const stepKey = within(target).getByLabelText("Step key");
+    expect(within(target).queryByText("Not in the formula")).not.toBeInTheDocument();
+
+    await user.clear(stepKey);
+    await user.type(stepKey, "powerboard");
+    expect(within(target).getByText("Not in the formula")).toBeInTheDocument();
+    expect(stepKey).toHaveAttribute("aria-describedby");
+  });
+
+  it("refuses a malformed rule set rather than saving an unjudgeable profile", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([stageInstitute(configuredGlue)], onSave);
+
+    await screen.findByRole("group", { name: "Glue rule set 1" });
+    await user.clear(within(targetGroup(1, 1)).getByLabelText("Target"));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Target must be 0-100000 mg.");
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("refuses a step that would overwrite one of its own inputs", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([stageInstitute(configuredGlue)], onSave);
+
+    const step = await screen.findByRole("group", { name: "Glue step 1" });
+    const resultCode = within(step).getByLabelText("Store result as");
+    await user.clear(resultCode);
+    await user.type(resultCode, "GW_SENSOR");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    // Otherwise the derived value lands on a scale reading, and the next
+    // derivation reads its own output back as an input.
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Store result as duplicates GW_SENSOR.",
+    );
+    expect(onSave).not.toHaveBeenCalled();
   });
 });

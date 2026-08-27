@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app.db import ensure_phase0_sqlite_schema, make_engine
-from app.ingestion import parse_payload
+from app.ingestion import derive_glue_results, parse_payload
 from app.seed_demo import DEMO_FIXTURE_PATH
 from app.sync import load_fixture_records, sync_components
 
@@ -69,6 +69,55 @@ def test_parse_payload_glue_weight_checks_numeric_results():
     assert parsed.passed is False  # a failed test is still a valid upload
     assert "Result 'GW_MODULE_H1H2' is empty" in parsed.warnings
     assert "Result 'GW_T1' must be a number" in parsed.issues
+
+
+def test_glue_derivation_uses_the_uploaded_measurement_time_for_dated_rules():
+    settings = {
+        "glue_targets": [
+            {
+                "process": "TRUEBLUE",
+                "label": "Original",
+                "valid_from": None,
+                "module_types": {
+                    "R2": {"hybrids": {"target_mg": 100, "tolerance_mg": 10}}
+                },
+            },
+            {
+                "process": "TRUEBLUE",
+                "label": "Later generation",
+                "valid_from": "2025-01-01T00:00:00Z",
+                "module_types": {
+                    "R2": {"hybrids": {"target_mg": 200, "tolerance_mg": 20}}
+                },
+            },
+        ],
+        "glue_weight_inputs": {
+            "hybrids": {
+                "measured": "GW_AFTER",
+                "subtract": ["GW_BEFORE"],
+                "result_code": "GW_GLUE",
+            }
+        },
+        "glue_process_property": "GLUE_PROCESS",
+    }
+    payload = pdb_payload(
+        testType="GLUE_WEIGHT",
+        date="2020-06-01T12:00:00Z",
+        properties={"GLUE_PROCESS": "TRUEBLUE"},
+        results={"GW_AFTER": 1.1, "GW_BEFORE": 1.0},
+    )
+
+    derived = derive_glue_results(
+        payload,
+        settings,
+        "GLUE_WEIGHT",
+        "R2",
+        measured_at=payload["date"],
+    )
+
+    assert derived is not None
+    assert derived.steps[0].target is not None
+    assert derived.steps[0].target.target_mg == 100
 
 
 def test_parse_payload_treats_non_serial_component_as_local_name():

@@ -635,6 +635,8 @@ const en = {
     statusFailed: "failed",
     statusMissing: "missing",
     statusPending: "pending",
+    statusWithdrawn: "withdrawn in PDB",
+    withdrawnHint: "This run was withdrawn in the PDB and does not count as evidence.",
     moreValues: (n: number) => `+${n}`,
     arrayPoints: (points: number) => `⌁ ${points} pts`,
     mapEntries: (entries: number) => `⌁ ${entries} entries`,
@@ -678,6 +680,44 @@ const en = {
     colResult: "Result",
     childRunCount: (n: number) => (n === 1 ? "1 run" : `${n} runs`),
     childWithdrawn: (n: number) => `${n} withdrawn in PDB`,
+    // Server-derived judgement (plan §9.3). Every figure below is formatted,
+    // never computed: the arithmetic lives once, in the backend adapter.
+    // A verdict is always a word — the chip colour only repeats it.
+    verdictOk: "OK",
+    verdictTooLittle: "Too little",
+    verdictTooMuch: "Too much",
+    // `unknown` never renders as a blank or as a neutral chip that could read
+    // like "fine": the reason is the label.
+    verdictNoTarget: "No target",
+    verdictMissingInputs: "Missing readings",
+    verdictNoRun: "Not measured",
+    verdictUnknown: "No verdict",
+    verdictUnknownReason: (reason: string) => `No verdict (${reason})`,
+    derivedFigure: (measured: string, target: string | null, tolerance: string | null) => {
+      if (target === null) return `${measured} mg`;
+      return tolerance === null
+        ? `${measured} / ${target} mg`
+        : `${measured} / ${target} ± ${tolerance} mg`;
+    },
+    derivedStepTitle: (label: string, verdict: string) => `${label}: ${verdict}`,
+    derivedTitle: "Derived by the server",
+    derivedFromPreview:
+      "Computed by the server from the values checked just now — read-only.",
+    derivedFromLatestRun:
+      "From the last recorded run — read-only. itkFlow never recomputes glue weight, target or tolerance in the browser; the judgement for the values above is derived on the server when this entry is checked.",
+    derivedProcessLabel: "Glue process",
+    derivedProcessUnresolved: "not resolved",
+    derivedProcessFromRun: "recorded with the run",
+    derivedProcessFromProfile: "profile default",
+    derivedProcessUnknownSource: "source unknown",
+    derivedWeightLabel: "Glue weight",
+    derivedTargetLabel: "Target",
+    derivedToleranceLabel: "Tolerance",
+    derivedInputsLabel: "Readings used",
+    derivedMg: (value: string) => `${value} mg`,
+    derivedToleranceMg: (value: string) => `± ${value} mg`,
+    derivedInput: (name: string, value: string) => `${name} ${value}`,
+    derivedNoSteps: "The profile configures no derivation step for this test type.",
     testForm: {
       ...testFormLabels,
       submit: "Stage test result",
@@ -1181,6 +1221,83 @@ const en = {
     glueTypePlaceholder: "e.g. POLARIS_EPOXY",
     potLifeLabel: "Pot life",
     minutesUnit: "minutes",
+    // Glue-weight judgement (plan §9.1/§9.2). The PDB grades nothing:
+    // automatic grading is off on every module schema and every threshold is
+    // null, so target, tolerance and verdict can only come from these two
+    // tables. Nothing here names a module type, a process or a result code —
+    // all of that is typed by the institute.
+    glueInputsTitle: "Glue weight formula",
+    glueInputsHint:
+      "Which weighing feeds each glue step: the weight measured after the step, minus everything that was already on the scale. The result is stored under its own PDB result code.",
+    glueInputsImpact:
+      "These result codes must match the test schema this institute records glue weights with. A code that does not exist makes the step unjudgeable rather than wrong — the worksheet then says 'Missing readings'.",
+    glueInputsEmpty: "No glue formula configured; glue results are shown but not judged.",
+    addGlueInput: "Add glue step",
+    glueInputRowLabel: (index: number) => `Glue step ${index}`,
+    glueStepKeyLabel: "Step key",
+    glueStepKeyPlaceholder: "e.g. hybrids",
+    glueStepLabelLabel: "Step name",
+    glueStepLabelPlaceholder: "Shown with the verdict, e.g. Hybrids",
+    glueStepTestTypeLabel: "Test type",
+    glueStepTestTypePlaceholder: "e.g. GLUE_WEIGHT",
+    glueMeasuredLabel: "Measured weight",
+    glueMeasuredPlaceholder: "e.g. GW_MODULE_H1H2",
+    glueSubtractLabel: "Minus these weights",
+    glueSubtractEmpty: "Nothing is subtracted; the measured weight is taken as the glue weight.",
+    addGlueSubtract: "Add subtracted weight",
+    glueSubtractItemLabel: (index: number) => `Subtracted weight ${index}`,
+    glueSubtractPlaceholder: "e.g. GW_SENSOR",
+    removeGlueSubtract: (index: number) => `Remove subtracted weight ${index}`,
+    glueResultCodeLabel: "Store result as (optional)",
+    glueResultCodePlaceholder: "e.g. GW_GLUE_H1H2",
+    glueFormulaPreview: (measured: string, subtract: string[], result: string) => {
+      const expression =
+        subtract.length === 0 ? measured : `${measured} − ${subtract.join(" − ")}`;
+      // Without a result code the step is judged but never uploaded, so the
+      // formula reads as a value rather than as an assignment.
+      return result === "" ? expression : `${result} = ${expression}`;
+    },
+    glueFormulaIncomplete: "Enter a measured weight to complete this step.",
+    glueTargetsTitle: "Glue targets",
+    glueTargetsHint:
+      "Target and tolerance per glue process, module type and step. A run is judged against the rule set of its process whose 'Valid from' date is the newest one on or before the measurement date; a rule set without a date always applies and is the fallback.",
+    glueTargetsImpact:
+      "Saving changes how every module's glue result is judged, past runs included — the verdict is derived on demand, not stored. Keep a superseded rule set and give the new one a 'Valid from' date instead of overwriting it, or historical runs will be re-judged against today's numbers.",
+    glueTargetsEmpty: "No glue targets configured; glue results are shown but not judged.",
+    glueJudgementDirtyWarning:
+      "Unsaved change to the glue judgement. Saving re-judges the glue result of every module, including runs recorded long ago.",
+    glueProcessResolutionTitle: "Run process selection",
+    glueProcessResolutionHint:
+      "Use the run property when glue records name their process. Otherwise, the explicit default is used. The application method (for example stencil or dispenser) is not a glue process.",
+    glueDefaultProcessLabel: "Default glue process",
+    glueDefaultProcessUnset: "No default process",
+    glueProcessPropertyLabel: "Run process property",
+    glueProcessPropertyPlaceholder: "Optional, e.g. GW_PROCESS",
+    addGlueRuleSet: "Add rule set",
+    glueRuleSetRowLabel: (index: number) => `Glue rule set ${index}`,
+    glueProcessLabel: "Glue process",
+    glueProcessPlaceholder: "e.g. TRUEBLUE",
+    glueProcessDisplayLabel: "Display name",
+    glueProcessDisplayPlaceholder: "Optional, shown to operators",
+    glueValidFromLabel: "Valid from",
+    glueValidFromAlways: "Always valid",
+    removeGlueRuleSet: "Remove rule set",
+    glueTargetRowsLabel: "Targets",
+    glueTargetRowsEmpty: "No target in this rule set; nothing is judged against it.",
+    addGlueTargetRow: "Add target",
+    glueTargetRowLabel: (index: number) => `Glue target ${index}`,
+    glueModuleTypeLabel: "Module type",
+    glueModuleTypePlaceholder: "e.g. R5M1",
+    glueTargetMgLabel: "Target",
+    glueToleranceMgLabel: "Tolerance",
+    milligramsUnit: "mg",
+    removeGlueTargetRow: (index: number) => `Remove glue target ${index}`,
+    glueStepUnknown: "Not in the formula",
+    glueStepUnknownHint:
+      "No glue step above uses this key, so nothing is ever measured against this target. Check the spelling.",
+    glueNumberRequired: (fieldLabel: string, maximum: number) =>
+      `${fieldLabel} must be a number in milligrams from 0 to ${maximum}.`,
+    glueDateRequired: (fieldLabel: string) => `${fieldLabel} must be a date (YYYY-MM-DD).`,
     evidenceTitle: "Evidence auto-mirror",
     evidenceHint:
       "Component types whose detailed test runs and attachments are mirrored after component sync. Empty defaults to MODULE.",

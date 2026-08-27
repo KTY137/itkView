@@ -114,12 +114,74 @@ export type WorksheetLatestRun = {
 
 export type WorksheetStagedRef = { outbox_action_id: number; status: OutboxStatus };
 
+/**
+ * One raw reading that fed a derived step, so the arithmetic stays retraceable
+ * (`plan §9.3`). PDB carries every `GW_` code in grams; the mg conversion is
+ * part of the server-side contract, so these values are shown verbatim and
+ * never re-scaled here.
+ */
+export type WorksheetDerivedInput = {
+  code: string;
+  name: string;
+  value: number | null;
+};
+
+/**
+ * `unknown` is deliberate and always carries a `reason`: on the sheet this
+ * replaces, an absent input silently produced a number that looked like a
+ * result (8 of 13 powerboard verdicts were arithmetic on empty cells).
+ */
+export type WorksheetDerivedVerdict = "ok" | "too_little" | "too_much" | "unknown";
+
+/** One judged step of a derivation — e.g. the hybrids glueing, the powerboard
+ * glueing. `key` and `label` come from the institute profile, never from code. */
+export type WorksheetDerivedStep = {
+  key: string;
+  label: string;
+  measured_mg: number | null;
+  target_mg: number | null;
+  tolerance_mg: number | null;
+  verdict: WorksheetDerivedVerdict;
+  /** Why there is no verdict: `no_target`, `missing_inputs`, `no_run`. Typed
+   * as a plain string so a reason this build does not know yet renders as an
+   * explicit unknown reason instead of an empty cell. */
+  reason: string | null;
+  /** The PDB code the derived value is uploaded under; absent when the step is
+   * judged locally but never written back. Beyond the plan §9.3 field list,
+   * and not rendered — declared so the wire shape stays described in one
+   * place. */
+  result_code?: string | null;
+  inputs: WorksheetDerivedInput[];
+};
+
+/**
+ * The server's judgement over a row's measured values (plan §9.3).
+ *
+ * itkFlow computes this in exactly one place — the backend adapter. The
+ * browser only formats and colours it: the sheet this replaces and the
+ * reference implementation drifted apart precisely because the same formula
+ * existed twice.
+ */
+export type WorksheetDerived = {
+  kind: "glue_weight";
+  /** The glue process the rule set was selected for; null when unresolved. */
+  process: string | null;
+  process_source: "run" | "profile_default" | "unknown";
+  steps: WorksheetDerivedStep[];
+};
+
 export type WorksheetRow = {
   test_type: string;
   status: "passed" | "failed" | "missing" | "pending";
   latest: WorksheetLatestRun | null;
   staged: WorksheetStagedRef[];
   run_count: number;
+  /**
+   * Optional on the wire: a test type the institute profile configures no
+   * derivation for — and any server built before this block existed — simply
+   * carries none, and the row renders exactly as it did before.
+   */
+  derived?: WorksheetDerived | null;
 };
 
 export type WorksheetGroup = {
@@ -602,6 +664,17 @@ export type IngestPreview = {
   results: IngestResultSummary[];
   issues: string[];
   warnings: string[];
+  /**
+   * The same server-side derivation as `WorksheetRow.derived`, but computed
+   * over the values *this* dry-run just inspected — the only way the edit
+   * strip can show a judgement for freshly entered readings without a second
+   * copy of the formula in the browser (plan §2.3).
+   *
+   * Beyond the plan §9.3 contract, which names `derived` only on the
+   * worksheet row, and therefore optional: while the server omits it, the
+   * strip falls back to the last recorded run's derivation and says so.
+   */
+  derived?: WorksheetDerived | null;
 };
 
 export type OutboxTransitionBody = {
@@ -913,6 +986,8 @@ export type TestRunDetail = {
   external_ref: string | null;
   measured_at: string | null;
   run_number: string | null;
+  /** PDB lifecycle state. Exactly `deleted` means the run was withdrawn. */
+  run_state: string | null;
   /** Measured values keyed by PDB code; arrays for curves (IV), scalars otherwise. */
   results: Record<string, unknown>;
   /** Descriptions per code — this is where the unit lives. */

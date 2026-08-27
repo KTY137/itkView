@@ -31,11 +31,11 @@ Klebegewicht, aus Ziel und Toleranz das Urteil.
 > [`docs/09`](../../09-pdb-production-strategy.md) („Zurueckgezogene
 > Testlaeufe", „Ring-Module") und [`docs/05`](../../05-ui-design-reference.md),
 > das Protokoll im Abschnitt „Aktueller Stand" von
-> [`docs/04`](../../04-roadmap.md). Zwei Punkte bleiben bewusst offen: das
-> Stage-Gate aggregiert **nicht** ueber Kindkomponenten (offene
-> Owner-Entscheidung, siehe §6), und die aufgeklappte Lauf-Ansicht
-> kennzeichnet einen zurueckgezogenen Lauf noch nicht sichtbar — `run_state`
-> liegt dafuer bereits am Wire.
+> [`docs/04`](../../04-roadmap.md). Das Stage-Gate aggregiert bewusst
+> **nicht** ueber Kindkomponenten (offene Owner-Entscheidung, siehe §6).
+> Die aufgeklappte Lauf-Ansicht markiert den terminalen Zustand `deleted`
+> inzwischen als `withdrawn in PDB`; `requestedToDelete` bleibt sichtbar ein
+> lebender Lauf.
 
 ### 1.1 Zurückgezogene Messungen erscheinen als gültig
 
@@ -73,8 +73,9 @@ Aufrufer.** Die komplette TrueBlue-Zieltabelle steht dort, alle sieben Zeilen.
 1. **Profildaten.** Es gibt kein `glue_targets_from_settings()` als Gegenstück
    zu `stage_model_from_settings`. Nötig: `glue_targets`
    (Verfahren × Modultyp → {hybrids, powerboard} × {target, tolerance}),
-   `chip_glue_amounts` (ABC/HCC), und ein Ort für das **Klebeverfahren** —
-   heute trägt keine Entität es.
+   `glue_weight_inputs` (Formel als Result-Code-Mapping) und ein expliziter
+   `glue_default_process` — heute trägt der `GLUE_WEIGHT`-Lauf das
+   **Klebeverfahren** nicht.
    *Die Chipbestückung braucht keine Tabelle:* sie ist aus der Kindzählung
    exakt ableitbar (R5H0 → 9 ABC/0 HCC, R5H1 → 9/2, je 31 von 31 korrekt).
 2. **Der Adapter**, analog `stage_service.py`: reine Mathematik in `domain/`,
@@ -168,7 +169,7 @@ die Verdrahtung fehlt. Berührt [`docs/07`](../../07-jig-tool-quickselect.md).
 | Etappe | Inhalt | Warum zuerst |
 |---|---|---|
 | **E1** ✅ | `state`-Filter für gelöschte Läufe; Kind-Nachweise im Worksheet (umgesetzt 2026-08-27, siehe §1) | Beides verfälschte das Urteil über den Produktionsstand |
-| **E2** | `glue_targets`/`chip_glue_amounts` als Profildaten + Adapter + abgeleitete Worksheet-Felder | Der eigentliche Auftrag; die Mathematik existiert bereits |
+| **E2** | `glue_targets`/`glue_weight_inputs`/`glue_default_process` als Profildaten + Adapter + abgeleitete Worksheet-Felder | Der eigentliche Auftrag; die Mathematik existiert bereits |
 | **E3** | Rohwert-Erfassung im Edit-Streifen mit Live-Urteil | Setzt E2 voraus |
 | **E4** | Lokale Nachbartabelle für Werte ohne PDB-Heimat | Architekturentscheidung, siehe §3 |
 | **E5** | Werkzeug-Nachweis am Testlauf verdrahten | Setzt eine Profil-Konfiguration voraus, die TUDO noch nicht hat |
@@ -245,7 +246,23 @@ Nur war meine Begründung ungenauer als die Daten.
 Damit Backend und Frontend nicht auseinanderlaufen, steht der Vertrag hier,
 bevor gebaut wird.
 
-### 9.1 Profildaten: `glue_targets`
+### 9.1 Profildaten: `glue_targets` und `glue_default_process`
+
+Das lebende TUDO-Blatt und zFlow speichern TRUEBLUE/POLARIS **nicht** im
+`GLUE_WEIGHT`-Lauf: `GW_METHOD='dispenser'` bezeichnet nur die Auftragstechnik.
+Darum braucht das Profil bis zu einem späteren, ausdrücklich konfigurierten
+Run-Property-Vertrag einen ehrlichen Default, für TUDO derzeit:
+
+```json
+"glue_default_process": "TRUEBLUE"
+```
+
+Auswahl strikt: ein tatsächlich konfigurierter Run-Wert gewinnt; sonst der
+Profildefault mit `process_source: "profile_default"`. Fehlt er oder verweist
+er auf keinen Regelsatz, bleiben `process: null`,
+`process_source: "unknown"` und die Schritte `unknown/no_target`. Nie aus
+`GW_METHOD`, Blattüberschrift, Sample-Präfix oder dem einzigen vorhandenen
+Regelsatz raten.
 
 Eine **Liste** von Regelsätzen. Auswahl: alle Einträge mit passendem `process`,
 davon derjenige mit dem größten `valid_from` ≤ Messzeitpunkt des Laufs;
@@ -312,3 +329,70 @@ derived: {
 `verdict: "unknown"` mit `reason` ist Pflicht statt einer stillen Lücke — die
 8 von 13 Müll-Urteilen des Blattes entstehen genau daraus, dass eine fehlende
 Eingabe wie ein Ergebnis aussieht.
+
+### 9.4 Was der Vertrag am Echtbestand gelernt hat (Backend umgesetzt 2026-08-27)
+
+Backend-Seite von E2 steht: `glue_targets_from_settings` /
+`glue_weight_inputs_from_settings` in `backend/app/domain/glue.py`, der Adapter
+`backend/app/glue_service.py`, Validierung in `institute_settings.py`,
+`WorksheetRow.derived` aus `preview.py`, Ableitung im Dry-Run
+(`ingestion.derive_glue_results` + `api.py`). Vertragsdokumentation:
+[`docs/11`](../../11-logistics-operations.md) „Glue-weight derivation“.
+
+**Vier Korrekturen, alle am gespiegelten Echtbestand gemessen** (132
+`GLUE_WEIGHT`-Läufe, davon 114 lebend):
+
+1. **Die Modultyp-Schlüssel von §9.1 sind Blattvokabular, keine PDB-Typcodes.**
+   Der Spiegel führt `R5M1_HALFMODULE` (54 Läufe), `R2` (42) und
+   `R5M0_HALFMODULE` (36). Ein Profil mit dem Schlüssel `R5M1` trifft an
+   echten TUDO-Modulen **keine einzige** Zeile. Der Seed-Default führt beide
+   Schreibweisen; geraten wird zur Laufzeit nichts.
+2. **Die Codekette von §9.2 ist die falsche.** `GW_MODULE_H1H2` und
+   `GW_GLUE_H1H2` sind in **allen 132** Läufen `null`. Gefüllt ist die
+   Ein-Hybrid-Kette: `GW_MODULE_H1` (61), `GW_GLUE_H1` (60), `GW_MODULE_H1PB`
+   (77), `GW_PB` (30), `GW_GLUE_PB` (32). Der Seed-Default ist deshalb
+   `GW_MODULE_H1 − GW_SENSOR − GW_HYBRID1 → GW_GLUE_H1` und
+   `GW_MODULE_H1PB − GW_MODULE_H1 − GW_PB → GW_GLUE_PB`. **Der
+   `result_code` aus §9.2 (`GW_GLUE_PB`) war richtig**, nur die Messkette
+   nicht. Gegenprobe: die Kette reproduziert die von der PDB selbst
+   gespeicherten Klebegewichte auf 1 mg genau in **25 von 31** vollständigen
+   Hybrid- und **13 von 18** Powerboard-Sätzen; alle 11 Abweichungen sind
+   Läufe, deren gespeichertes Gewicht nicht zu den eigenen gespeicherten
+   Waagenwerten passt (zwei Faktor-10-Tippfehler, eine Feldvertauschung,
+   acht kleinere Unstimmigkeiten) — nie die Rechnung.
+3. **§9.1 braucht einen Ort für das Verfahren.** `process_source: "run"` setzt
+   voraus, dass ein Lauf sein Verfahren nennt; §9 sagt nicht wo. Neu:
+   `glue_process_property` (Default `null`) und `glue_process_default` (Default
+   `null`, greift automatisch, wenn genau ein Verfahren konfiguriert ist).
+   Am Echtbestand ist die einzige verfahrensnahe Property `GW_METHOD`, und
+   ihre 132 Werte (`Stencil`, `stencil`, `stencils`, `stensil`) beschreiben die
+   **Auftragsart**, nicht den Kleber — deshalb kein Seed-Wert und deshalb
+   Großschreibungs-tolerantes Matching.
+   *Nebenbefund:* die PDB führt Kleber als Komponenten mit den Typcodes
+   `TRUE_BLUE`, `POLARIS_EPOXY`, `POLARIS_HARDENER`, `LOCTITE_3525`. Wer das
+   Verfahren später aus der Klebecharge zieht, sollte `process` so schreiben;
+   der Seed folgt vorerst §9.1 mit `TRUEBLUE`.
+4. **§9.2 nennt den Testtyp nicht.** Ohne ihn liee sich nicht entscheiden,
+   welche Worksheet-Zeile ein `derived` bekommt. Jeder Schritt trägt jetzt ein
+   optionales `test_type` (Seed `GLUE_WEIGHT`) — das Beispiel aus §9.2 bleibt
+   unverändert gültig.
+
+**Zwei Auslegungen von §9.3, die das Blatt nicht beantwortet:**
+
+- **Ein Schritt fällt weg**, wenn das Regelwerk den Modultyp kennt und dieser
+  Typ keinen Eintrag für den Schritt hat (Halbmodul ohne Powerboard). Ein
+  **unbekannter** Modultyp behält alle Schritte und meldet `no_target` —
+  Profillücke sichtbar, Nicht-Zuständigkeit still.
+- **`reason`-Vorrang** ist die Reparaturreihenfolge: `no_run` >
+  `missing_inputs` > `no_target`. Die Rechnung läuft trotzdem, wenn nur das
+  Ziel fehlt.
+
+**Additiv gegenüber §9.3:** jeder Schritt trägt zusätzlich `result_code`
+(unter welchem PDB-Ergebnis der abgeleitete Wert hochgeladen wird).
+
+**Bewusst offen:** `worksheet.children[].rows[]` bekommt **kein** `derived`
+(eigenes Schema, nicht in §9); und die Worksheet-Ableitung liest nur
+gespiegelte Läufe — ein gestagter, noch nicht gepushter Upload meldet
+`no_run`, sein Urteil steht im Dry-Run. Der PDB-Schreibpfad
+(`pdb_submit`/`pdb_upload`) mischt `derived_results` noch nicht in das
+hochgeladene Dokument; das ist die eine verbleibende Naht (E3).

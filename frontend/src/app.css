@@ -2723,6 +2723,23 @@ code {
   align-items: end;
   gap: 10px;
 }
+/* Glue judgement (plan §9.1/§9.2): one target cell per module type and step,
+   laid out like the table it replaces so the columns stay readable. */
+.admin-settings-glue-target-row {
+  display: grid;
+  grid-template-columns:
+    minmax(140px, 0.8fr) minmax(140px, 0.8fr)
+    minmax(120px, 0.6fr) minmax(120px, 0.6fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+/* The formula read back in words, so the admin can check it without reading
+   the stored JSON. */
+.admin-settings-formula {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--ink2);
+}
 .reception-item {
   align-items: stretch !important;
   flex-direction: column;
@@ -2816,6 +2833,7 @@ code {
   }
   .admin-settings-grid,
   .admin-settings-glue-row,
+  .admin-settings-glue-target-row,
   .admin-settings-reception-test-row {
     grid-template-columns: 1fr;
   }
@@ -3408,6 +3426,79 @@ g:hover > .curve-line {
 }
 .ws-val-name {
   color: var(--muted);
+}
+/* Server-derived judgement (glue weight, plan §9.3).
+
+   In the collapsed row it sits on its own line above the raw readings: the
+   verdict is what the sheet is read for, the scale values are its inputs.
+   Deliberately one line per row and never more than a chip plus a single
+   figure per step — the compactness contract of the worksheet holds. The
+   verdict word carries the meaning; the chip colour only repeats it. */
+.ws-derived {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  margin-bottom: 3px;
+}
+.ws-derived-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink2);
+  white-space: nowrap;
+}
+/* Read-only derivation inside the edit strip. */
+.ws-derived-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface2);
+}
+.ws-derived-note,
+.ws-derived-process {
+  margin: 0;
+  font-size: 12px;
+}
+.ws-derived-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ws-derived-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ws-derived-step-label {
+  font: 600 12px var(--sans);
+  color: var(--ink);
+}
+.ws-derived-figures {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+.ws-derived-figures dt {
+  color: var(--muted);
+}
+.ws-derived-figures dd {
+  margin: 0;
+  color: var(--ink2);
+}
+.ws-derived-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
 }
 .ws-actions {
   display: inline-flex;

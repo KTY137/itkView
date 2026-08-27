@@ -18,6 +18,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.domain.glue import (
+    GlueDerivation,
+    derive_test_run_document,
+    glue_model_from_settings,
+)
+
 # ATLAS ITk serial numbers: "20U" + subproject/type letters + 7 digits.
 # Anything else in a component field is treated as a local name and resolved
 # against the component mirror by the API layer.
@@ -188,6 +194,12 @@ def _sniff_glue_weight(payload: dict) -> bool:
 
 
 def _parse_glue_weight(payload: dict) -> ParsedTestRun:
+    """Validate the scale readings. The *derivation* lives in `derive_glue_results`.
+
+    This parser deliberately stays institute-agnostic: which readings a glue
+    weight is computed from, what it should weigh and whether that is a pass are
+    all profile data, and none of them can be decided from the payload alone.
+    """
     parsed = _parse_pdb_test_run(payload, parser_name="glue-weight-v1")
     results = payload.get("results")
     if isinstance(results, dict):
@@ -197,6 +209,49 @@ def _parse_glue_weight(payload: dict) -> ParsedTestRun:
             elif isinstance(value, bool) or not isinstance(value, (int, float)):
                 parsed.issues.append(f"Result '{name}' must be a number")
     return parsed
+
+
+def derive_glue_results(
+    payload: Any,
+    institute_settings: Any,
+    test_type: str | None,
+    type_code: str | None,
+    measured_at: str | datetime | None = None,
+) -> GlueDerivation | None:
+    """Server-side derivation for one uploaded payload, before anything is staged.
+
+    Mirrors `missing_required_properties`: the rule is institute configuration
+    (`settings['glue_targets']`, `settings['glue_weight_inputs']`), the
+    arithmetic lives in `app.domain.glue`, and this module only feeds the
+    payload in. Returns None when the profile derives nothing for this test
+    type, so a site that has not configured a derivation is unaffected.
+
+    Deriving here rather than in the browser is the point of the exercise: the
+    formula then exists exactly once, and the value the operator approves is the
+    value that gets uploaded. `app.glue_service.derived_result_grams` turns the
+    result into the grams the PDB stores.
+    """
+    if test_type is None:
+        return None
+    settings = institute_settings if isinstance(institute_settings, dict) else None
+    measurement_time: datetime | None = measured_at if isinstance(measured_at, datetime) else None
+    if isinstance(measured_at, str) and measured_at.strip():
+        try:
+            measurement_time = datetime.fromisoformat(
+                measured_at.strip().replace("Z", "+00:00")
+            )
+        except ValueError:
+            # Parsing already reports the invalid date as a warning. The
+            # derivation must stay available, but cannot pretend to know which
+            # dated rule applied.
+            measurement_time = None
+    return derive_test_run_document(
+        glue_model_from_settings(settings),
+        test_type=test_type,
+        type_code=type_code,
+        payload=payload,
+        measured_at=measurement_time,
+    )
 
 
 # --------------------------------------------------------------------------
