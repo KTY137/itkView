@@ -239,3 +239,76 @@ dieselbe Zahl in mehreren Codes.
 Die Schlussfolgerung bleibt trotzdem gültig — ein rechnendes Formular hätte
 sowohl den einen Faktor-1000-Fehler als auch die Vertauschungen verhindert.
 Nur war meine Begründung ungenauer als die Daten.
+
+## 9 — Vertrag für E2/E3 (verbindlich für beide Seiten)
+
+Damit Backend und Frontend nicht auseinanderlaufen, steht der Vertrag hier,
+bevor gebaut wird.
+
+### 9.1 Profildaten: `glue_targets`
+
+Eine **Liste** von Regelsätzen. Auswahl: alle Einträge mit passendem `process`,
+davon derjenige mit dem größten `valid_from` ≤ Messzeitpunkt des Laufs;
+`valid_from: null` gilt immer und dient als Rückfall. Das bildet die zwei
+Generationen ab, die im lebenden Blatt nebeneinander stehen.
+
+```json
+[
+  {
+    "process": "TRUEBLUE",
+    "label": "True Blue / False Blue",
+    "valid_from": null,
+    "module_types": {
+      "R5M1": {"hybrids": {"target_mg": 151, "tolerance_mg": 22},
+               "powerboard": {"target_mg": 0, "tolerance_mg": 0}}
+    }
+  }
+]
+```
+
+### 9.2 Profildaten: `glue_weight_inputs` — die Formel als Daten
+
+Welche PDB-Result-Codes welchen Schritt speisen, ist Instituts- und
+Schemasache, **nicht** Code. `measured − Σ subtract`, Ergebnis in mg, abgelegt
+unter `result_code`:
+
+```json
+{
+  "hybrids":    {"measured": "GW_MODULE_H1H2",
+                 "subtract": ["GW_SENSOR", "GW_HYBRID1", "GW_HYBRID2"],
+                 "result_code": "GW_GLUE_H1H2"},
+  "powerboard": {"measured": "GW_MODULE_H1H2PB",
+                 "subtract": ["GW_MODULE_H1H2", "GW_PB"],
+                 "result_code": "GW_GLUE_PB"}
+}
+```
+
+**Einheiten:** Die PDB führt alle `GW_`-Codes in **Gramm**; Ziel und Toleranz
+stehen in **mg**. Die Umrechnung passiert genau einmal, im Adapter, und ist
+Teil des Vertrags — nicht Sache der Anzeige.
+
+### 9.3 Payload: `WorksheetRow.derived`
+
+Optional; nur gesetzt, wenn das Profil für diesen Testtyp eine Ableitung kennt.
+
+```
+derived: {
+  kind: "glue_weight",
+  process: string | null,
+  process_source: "run" | "profile_default" | "unknown",
+  steps: [{
+    key: string,                 // "hybrids" | "powerboard", aus dem Profil
+    label: string,
+    measured_mg: number | null,
+    target_mg: number | null,
+    tolerance_mg: number | null,
+    verdict: "ok" | "too_little" | "too_much" | "unknown",
+    reason: string | null,       // "no_target" | "missing_inputs" | "no_run"
+    inputs: [{code, name, value}]  // die verwendeten Rohwerte, nachvollziehbar
+  }]
+}
+```
+
+`verdict: "unknown"` mit `reason` ist Pflicht statt einer stillen Lücke — die
+8 von 13 Müll-Urteilen des Blattes entstehen genau daraus, dass eine fehlende
+Eingabe wie ein Ergebnis aussieht.

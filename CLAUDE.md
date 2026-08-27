@@ -15,6 +15,18 @@ Team: `docs/03-agent-team.md`.
    welcher Roadmap-Punkt betroffen ist.
 4. Vor UI-Arbeit `docs/05-ui-design-reference.md` (+ Mockup) lesen und nicht vom
    Design-Ziel abdriften. Layout/Interaktion uebernehmen, Labels bleiben Englisch.
+5. **Vor jeder Arbeit am Produktionsablauf zuerst das lebende Google-Sheet lesen**,
+   nicht die Abschrift. Der Drive-Connector ist verbunden; massgeblich ist
+   „Production Overview TU Dortmund"
+   (`1Qw2RLTFfhCIKJhXrmbtF74DF5ozwXkak6CTjsg4EoXs`), daneben Zeuthens
+   „Production Overview" (`1oTtKDJ8cFc1RGqU0lU--XhF9tjvBD6CcrTEPePFJMk8`).
+   Die Dateien in `docs/superpowers/research/` sind **Momentaufnahmen** —
+   `2026-08-27-tudo-sheet-live.md` schlaegt die aeltere Screenshot-Abschrift,
+   und beide schlaegt das Blatt selbst. Wer ohne diesen Blick plant, driftet:
+   drei Annahmen dieses Projekts (R2H0, die Ohren-Formel, die angeblich
+   fehlende Metrologie) waren genau so entstanden. Das Blatt ist gross
+   (~200k Zeichen) — in einem Subagenten lesen, nicht im Hauptkontext.
+   Keine Klarnamen aus dem Blatt ins Repo.
 
 ## Harte Regeln (gelten für ALLE Agenten)
 
