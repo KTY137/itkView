@@ -1752,3 +1752,86 @@ def test_an_unmirrored_component_still_reports_why_it_cannot_judge(
     assert hybrids["measured_mg"] == pytest.approx(132.7)
     assert hybrids["verdict"] == "unknown"
     assert hybrids["reason"] == "no_target"
+
+
+def test_a_negative_glue_weight_is_not_a_verdict():
+    """Readings that contradict each other must not read as "too little".
+
+    Two live runs in the TUDO mirror produce -8696 mg and -7771 mg because the
+    module weight and the glue weight were entered into each other's field. The
+    subtraction is faithful and the answer is still impossible; calling it
+    `too_little` would tell an operator they under-applied glue, when the truth
+    is that the readings cannot both be right. That is exactly the failure the
+    spreadsheet makes — its own garbage values (-9010, -9886) sit in the sheet
+    looking like measurements.
+    """
+    from app.domain.glue import (
+        GlueStepSpec,
+        GlueTarget,
+        GlueTargetRule,
+        GlueUnknownReason,
+        GlueVerdict,
+        evaluate_glue_step,
+    )
+
+    spec = GlueStepSpec(
+        key="hybrids",
+        label="Hybrids",
+        measured="GW_MODULE_H1",
+        subtract=("GW_SENSOR", "GW_HYBRID1"),
+        result_code="GW_GLUE_H1",
+        test_type="GLUE_WEIGHT",
+    )
+    rule = GlueTargetRule(
+        process="TRUEBLUE",
+        label="True Blue",
+        valid_from=None,
+        module_types={"R5M1": {"hybrids": GlueTarget(target_mg=151.0, tolerance_mg=22.0)}},
+    )
+    # The real swapped-field shape: the glue weight sits in the module field.
+    swapped = evaluate_glue_step(
+        spec,
+        rule=rule,
+        type_code="R5M1",
+        results={"GW_MODULE_H1": 0.144, "GW_SENSOR": 6.981, "GW_HYBRID1": 1.859},
+        result_meta={},
+    )
+    assert swapped.measured_mg == -8696.0
+    assert swapped.verdict is GlueVerdict.UNKNOWN
+    assert swapped.reason is GlueUnknownReason.IMPLAUSIBLE
+
+    # The same chain entered correctly still judges normally.
+    sane = evaluate_glue_step(
+        spec,
+        rule=rule,
+        type_code="R5M1",
+        results={"GW_MODULE_H1": 8.984, "GW_SENSOR": 6.981, "GW_HYBRID1": 1.859},
+        result_meta={},
+    )
+    assert sane.measured_mg == 144.0
+    assert sane.verdict is GlueVerdict.OK
+    assert sane.reason is None
+
+
+def test_the_dry_run_serializes_an_implausible_glue_reason(
+    client, session_factory, configured_tudo
+):
+    """The public response model must accept the domain's fail-closed reason."""
+    _mirror_module(session_factory, type_code="R5M1")
+    swapped = dict(
+        READINGS,
+        GW_MODULE_H1=0.144,
+        GW_SENSOR=6.981,
+        GW_HYBRID1=1.859,
+    )
+    file_id = _ingest(session_factory, swapped)
+
+    response = client.get(f"/api/ingest/files/{file_id}/preview")
+
+    assert response.status_code == 200, response.text
+    hybrids = next(
+        step for step in response.json()["derived"]["steps"] if step["key"] == "hybrids"
+    )
+    assert hybrids["measured_mg"] == -8696.0
+    assert hybrids["verdict"] == "unknown"
+    assert hybrids["reason"] == "implausible_result"
