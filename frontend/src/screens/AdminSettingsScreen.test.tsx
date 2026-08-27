@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Institute } from "../api";
+import { t } from "../i18n";
 import AdminSettingsScreen from "./AdminSettingsScreen";
 import type { AdminSettingsLabels, AdminSettingsScreenProps } from "./AdminSettingsScreen";
 
@@ -136,6 +137,7 @@ const labels: AdminSettingsLabels = {
   glueProcessResolutionHint: "Choose how runs identify their process.",
   glueDefaultProcessLabel: "Default glue process",
   glueDefaultProcessUnset: "No default process",
+  glueDefaultProcessMissing: "Default glue process must match a configured rule set.",
   glueProcessPropertyLabel: "Run process property",
   glueProcessPropertyPlaceholder: "GW_PROCESS",
   addGlueRuleSet: "Add rule set",
@@ -167,6 +169,36 @@ const labels: AdminSettingsLabels = {
   addEvidenceType: "Add evidence type",
   evidenceTypeLabel: (index) => `Evidence type ${index}`,
   evidenceTypePlaceholder: "MODULE",
+  autoSyncTitle: "Scheduled sync",
+  autoSyncHint: "Off unless switched on here.",
+  autoSyncIdentityHint: "Runs as the last person who synced successfully.",
+  autoSyncIdentityDetail: "Skips deactivated accounts and invalid codes.",
+  autoSyncClockHint: "Window in server local time; interval in UTC.",
+  autoSyncEnabledLabel: "Refresh this institute on a schedule",
+  autoSyncEnabledNote: "On: itkFlow contacts the PDB by itself.",
+  autoSyncDisabledNote: "Off: only a person starts a sync.",
+  autoSyncIntervalLabel: "Refresh when the last sync is older than",
+  autoSyncIntervalHint: "At least 15 minutes.",
+  autoSyncWindowStartLabel: "Window start",
+  autoSyncWindowEndLabel: "Window end",
+  autoSyncWindowAnyTime: "No window: any time of day.",
+  autoSyncWindowDaytime: (start, end) => `Daytime window ${start} to ${end}.`,
+  autoSyncWindowOvernight: (start, end) => `Overnight window ${start} to ${end}.`,
+  autoSyncWeekdaysLabel: "Weekdays",
+  autoSyncWeekdaysHint: "A night window belongs to the day it opened on.",
+  autoSyncWeekdayName: (isoWeekday) =>
+    ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][
+      isoWeekday - 1
+    ] ?? String(isoWeekday),
+  autoSyncWeekdayShortName: (isoWeekday) =>
+    ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][isoWeekday - 1] ??
+    String(isoWeekday),
+  autoSyncDirtyWarning: "Unsaved scheduled-sync change.",
+  autoSyncWindowPairRequired: "Set both window times, or neither.",
+  autoSyncWindowFormat: "Window times must be HH:MM.",
+  autoSyncWindowIdentical: "Window start and end must differ.",
+  autoSyncWeekdaysRequired: "Select at least one weekday.",
+  autoSyncMalformedWarning: "Stored scheduled-sync settings are invalid and off.",
   remove: "Remove",
   reset: "Reset",
   save: "Save changes",
@@ -850,6 +882,25 @@ describe("AdminSettingsScreen glue judgement", () => {
     expect(settings.glue_process_property).toBeNull();
   });
 
+  it("rejects a default whose last matching rule set was removed", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages(
+      [stageInstitute({ ...configuredGlue, glue_default_process: "TRUEBLUE" })],
+      onSave,
+    );
+
+    await user.click(
+      within(ruleSetGroup(1)).getByRole("button", { name: "Remove rule set" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(
+      await screen.findByText("Default glue process must match a configured rule set."),
+    ).toBeInTheDocument();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it("reads the legacy default but migrates it to the canonical key on save", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
@@ -1006,7 +1057,58 @@ describe("AdminSettingsScreen glue judgement", () => {
     expect(screen.queryByText("Unsaved change to the glue judgement.")).not.toBeInTheDocument();
   });
 
-  it("clears a configured formula with null, which is how the API restores the defaults", async () => {
+  it("preserves and canonicalizes a hidden R2 input override during an unrelated save", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const sourceOverride = {
+      measured: "gw_module_h1",
+      subtract: ["gw_sensor", "gw_hybrid1"],
+      result_code: null,
+    };
+    renderStages(
+      [
+        stageInstitute({
+          ...configuredGlue,
+          glue_weight_inputs: {
+            hybrids: {
+              ...configuredGlue.glue_weight_inputs.hybrids,
+              by_type_code: { r2: sourceOverride },
+            },
+          },
+        }),
+      ],
+      onSave,
+    );
+
+    const nameInput = await screen.findByLabelText("Institute name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Alpha Updated");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const settings = onSave.mock.calls[0]?.[1].settings;
+    expect(settings.glue_weight_inputs).toEqual({
+      hybrids: {
+        label: "Hybrids",
+        test_type: "GLUE_WEIGHT",
+        measured: "GW_MODULE_H1H2",
+        subtract: ["GW_SENSOR", "GW_HYBRID1", "GW_HYBRID2"],
+        result_code: "GW_GLUE_H1H2",
+        by_type_code: {
+          R2: {
+            measured: "GW_MODULE_H1",
+            subtract: ["GW_SENSOR", "GW_HYBRID1"],
+            result_code: null,
+          },
+        },
+      },
+    });
+    const savedOverride = settings.glue_weight_inputs?.hybrids?.by_type_code?.R2;
+    expect(savedOverride).not.toBe(sourceOverride);
+    expect(savedOverride?.subtract).not.toBe(sourceOverride.subtract);
+  });
+
+  it("clears a configured formula with null to disable input-based derivation", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
     renderStages([stageInstitute(configuredGlue)], onSave);
@@ -1016,8 +1118,8 @@ describe("AdminSettingsScreen glue judgement", () => {
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
-    // An empty object is rejected by the API on purpose; null is the only way
-    // back to the seed defaults.
+    // An empty object is rejected by the API on purpose; null explicitly
+    // disables input-based derivation for this profile.
     expect(onSave.mock.calls[0]?.[1].settings.glue_weight_inputs).toBeNull();
   });
 
@@ -1066,5 +1168,259 @@ describe("AdminSettingsScreen glue judgement", () => {
       "Store result as duplicates GW_SENSOR.",
     );
     expect(onSave).not.toHaveBeenCalled();
+  });
+});
+
+
+// The one setting that makes itkFlow contact the PDB on its own, without
+// anyone asking for it at that moment. Everything here guards the same thing
+// from two sides: it must be off unless somebody deliberately switches it on,
+// and what it does must be readable on the screen rather than in a doc.
+const overnightSchedule = {
+  enabled: true,
+  interval_minutes: 120,
+  window_start: "22:00",
+  window_end: "06:00",
+  weekdays: [5, 6],
+};
+
+function intervalField(): HTMLElement {
+  return screen.getByLabelText(/Refresh when the last sync is older than/);
+}
+
+describe("AdminSettingsScreen scheduled sync", () => {
+  it("shows a malformed enabled block as off and preserves it on an unrelated save", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages(
+      [stageInstitute({ auto_sync: { enabled: true, interval_minutes: "often" } })],
+      onSave,
+    );
+
+    expect(
+      await screen.findByLabelText("Refresh this institute on a schedule"),
+    ).not.toBeChecked();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Stored scheduled-sync settings are invalid and off.",
+    );
+
+    const nameInput = screen.getByLabelText("Institute name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Alpha Updated");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[1].settings).not.toHaveProperty("auto_sync");
+  });
+
+  it("shows an unconfigured institute as off and saves no schedule at all", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([alpha], onSave);
+
+    const toggle = await screen.findByLabelText("Refresh this institute on a schedule");
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByText("Off: only a person starts a sync.")).toBeInTheDocument();
+    expect(screen.getByText("No window: any time of day.")).toBeInTheDocument();
+
+    const nameInput = screen.getByLabelText("Institute name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Alpha Updated");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    // Not `{enabled: false}` either: a profile nobody configured must not gain
+    // a schedule — not even a switched-off one — from an unrelated save.
+    expect(onSave.mock.calls[0]?.[1].settings).not.toHaveProperty("auto_sync");
+  });
+
+  it("renders a stored overnight schedule as an overnight schedule", async () => {
+    renderStages([stageInstitute({ auto_sync: overnightSchedule })], vi.fn());
+
+    expect(
+      await screen.findByLabelText("Refresh this institute on a schedule"),
+    ).toBeChecked();
+    expect(screen.getByText("On: itkFlow contacts the PDB by itself.")).toBeInTheDocument();
+    expect(intervalField()).toHaveValue(120);
+    expect(screen.getByLabelText("Window start")).toHaveValue("22:00");
+    expect(screen.getByLabelText("Window end")).toHaveValue("06:00");
+    // 22:00–06:00 is a night shift, not an empty set. If this ever reads as a
+    // complaint about the order, somebody has "fixed" a start-before-end rule
+    // into the editor.
+    expect(screen.getByText("Overnight window 22:00 to 06:00.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Friday" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Saturday" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Monday" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+  });
+
+  it("saves an overnight schedule with weekdays toggled by keyboard", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([alpha], onSave);
+
+    await user.click(await screen.findByLabelText("Refresh this institute on a schedule"));
+    await user.clear(intervalField());
+    await user.type(intervalField(), "30");
+    fireEvent.change(screen.getByLabelText("Window start"), {
+      target: { value: "22:00" },
+    });
+    fireEvent.change(screen.getByLabelText("Window end"), { target: { value: "06:00" } });
+    // No pointer: the toggles have to work for someone whose hands are on the
+    // keyboard, like every other control on this screen.
+    screen.getByRole("button", { name: "Saturday" }).focus();
+    await user.keyboard("{Enter}");
+    screen.getByRole("button", { name: "Sunday" }).focus();
+    await user.keyboard(" ");
+    expect(screen.getByRole("button", { name: "Saturday" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByText("Unsaved scheduled-sync change.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[1].settings.auto_sync).toEqual({
+      enabled: true,
+      interval_minutes: 30,
+      window_start: "22:00",
+      window_end: "06:00",
+      weekdays: [1, 2, 3, 4, 5],
+    });
+  });
+
+  it("states every day as null rather than as a list of all seven", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([alpha], onSave);
+
+    await user.click(await screen.findByLabelText("Refresh this institute on a schedule"));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[1].settings.auto_sync).toEqual({
+      enabled: true,
+      interval_minutes: 60,
+      window_start: null,
+      window_end: null,
+      weekdays: null,
+    });
+  });
+
+  it("switches a configured schedule off without losing what it says", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([stageInstitute({ auto_sync: overnightSchedule })], onSave);
+
+    await user.click(await screen.findByLabelText("Refresh this institute on a schedule"));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[1].settings.auto_sync).toEqual({
+      ...overnightSchedule,
+      enabled: false,
+    });
+  });
+
+  it("refuses an interval below the floor instead of speeding the profile up", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([alpha], onSave);
+
+    await user.click(await screen.findByLabelText("Refresh this institute on a schedule"));
+    await user.clear(intervalField());
+    await user.type(intervalField(), "5");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Refresh when the last sync is older than must be 15-10080.",
+    );
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("refuses one window time without the other", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([alpha], onSave);
+
+    await user.click(await screen.findByLabelText("Refresh this institute on a schedule"));
+    fireEvent.change(screen.getByLabelText("Window start"), {
+      target: { value: "07:00" },
+    });
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Set both window times, or neither.",
+    );
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("refuses a window that starts and ends at the same minute", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([alpha], onSave);
+
+    await user.click(await screen.findByLabelText("Refresh this institute on a schedule"));
+    fireEvent.change(screen.getByLabelText("Window start"), {
+      target: { value: "07:00" },
+    });
+    fireEvent.change(screen.getByLabelText("Window end"), { target: { value: "07:00" } });
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Window start and end must differ.",
+    );
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty weekday selection instead of sending it as every day", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([stageInstitute({ auto_sync: overnightSchedule })], onSave);
+
+    await screen.findByLabelText("Refresh this institute on a schedule");
+    await user.click(screen.getByRole("button", { name: "Friday" }));
+    await user.click(screen.getByRole("button", { name: "Saturday" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    // An empty list reads as "every day" on the server. Unticking everything
+    // means the opposite, so it must never reach the API.
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Select at least one weekday.",
+    );
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("says in the shipped English copy what switching this on actually does", async () => {
+    render(
+      <AdminSettingsScreen
+        institutes={[alpha]}
+        selectedCode="ALPHA"
+        onSelectedCodeChange={vi.fn()}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+        onTestChannel={vi.fn().mockResolvedValue(undefined)}
+        loadKnownTestTypes={noTestTypes}
+        labels={t.adminSettings}
+      />,
+    );
+
+    // These four statements are the point of the section, not decoration: what
+    // it does, whose access it uses, which clock it reads, and that an
+    // overnight window is meant to be possible.
+    expect(
+      await screen.findByText(/without anyone asking for it at that moment/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/succeeded most recently/i)).toBeInTheDocument();
+    expect(screen.getByText(/server.s own clock/i)).toBeInTheDocument();
+    expect(screen.getByText(/22:00 to 06:00 runs overnight only/i)).toBeInTheDocument();
   });
 });

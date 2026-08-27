@@ -135,7 +135,7 @@ editor and persists them through `PATCH /api/institutes/{code}`:
         "result_code": "GW_GLUE_PB"
       }
     },
-    "glue_process_default": "TRUEBLUE",
+    "glue_default_process": "TRUEBLUE",
     "glue_process_property": null
   }
 }
@@ -175,14 +175,19 @@ The API normalizes the following operational settings when they are present:
   `label`, a `valid_from` (ISO 8601 or `null`) and `module_types`. Process names
   and module-type codes are uppercased; weights must be finite, non-negative
   milligrams. Two rule sets may name the same process only if their `valid_from`
-  differs. `null` restores the seed defaults; an empty list is rejected.
+  differs. `null` disables target-based derivation; an empty list is rejected.
 - `glue_weight_inputs`: derivation steps keyed by step name, each with a
   `measured` result code, an optional `subtract` list, an optional `label`,
   `test_type` and `result_code`. A step may not subtract or store its result in
-  the code it measures. `null` restores the seed defaults.
-- `glue_process_default`: the process applied when a run does not name one.
-  `null` is fine — an institute with exactly one configured process resolves to
-  it automatically.
+  the code it measures. An optional `by_type_code` object replaces
+  `measured`/`subtract`/`result_code` for an exact normalized component type;
+  unmatched types keep the base formula and populated result fields never pick
+  an override. `null` disables input-based derivation.
+- `glue_default_process`: the explicit process applied when a run does not name
+  one. It must match a configured target process. A single configured process
+  is never inferred; `null` leaves the process unknown. The development-only
+  alias `glue_process_default` is accepted on input for migration and persisted
+  under the canonical key.
 - `glue_process_property`: the PDB property or result code under which a run
   names its own glue process. `null` by default.
 
@@ -248,18 +253,21 @@ the value staged for upload is converted back to grams.
 
 **Selecting a rule set.** All entries whose `process` matches, then the one with
 the greatest `valid_from` not later than the run's `measured_at`. `valid_from:
-null` always qualifies and loses to any dated rule. A run without a measurement
-date, and a row with no run at all, select the newest rule — the one a
-measurement taken today would be judged by. The validity period is not
-decoration: the sheet this replaces runs two generations of the same rule side
-by side, so a profile that knows one set of constants misjudges older runs.
+null` always qualifies and loses to any dated rule. A run without a trustworthy
+measurement date, and a row with no run at all, may use only that explicit
+`null` fallback; they never select a dated or future rule. The validity period
+is not decoration: the sheet this replaces runs two generations of the same
+rule side by side, so a profile that knows one set of constants misjudges older
+runs.
 
 **Which steps appear.** Every step configured in `glue_weight_inputs` for the
 row's test type, except where the selected rule *knows* the module type and that
 type carries no entry for the step — that is the profile stating that this type
 has no such gluing step (a half-module carries no powerboard). A module type the
 rule has never seen keeps all its steps and reports `no_target`, so a profile gap
-stays visible.
+stays visible. Before evaluation, an exact `by_type_code` entry may replace the
+step's scale-reading formula. This is how one- and two-hybrid H1/H1H2 chains are
+represented without guessing from whichever payload fields happen to be filled.
 
 **The derived payload** appears on `worksheet.groups[].rows[].derived` of
 `GET /api/components/{sn}/preview` and on `derived` of
@@ -297,9 +305,11 @@ because an empty input looked exactly like a result. `input.value` is the raw
 reading in grams, `null` where it is missing — never a substituted zero.
 
 `process_source` is `run` when the run named its own process through
-`glue_process_property`, `profile_default` when the profile's default (explicit
-or the single configured process) applied, and `unknown` when neither could be
-established. An unknown process yields no rule set and therefore `no_target`.
+`glue_process_property`, `profile_default` when the explicit
+`glue_default_process` applied, and `unknown` when neither value names a
+configured rule set. An unknown process yields no rule set and therefore
+`no_target`; itkFlow never infers it from `GW_METHOD`, a sheet heading, a sample
+prefix or the sole configured process.
 
 **Derivation in the dry-run.** `GET /api/ingest/files/{id}/preview` derives from
 the uploaded payload before anything is staged, so the operator sees the verdict
@@ -309,6 +319,11 @@ outbox action payload. They ride on the write intent, not on the ingest file:
 the received document keeps matching the `sha256` it was recorded under. A step
 without a computed value contributes nothing — an upload never carries a
 fabricated zero.
+
+For an unmirrored component, the preview may receive `?institute_code=…` and
+returns the profile code it actually used. Proposal validation and derivation
+use that same final profile; a payload institution that conflicts with the
+selected institute fails closed instead of mixing two institutes' rules.
 
 Withdrawn runs (`state='deleted'`) never produce a verdict, in line with the
 rest of the evidence handling.

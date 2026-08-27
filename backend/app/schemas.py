@@ -185,6 +185,29 @@ class TestRunAttachmentOut(BaseModel):
     is_image: bool
 
 
+class ChildAttachmentsOut(BaseModel):
+    """One direct child's locally stored images, tagged with whose they are."""
+
+    sn: str
+    component_type: str
+    type_code: str
+    local_name: str | None
+    attachments: list[TestRunAttachmentOut]
+
+
+class ComponentAttachmentsOut(BaseModel):
+    """A component's own attachment index plus its children's stored images.
+
+    The children stay in their own groups rather than being folded into
+    `attachments`: a photograph of a sensor is evidence about that sensor, and
+    a gallery that hides which part it shows states something untrue.
+    """
+
+    component_sn: str
+    attachments: list[TestRunAttachmentOut]
+    children: list[ChildAttachmentsOut]
+
+
 class ComponentPreviewTestOut(BaseModel):
     """One staged, not-yet-pushed test upload ("ghost").
 

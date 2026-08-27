@@ -879,6 +879,142 @@ def test_share_link_candidates_cover_both_share_url_forms():
     assert candidates(plain_file) == [plain_file]
 
 
+def test_the_web_ui_share_url_maps_onto_the_dav_route():
+    """CERNBox's web UI addresses the same public share as
+    `/files/link/public/<token>[/<file inside it>]`, and links pasted out of a
+    browser carry that form — 20 powerboard pictures in the owner's mirror do.
+    Unrewritten it serves the single-page app, which the HTML guard refuses, so
+    those bytes were never stored."""
+    candidates = attachment_store._share_link_candidates
+    host = "https://cernbox.cern.ch"
+
+    # A folder share plus the file's own path inside it: the path is carried
+    # over to the DAV route. `/s/<token>/download` is deliberately absent — on
+    # a folder share it answers with the whole folder as a zip, which would be
+    # stored under this attachment's code.
+    assert candidates(f"{host}/files/link/public/tok/20USED20000062") == [
+        f"{host}/remote.php/dav/public-files/tok/20USED20000062",
+        f"{host}/files/link/public/tok/20USED20000062",
+    ]
+    # A bare token addresses a single shared file, so the older routes remain.
+    assert candidates(f"{host}/files/link/public/tok") == [
+        f"{host}/remote.php/dav/public-files/tok",
+        f"{host}/s/tok/download",
+        f"{host}/files/link/public/tok",
+    ]
+    # Nested paths survive whole.
+    assert candidates(f"{host}/files/link/public/tok/2026/vis/front.jpg")[0] == (
+        f"{host}/remote.php/dav/public-files/tok/2026/vis/front.jpg"
+    )
+
+
+def test_a_web_ui_share_link_is_downloaded_from_the_dav_route(
+    session, settings, evidence, monkeypatch
+):
+    served: list[str] = []
+
+    def _open(url, timeout):
+        served.append(url)
+        if "/remote.php/dav/public-files/" in url:
+            return _PublicResponse(url, JPEG)
+        return _PublicResponse(url, HTML_ERROR_PAGE, "text/html")
+
+    _set_attachment_descriptor(
+        session,
+        evidence,
+        {
+            "code": "d" * 64,
+            "filename": "20USED20000062",
+            "type": "share_link",
+            "source": "share_link",
+            "url": "https://cernbox.cern.ch/files/link/public/tok/20USED20000062",
+        },
+    )
+    monkeypatch.setattr(attachment_store, "_open_public_url", _open)
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.downloaded == 1
+    assert served == [
+        "https://cernbox.cern.ch/remote.php/dav/public-files/tok/20USED20000062"
+    ]
+    row = session.scalar(select(TestRunAttachment))
+    assert resolve_path(settings, row).read_bytes() == JPEG
+
+
+def test_a_web_ui_share_link_serving_only_html_is_still_refused(
+    session, settings, evidence, monkeypatch
+):
+    """The new route must not weaken the guard that made these misses visible:
+    an expired or sign-in-walled share answers 200 with the viewer page, and a
+    stored viewer page is a broken image that looks mirrored."""
+    _set_attachment_descriptor(
+        session,
+        evidence,
+        {
+            "code": "e" * 63 + "1",
+            "type": "share_link",
+            "source": "share_link",
+            "url": "https://cernbox.cern.ch/files/link/public/tok/photo.jpg",
+        },
+    )
+    monkeypatch.setattr(
+        attachment_store,
+        "_open_public_url",
+        lambda url, timeout: _PublicResponse(url, HTML_ERROR_PAGE, "text/html"),
+    )
+
+    stats = download_attachments(
+        session, _FakeGateway(configured=False), settings, "20USEM20000041"
+    )
+    session.commit()
+
+    assert stats.failed == 1
+    assert resolve_path(settings, session.scalar(select(TestRunAttachment))) is None
+
+
+def test_a_private_web_ui_location_is_refused_without_any_request(
+    session, settings, evidence, monkeypatch
+):
+    """One row in the owner's mirror points at somebody's personal CERNBox
+    space rather than at a share. It is unfetchable by design — itkFlow holds
+    no credentials for it — so it must cost nothing, this sweep and every
+    later one, instead of collecting the same login page forever."""
+
+    def _must_not_open(url, timeout):
+        raise AssertionError("a private web-UI location must not be requested")
+
+    monkeypatch.setattr(attachment_store, "_open_public_url", _must_not_open)
+    for index, url in enumerate(
+        (
+            "https://cernbox.cern.ch/files/spaces/eos/user/a/aabel/Sensors?view-mode=tiles",
+            "https://syncandshare.example.org/index.php/apps/files/?dir=/Inspection",
+        ),
+        start=1,
+    ):
+        _set_attachment_descriptor(
+            session,
+            evidence,
+            {
+                "code": f"{index}" * 64,
+                "type": "share_link",
+                "source": "share_link",
+                "url": url,
+            },
+        )
+
+        stats = download_attachments(
+            session, _FakeGateway(configured=False), settings, "20USEM20000041"
+        )
+        session.commit()
+
+        assert stats.failed == 1, url
+        assert attachment_store._share_link_candidates(url) == [], url
+
+
 def test_same_filename_across_runs_all_land_on_disk(session, settings):
     """Observed live: several runs of one module carry attachments with the
     identical filename but distinct PDB codes, and one variant stayed
@@ -1279,6 +1415,50 @@ def test_permanent_failures_and_successes_reset_the_breaker():
     breaker.record_success()
     breaker.record_failure(transient=True)
     assert breaker.tripped is False
+
+
+def test_reused_file_does_not_reset_transient_failure_streak(
+    session, settings, no_sleep
+):
+    def descriptor(code: str) -> dict:
+        return {
+            "component_sn": "20USEM20000051",
+            "test_type": "VISUAL_INSPECTION",
+            "test_run_ref": "RUN-10",
+            "code": code,
+            "filename": f"{code}.jpg",
+            "content_type": "image/jpeg",
+            "title": None,
+            "type": "file",
+            "url": None,
+            "source": "pdb",
+        }
+
+    reused = descriptor("already-mirrored")
+    first = download_attachments(
+        session,
+        _FakeGateway(),
+        settings,
+        "20USEM20000051",
+        descriptors=[reused],
+    )
+    session.commit()
+    assert first.downloaded == 1
+
+    breaker = attachment_store.OutageCircuitBreaker(threshold=2)
+    outage = _FlakyClient(failures=999)
+    stats = download_attachments(
+        session,
+        _FakeGateway(outage),
+        settings,
+        "20USEM20000051",
+        descriptors=[descriptor("missing-1"), reused, descriptor("missing-2")],
+        breaker=breaker,
+    )
+    session.commit()
+
+    assert stats.failed == 2 and stats.reused == 1
+    assert breaker.tripped is True
 
 
 def test_the_default_breaker_threshold_is_a_small_named_constant():

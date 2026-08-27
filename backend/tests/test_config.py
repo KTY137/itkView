@@ -97,3 +97,51 @@ def test_ops_heartbeat_threshold_is_local_and_bounded():
     assert make_settings(ops_heartbeat_stale_seconds=91).ops_heartbeat_stale_seconds == 91
     with pytest.raises(ValidationError):
         make_settings(ops_heartbeat_stale_seconds=0)
+
+
+def test_evidence_sweep_strategy_is_switchable():
+    # Default is the batched index/bulk sweep; the proven per-component sweep
+    # stays selectable without a code change.
+    assert make_settings().sync_evidence_strategy == "index_bulk"
+    assert (
+        make_settings(sync_evidence_strategy="per_component").sync_evidence_strategy
+        == "per_component"
+    )
+    with pytest.raises(ValidationError):
+        make_settings(sync_evidence_strategy="whatever")
+
+
+def test_evidence_batch_sizes_are_configurable_and_bounded():
+    settings = make_settings()
+    assert settings.sync_evidence_index_batch_size == 50
+    assert settings.sync_evidence_index_page_size == 100
+    assert settings.sync_evidence_bulk_batch_size == 50
+
+    tuned = make_settings(
+        sync_evidence_index_batch_size=10,
+        sync_evidence_index_page_size=25,
+        sync_evidence_bulk_batch_size=20,
+    )
+    assert tuned.sync_evidence_index_batch_size == 10
+    assert tuned.sync_evidence_index_page_size == 25
+    assert tuned.sync_evidence_bulk_batch_size == 20
+
+    for field in (
+        "sync_evidence_index_batch_size",
+        "sync_evidence_index_page_size",
+        "sync_evidence_bulk_batch_size",
+    ):
+        with pytest.raises(ValidationError):
+            make_settings(**{field: 0})
+        with pytest.raises(ValidationError):
+            make_settings(**{field: 100_000})
+
+
+def test_evidence_batch_sizes_come_from_the_itkflow_env_prefix(monkeypatch):
+    monkeypatch.setenv("ITKFLOW_SYNC_EVIDENCE_INDEX_BATCH_SIZE", "7")
+    monkeypatch.setenv("ITKFLOW_SYNC_EVIDENCE_BULK_BATCH_SIZE", "9")
+    monkeypatch.setenv("ITKFLOW_SYNC_EVIDENCE_STRATEGY", "per_component")
+    settings = make_settings()
+    assert settings.sync_evidence_index_batch_size == 7
+    assert settings.sync_evidence_bulk_batch_size == 9
+    assert settings.sync_evidence_strategy == "per_component"

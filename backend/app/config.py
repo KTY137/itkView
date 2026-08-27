@@ -95,6 +95,36 @@ class Settings(BaseSettings):
     # sweep; the small default keeps the load on the production PDB modest
     # while cutting a multi-hour sweep down by roughly that factor.
     sync_fetch_concurrency: int = Field(default=4, ge=1, le=16)
+    # How often the unattended-refresh scheduler WAKES UP to evaluate the
+    # institute profiles. This is a database query, not PDB traffic: whether a
+    # sweep actually runs is decided per institute by
+    # `settings["auto_sync"]` (Admin Settings), which is absent by default.
+    # `0` switches the scheduler off entirely as a deployment escape hatch.
+    auto_sync_poll_minutes: int = Field(default=5, ge=0, le=1440)
+    # How the institute evidence sweep learns which test runs exist.
+    #   "index_bulk"     — ask `listTestRunsByComponent` for a whole batch of
+    #                      serial numbers at once, then pull the detail of the
+    #                      new/changed runs through `getTestRunBulk`. Roughly
+    #                      one request per 300 runs instead of one per
+    #                      component. Anything the batched answer cannot prove
+    #                      complete is re-read through the per-component path,
+    #                      so this can be slower than expected but never
+    #                      mirrors less (docs/09).
+    #   "per_component"  — the proven `getComponent`-per-component sweep, kept
+    #                      as a one-setting escape hatch because the batched
+    #                      endpoints could not be validated against a live PDB.
+    sync_evidence_strategy: Literal["index_bulk", "per_component"] = "index_bulk"
+    # Serial numbers per `listTestRunsByComponent` request. Bounded because the
+    # filter travels in the request body and an unbounded IN-list is exactly
+    # the shape a server silently truncates.
+    sync_evidence_index_batch_size: int = Field(default=50, ge=1, le=500)
+    # Page size for the paginated test-run index. A batch whose answer arrives
+    # without pagination metadata is only trusted when it does not exactly fill
+    # this page, so raising it also widens that safety margin.
+    sync_evidence_index_page_size: int = Field(default=100, ge=10, le=500)
+    # Test-run ids per `getTestRunBulk` request. Ids the bulk answer omits fall
+    # back to one `getTestRun` each, so a modest batch keeps that repair cheap.
+    sync_evidence_bulk_batch_size: int = Field(default=50, ge=1, le=200)
 
     # --- Outbox worker ----------------------------------------------------
     # Which process submits approved outbox actions to the PDB:

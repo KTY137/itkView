@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getLatestSyncJob,
   getSyncJob,
@@ -10,6 +10,14 @@ import { parseApiTimestamp } from "./i18n";
 
 const POLL_INTERVAL_MS = 1_000;
 const POLL_RETRY_MS = 3_000;
+// Rolling readout: how often a *running* job may invite its consumers to
+// re-read the mirror. An evidence sweep commits each component as it arrives,
+// so the data is already there — without this the screen sat on stale rows for
+// the whole run and everything appeared at once at the end. Deliberately much
+// slower than the status poll: the status record is tiny, a mirror re-read is
+// not, and a person only needs to see the sweep filling in, not every row the
+// instant it lands.
+const PROGRESSIVE_REFRESH_MS = 8_000;
 // A component job is committed just before its evidence follow-up is leased.
 // These bounded retries bridge that short race without turning idle screens
 // into a permanent discovery poller.
@@ -46,6 +54,19 @@ export type SyncJobController = {
   discovering: boolean;
   startError: string | null;
   pollError: string | null;
+  /**
+   * Increments while a job is running and has actually advanced, at most every
+   * `PROGRESSIVE_REFRESH_MS`. It stops at the terminal status on purpose:
+   * consumers already reload on `succeeded`, and bumping again there would
+   * only buy a duplicate fetch.
+   *
+   * Consumers that read the mirror can depend on this to fill in progressively
+   * instead of waiting for the terminal status. Only meaningful for jobs that
+   * commit incrementally — the evidence sweep commits per component, while the
+   * component sync writes its whole mirror in one final transaction and has
+   * nothing to show mid-run.
+   */
+  dataEpoch: number;
   start: (instituteCode: string) => Promise<void>;
   dismiss: () => void;
 };
@@ -66,6 +87,10 @@ function usePersistedSyncJob(
   const [discovering, setDiscovering] = useState(enabled);
   const [startError, setStartError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
+  const [dataEpoch, setDataEpoch] = useState(0);
+  // Throttle state for the rolling readout. Refs, not state: updating these
+  // must never itself schedule a render, or the poll loop would re-run.
+  const lastRefresh = useRef({ at: 0, current: -1, jobId: -1 });
 
   useEffect(() => {
     if (!enabled) {
@@ -137,6 +162,28 @@ function usePersistedSyncJob(
       timer = window.setTimeout(() => void poll(), delay);
     };
 
+    /**
+     * Invite consumers to re-read the mirror, but only when it can pay off:
+     * the job must have moved (`current` advanced) since the last invitation,
+     * and at most one invitation per `PROGRESSIVE_REFRESH_MS`. A job that is
+     * retrying a slow page keeps its heartbeat fresh without advancing, and
+     * re-reading the mirror for that would cost a request and show nothing.
+     */
+    const maybeAdvanceEpoch = (next: SyncJob) => {
+      const previous = lastRefresh.current;
+      const now = Date.now();
+      if (previous.jobId !== next.id) {
+        // A different job: arm the throttle without firing, so switching jobs
+        // does not by itself trigger a refetch.
+        lastRefresh.current = { at: now, current: next.current, jobId: next.id };
+        return;
+      }
+      if (next.current <= previous.current) return;
+      if (now - previous.at < PROGRESSIVE_REFRESH_MS) return;
+      lastRefresh.current = { at: now, current: next.current, jobId: next.id };
+      setDataEpoch((epoch) => epoch + 1);
+    };
+
     const poll = async () => {
       try {
         const next = await getSyncJob(jobId, ctrl.signal);
@@ -146,7 +193,10 @@ function usePersistedSyncJob(
         }
         setJob(next);
         setPollError(null);
-        if (isSyncJobActive(next)) schedule(POLL_INTERVAL_MS);
+        if (isSyncJobActive(next)) {
+          maybeAdvanceEpoch(next);
+          schedule(POLL_INTERVAL_MS);
+        }
       } catch (error) {
         if (ctrl.signal.aborted || isAbortError(error)) return;
         setPollError(errorMessage(error));
@@ -189,8 +239,18 @@ function usePersistedSyncJob(
 
   const active = isSyncJobActive(job);
   return useMemo(
-    () => ({ kind, job, active, discovering, startError, pollError, start, dismiss }),
-    [kind, job, active, discovering, startError, pollError, start, dismiss],
+    () => ({
+      kind,
+      job,
+      active,
+      discovering,
+      startError,
+      pollError,
+      dataEpoch,
+      start,
+      dismiss,
+    }),
+    [kind, job, active, discovering, startError, pollError, dataEpoch, start, dismiss],
   );
 }
 

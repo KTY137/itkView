@@ -26,9 +26,29 @@ Betriebsart tatsaechlich draint, steht in
 [`docs/11-logistics-operations.md`](../11-logistics-operations.md).
 
 - **Zustaendigkeit:** Der Worker beansprucht Aktionen in `approved` (frisch
-  freigegeben) und `submitted` (Crash-Recovery oder manueller
-  `failed → submitted`-Retry). Menschen fuehren nur bis `approved`; das UI muss
-  Submit/Confirm nicht mehr manuell ausloesen.
+  freigegeben), `submitted` (Crash-Recovery: `external_ref` bereits gesetzt
+  bedeutet bereits geschrieben) und **direkt auch `failed`** — aber nur
+  transiente, an `PDB unavailable:` erkennbare Fehler, und erst wenn ihr
+  exponentielles Backoff abgelaufen ist (`retry_ready()` in
+  `app/outbox_worker.py`). Menschen fuehren nur bis `approved`; das UI muss
+  weder Submit/Confirm noch einen Failed-Retry manuell ausloesen. Ein
+  `failed → submitted` per `POST /api/outbox/{id}/transition` bleibt als
+  Notausgang moeglich (z. B. um einen nicht-transienten, nach Korrektur wieder
+  gueltigen Fehler erneut zu versuchen), ist aber kein Teil des normalen
+  Ablaufs.
+- **Ein-Prozess-Deployments (Ergaenzung 2026-08-26):** `Settings.outbox_processor`
+  waehlt, wer drainet: `"worker"` (Compose startet `app.run_worker` als
+  eigenen Service, Default), `"app"` (die API drained sich selbst ueber
+  `app/outbox_processor.py::OutboxProcessor`, einen Asyncio-Task im selben
+  Prozess) oder `"off"` (niemand, Tests). Genau ein Prozess darf drainen;
+  Aktionen werden transaktional beansprucht, eine Fehlkonfiguration kann
+  dieselbe Aktion nicht doppelt schreiben. Desktop-Bundle
+  (`backend/app/desktop_server.py`) setzt `"app"`, weil das Einzelprozess-Paket
+  keinen separaten Worker mitbringt — ohne das bliebe eine freigegebene Aktion
+  fuer immer bei `submitted` stehen. Der Dev-Launcher laesst den Drain bewusst
+  aus (Default bleibt `"worker"`, ohne dass dort ein Worker-Prozess laeuft);
+  manuelles `python -m app.run_worker --once` bleibt der bewusste Handgriff,
+  eine Entwicklungssession trotzdem einmal draining zu lassen.
 - **Ablauf je Aktion** (`app/outbox_worker.py`): `approved → submitted`
   (attempts++) → Dry-Run erneut gegen den *aktuellen* Mirror pruefen → Submitter
   aufrufen → `confirmed` (mit `external_ref`) oder `failed`.

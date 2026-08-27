@@ -68,7 +68,9 @@ Englisch: App-UI, API-/Fehlermeldungen, [`../deploy/README.md`](../deploy/README
    [`11-logistics-operations.md`](11-logistics-operations.md) (Glue-, Shipment-,
    Reminder- und Operations-Screens),
    [`12-attachments-and-images.md`](12-attachments-and-images.md) (Bilder,
-   Galerie, Thumbnails).
+   Galerie, Thumbnails),
+   [`13-metrology-artifacts.md`](13-metrology-artifacts.md) (warum die
+   Metrologie-Kachel kein Bild zeigen kann und was ihre Dateinamen wert sind).
 7. [`04-roadmap.md`](04-roadmap.md) — dort steht jede UI-Aenderung im
    „Aktueller Stand", und dorthin gehoert auch deine.
 

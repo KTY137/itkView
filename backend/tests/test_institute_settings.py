@@ -576,3 +576,294 @@ def test_telegram_and_email_secrets_survive_an_unrelated_structured_save(
         stored = session.get(InstituteProfile, tudo["id"])
     assert stored.settings["notification_channels"]["telegram"]["url"] == telegram_url
     assert stored.settings["notification_channels"]["email"]["smtp_password"] == smtp_password
+
+
+# -- unattended sync schedule (`auto_sync`) ---------------------------------
+#
+# The one institute setting that makes itkFlow contact the PDB on its own,
+# without anyone asking for it at that moment. The reader in `app.auto_sync`
+# fails closed (a malformed block reads as "off", a too-small interval is
+# lifted to the floor), so this validator is the only thing that ever tells a
+# person their input was wrong — which is why every rejection is pinned here.
+
+
+def _schedule(**overrides):
+    """The documented block, with the field under test replaced."""
+
+    block = {
+        "enabled": True,
+        "interval_minutes": 60,
+        "window_start": "07:00",
+        "window_end": "19:00",
+        "weekdays": [1, 2, 3, 4, 5],
+    }
+    block.update(overrides)
+    return block
+
+
+def _normalize_auto_sync(block, existing=None):
+    return normalize_institute_settings_update(existing or {}, {"auto_sync": block})[
+        "auto_sync"
+    ]
+
+
+def test_auto_sync_accepts_the_documented_shape():
+    assert _normalize_auto_sync(_schedule()) == {
+        "enabled": True,
+        "interval_minutes": 60,
+        "window_start": "07:00",
+        "window_end": "19:00",
+        "weekdays": [1, 2, 3, 4, 5],
+    }
+
+
+def test_auto_sync_is_absent_unless_the_patch_mentions_it():
+    normalised = normalize_institute_settings_update(
+        {}, {"shipment_reception_checklist": ["Count modules"]}
+    )
+
+    # An unrelated save must never write a schedule into a profile that has
+    # none: absence is how "no unattended traffic" is stored.
+    assert "auto_sync" not in normalised
+
+
+def test_auto_sync_null_clears_the_schedule_back_to_off():
+    from app.auto_sync import read_auto_sync_schedule
+
+    normalised = normalize_institute_settings_update(
+        {"auto_sync": _schedule()}, {"auto_sync": None}
+    )
+
+    assert normalised["auto_sync"] is None
+    assert read_auto_sync_schedule(normalised).enabled is False
+
+
+def test_auto_sync_keeps_an_overnight_window_as_written():
+    from app.auto_sync import read_auto_sync_schedule
+
+    stored = _normalize_auto_sync(
+        _schedule(window_start="22:00", window_end="06:00", weekdays=[5])
+    )
+
+    # Crossing midnight is what "sync overnight" means; a validator demanding
+    # start <= end would forbid the most considerate schedule there is.
+    assert stored["window_start"] == "22:00"
+    assert stored["window_end"] == "06:00"
+    schedule = read_auto_sync_schedule({"auto_sync": stored})
+    assert (schedule.window_start, schedule.window_end) == ("22:00", "06:00")
+    assert schedule.weekdays == (5,)
+
+
+def test_auto_sync_disabled_block_keeps_its_window_and_stays_inert():
+    from app.auto_sync import read_auto_sync_schedule
+
+    stored = _normalize_auto_sync(_schedule(enabled=False))
+
+    # A schedule may be prepared and switched off without losing what it says,
+    # but "off" has to mean off for the scheduler.
+    assert stored["enabled"] is False
+    assert stored["window_start"] == "07:00"
+    assert read_auto_sync_schedule({"auto_sync": stored}).enabled is False
+
+
+def test_auto_sync_interval_floor_matches_the_scheduler():
+    from app.auto_sync import MIN_INTERVAL_MINUTES
+    from app.institute_settings import _MIN_AUTO_SYNC_INTERVAL_MINUTES
+
+    # If these drift apart, one side rejects what the other accepts and a
+    # schedule looks configured on screen while never firing.
+    assert _MIN_AUTO_SYNC_INTERVAL_MINUTES == MIN_INTERVAL_MINUTES
+
+
+def test_auto_sync_accepts_exactly_the_floor():
+    assert _normalize_auto_sync(_schedule(interval_minutes=15))["interval_minutes"] == 15
+
+
+@pytest.mark.parametrize("interval", [14, 1, 0, -60])
+def test_auto_sync_rejects_an_interval_below_the_floor(interval):
+    with pytest.raises(InstituteSettingsValidationError, match="interval_minutes"):
+        _normalize_auto_sync(_schedule(interval_minutes=interval))
+
+
+@pytest.mark.parametrize("interval", ["60", 60.5, True, None, 10_081])
+def test_auto_sync_rejects_a_non_integer_or_oversized_interval(interval):
+    with pytest.raises(InstituteSettingsValidationError, match="interval_minutes"):
+        _normalize_auto_sync(_schedule(interval_minutes=interval))
+
+
+def test_auto_sync_requires_an_interval():
+    block = _schedule()
+    del block["interval_minutes"]
+
+    with pytest.raises(InstituteSettingsValidationError, match="interval_minutes"):
+        _normalize_auto_sync(block)
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"enabled": True, "interval_minutes": 60, "window_start": "07:00"},
+        {"enabled": True, "interval_minutes": 60, "window_end": "19:00"},
+        {
+            "enabled": True,
+            "interval_minutes": 60,
+            "window_start": "07:00",
+            "window_end": None,
+        },
+    ],
+)
+def test_auto_sync_rejects_half_a_window(block):
+    with pytest.raises(InstituteSettingsValidationError, match="set together"):
+        _normalize_auto_sync(block)
+
+
+@pytest.mark.parametrize(
+    "moment", ["7:00", "24:00", "07:60", "0700", "07:00:00", "", "noon", 700]
+)
+def test_auto_sync_rejects_a_malformed_time(moment):
+    with pytest.raises(InstituteSettingsValidationError, match="HH:MM"):
+        _normalize_auto_sync(_schedule(window_start=moment))
+
+
+def test_auto_sync_trims_surrounding_whitespace_from_a_time():
+    assert _normalize_auto_sync(_schedule(window_start=" 07:00 "))["window_start"] == "07:00"
+
+
+def test_auto_sync_rejects_a_window_that_starts_and_ends_at_the_same_minute():
+    # The reader treats an identical pair as no window at all, so storing one
+    # would promise a daytime limit that never applies.
+    with pytest.raises(InstituteSettingsValidationError, match="must differ"):
+        _normalize_auto_sync(_schedule(window_start="07:00", window_end="07:00"))
+
+
+def test_auto_sync_accepts_a_schedule_without_a_window():
+    stored = _normalize_auto_sync(_schedule(window_start=None, window_end=None))
+
+    assert stored["window_start"] is None
+    assert stored["window_end"] is None
+
+
+@pytest.mark.parametrize("weekdays", [[0], [8], [-1], [1, 8]])
+def test_auto_sync_rejects_a_weekday_outside_the_iso_range(weekdays):
+    with pytest.raises(InstituteSettingsValidationError, match=r"1 \(Monday\)"):
+        _normalize_auto_sync(_schedule(weekdays=weekdays))
+
+
+@pytest.mark.parametrize("weekdays", [["1"], [True], [1.0], [None]])
+def test_auto_sync_rejects_weekdays_that_are_not_whole_numbers(weekdays):
+    with pytest.raises(InstituteSettingsValidationError, match="whole numbers"):
+        _normalize_auto_sync(_schedule(weekdays=weekdays))
+
+
+def test_auto_sync_rejects_duplicate_weekdays():
+    with pytest.raises(InstituteSettingsValidationError, match="repeat a day"):
+        _normalize_auto_sync(_schedule(weekdays=[1, 2, 1]))
+
+
+def test_auto_sync_rejects_an_empty_weekday_list():
+    # Unticking every day means "never". Stored as an empty list the reader
+    # would read it as "every day" — the opposite, and unattended traffic in
+    # exactly the case somebody tried to prevent.
+    with pytest.raises(InstituteSettingsValidationError, match="at least one day"):
+        _normalize_auto_sync(_schedule(weekdays=[]))
+
+
+def test_auto_sync_rejects_weekdays_that_are_not_a_list():
+    with pytest.raises(InstituteSettingsValidationError, match="weekdays"):
+        _normalize_auto_sync(_schedule(weekdays={"monday": True}))
+
+
+def test_auto_sync_null_weekdays_mean_every_day():
+    from app.auto_sync import read_auto_sync_schedule
+
+    stored = _normalize_auto_sync(_schedule(weekdays=None))
+
+    assert stored["weekdays"] is None
+    assert read_auto_sync_schedule({"auto_sync": stored}).weekdays == ()
+
+
+def test_auto_sync_sorts_the_weekdays_it_stores():
+    assert _normalize_auto_sync(_schedule(weekdays=[7, 1, 3]))["weekdays"] == [1, 3, 7]
+
+
+def test_auto_sync_rejects_an_unknown_key():
+    # Above all `timezone`: the window is server local time on purpose, and a
+    # profile carrying a zone nobody reads would be a promise that is not kept.
+    with pytest.raises(InstituteSettingsValidationError, match="only supports"):
+        _normalize_auto_sync({**_schedule(), "timezone": "Europe/Berlin"})
+
+
+@pytest.mark.parametrize("block", [[], "on", 60, True])
+def test_auto_sync_rejects_a_block_that_is_not_an_object(block):
+    with pytest.raises(InstituteSettingsValidationError, match="must be an object"):
+        _normalize_auto_sync(block)
+
+
+@pytest.mark.parametrize("enabled", ["true", 1, None, ...])
+def test_auto_sync_requires_enabled_to_be_a_boolean(enabled):
+    block = _schedule()
+    if enabled is ...:
+        del block["enabled"]
+    else:
+        block["enabled"] = enabled
+
+    with pytest.raises(InstituteSettingsValidationError, match="true or false"):
+        _normalize_auto_sync(block)
+
+
+def test_admin_saves_an_auto_sync_schedule(as_admin, session_factory, tudo):
+    response = as_admin.patch(
+        "/api/institutes/TUDO",
+        json={
+            "settings": {
+                "auto_sync": {
+                    "enabled": True,
+                    "interval_minutes": 120,
+                    "window_start": "22:00",
+                    "window_end": "06:00",
+                    "weekdays": [5, 6],
+                }
+            }
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["settings"]["auto_sync"] == {
+        "enabled": True,
+        "interval_minutes": 120,
+        "window_start": "22:00",
+        "window_end": "06:00",
+        "weekdays": [5, 6],
+    }
+    with session_factory() as session:
+        stored = session.get(InstituteProfile, tudo["id"])
+        assert stored.settings["auto_sync"]["interval_minutes"] == 120
+
+
+def test_admin_cannot_save_a_schedule_below_the_floor(as_admin, session_factory, tudo):
+    response = as_admin.patch(
+        "/api/institutes/TUDO",
+        json={"settings": {"auto_sync": {"enabled": True, "interval_minutes": 5}}},
+    )
+
+    assert response.status_code == 422, response.text
+    with session_factory() as session:
+        stored = session.get(InstituteProfile, tudo["id"])
+        assert "auto_sync" not in (stored.settings or {})
+
+
+def test_an_unrelated_admin_save_does_not_switch_a_schedule_on(
+    as_admin, session_factory, tudo
+):
+    from app.auto_sync import read_auto_sync_schedule
+
+    response = as_admin.patch(
+        "/api/institutes/TUDO",
+        json={"settings": {"shipment_reception_checklist": ["Count modules"]}},
+    )
+
+    assert response.status_code == 200, response.text
+    with session_factory() as session:
+        stored = session.get(InstituteProfile, tudo["id"])
+        assert "auto_sync" not in (stored.settings or {})
+        assert read_auto_sync_schedule(stored.settings).enabled is False

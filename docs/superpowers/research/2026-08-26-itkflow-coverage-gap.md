@@ -1,5 +1,12 @@
 # itkFlow-Abdeckung der zFlow-Blätter — Ist-Aufnahme (Gap-Matrix)
 
+> **Historischer Snapshot vom 2026-08-26.** Die Glue-Zeilen und ihre
+> Klassen zaehlen bewusst den damaligen Stand. E2 wurde am 2026-08-27
+> umgesetzt; den aktuellen Vertrag und Status beschreiben
+> [`../specs/2026-08-27-modulseite-als-arbeitsblatt.md`](../specs/2026-08-27-modulseite-als-arbeitsblatt.md)
+> §9 und [`../../04-roadmap.md`](../../04-roadmap.md). Die damalige Recherche
+> wird nicht rueckwirkend umgeschrieben.
+
 **Zweck.** Zeilenweise Antwort auf: *Wo lebt diese Blattzeile heute in itkFlow?*
 Quelle der Zeilen:
 [`2026-08-26-zflow-sheet-transcription.md`](2026-08-26-zflow-sheet-transcription.md).

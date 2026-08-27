@@ -120,6 +120,30 @@ SHEET_GLUE_SETTINGS = {
     "glue_default_process": "TRUEBLUE",
 }
 
+TYPE_SPECIFIC_GLUE_SETTINGS = {
+    **SHEET_GLUE_SETTINGS,
+    "glue_weight_inputs": {
+        **GLUE_WEIGHT_INPUT_SETTINGS,
+        "hybrids": {
+            **GLUE_WEIGHT_INPUT_SETTINGS["hybrids"],
+            "by_type_code": {
+                "R2": {
+                    "measured": "GW_MODULE_H1H2",
+                    "subtract": ["GW_SENSOR", "GW_HYBRID1", "GW_HYBRID2"],
+                    "result_code": "GW_GLUE_H1H2",
+                }
+            },
+        },
+    },
+}
+
+H1H2_READINGS = {
+    "GW_MODULE_H1H2": 12.1185,
+    "GW_SENSOR": 9.7522,
+    "GW_HYBRID1": 2.0,
+    "GW_HYBRID2": 0.2330,
+}
+
 
 def _steps(derivation):
     return {step.key: step for step in derivation.steps}
@@ -265,6 +289,55 @@ def test_profile_inputs_override_which_readings_are_weighed():
     assert set(_steps(derivation)) == {"hybrids"}
 
 
+def test_exact_type_code_selects_the_configured_formula_override():
+    step = _steps(
+        _derive(
+            TYPE_SPECIFIC_GLUE_SETTINGS,
+            type_code="R2",
+            results=H1H2_READINGS,
+        )
+    )["hybrids"]
+    assert [item.code for item in step.inputs] == [
+        "GW_MODULE_H1H2",
+        "GW_SENSOR",
+        "GW_HYBRID1",
+        "GW_HYBRID2",
+    ]
+    assert step.measured_mg == pytest.approx(133.3)
+    assert step.result_code == "GW_GLUE_H1H2"
+
+
+@pytest.mark.parametrize("type_code", ["R5M1_HALFMODULE", "r2", None])
+def test_unmatched_or_missing_type_code_uses_the_base_formula(type_code):
+    step = _steps(
+        _derive(TYPE_SPECIFIC_GLUE_SETTINGS, type_code=type_code, results=READINGS)
+    )["hybrids"]
+    assert [item.code for item in step.inputs] == [
+        "GW_MODULE_H1",
+        "GW_SENSOR",
+        "GW_HYBRID1",
+    ]
+    assert step.measured_mg == pytest.approx(132.7)
+    assert step.result_code == "GW_GLUE_H1"
+
+
+def test_populated_h1h2_fields_alone_do_not_select_an_override():
+    step = _steps(
+        _derive(
+            TYPE_SPECIFIC_GLUE_SETTINGS,
+            type_code="R5M1_HALFMODULE",
+            results=H1H2_READINGS,
+        )
+    )["hybrids"]
+    assert [item.code for item in step.inputs] == [
+        "GW_MODULE_H1",
+        "GW_SENSOR",
+        "GW_HYBRID1",
+    ]
+    assert step.measured_mg is None
+    assert step.reason is GlueUnknownReason.MISSING_INPUTS
+
+
 def test_absent_null_or_malformed_profile_settings_fail_closed():
     """Bad or missing profile data must not activate another site's constants."""
     assert glue_targets_from_settings(None) == ()
@@ -301,6 +374,28 @@ def test_absent_null_or_malformed_profile_settings_fail_closed():
             }
         }
     ) == ()
+    malformed_override = {
+        **SHEET_GLUE_SETTINGS,
+        "glue_weight_inputs": {
+            **GLUE_WEIGHT_INPUT_SETTINGS,
+            "hybrids": {
+                **GLUE_WEIGHT_INPUT_SETTINGS["hybrids"],
+                "by_type_code": {"R2": {"subtract": "GW_SENSOR"}},
+            },
+        },
+    }
+    assert glue_weight_inputs_from_settings(malformed_override) == ()
+    assert not glue_model_from_settings(malformed_override).derives(TEST_TYPE)
+    null_override_map = {
+        **SHEET_GLUE_SETTINGS,
+        "glue_weight_inputs": {
+            "hybrids": {
+                **GLUE_WEIGHT_INPUT_SETTINGS["hybrids"],
+                "by_type_code": None,
+            }
+        },
+    }
+    assert glue_weight_inputs_from_settings(null_override_map) == ()
     assert derive_run(
         glue_model_from_settings(None),
         test_type=TEST_TYPE,
@@ -635,6 +730,17 @@ def test_valid_glue_settings_are_normalised():
                     "measured": "gw_module_h1",
                     "subtract": ["gw_sensor", "gw_hybrid1"],
                     "result_code": "gw_glue_h1",
+                    "by_type_code": {
+                        "r2": {
+                            "measured": "gw_module_h1h2",
+                            "subtract": [
+                                "gw_sensor",
+                                "gw_hybrid1",
+                                "gw_hybrid2",
+                            ],
+                            "result_code": "gw_glue_h1h2",
+                        }
+                    },
                 }
             },
             "glue_default_process": "trueblue",
@@ -647,24 +753,99 @@ def test_valid_glue_settings_are_normalised():
     assert rule["module_types"] == {"R2": {"hybrids": {"target_mg": 164.0, "tolerance_mg": 25.0}}}
     assert out["glue_weight_inputs"]["hybrids"]["measured"] == "GW_MODULE_H1"
     assert out["glue_weight_inputs"]["hybrids"]["subtract"] == ["GW_SENSOR", "GW_HYBRID1"]
+    assert out["glue_weight_inputs"]["hybrids"]["by_type_code"] == {
+        "R2": {
+            "measured": "GW_MODULE_H1H2",
+            "subtract": ["GW_SENSOR", "GW_HYBRID1", "GW_HYBRID2"],
+            "result_code": "GW_GLUE_H1H2",
+        }
+    }
     assert out["glue_default_process"] == "TRUEBLUE"
     assert out["glue_process_property"] == "GW_PROCESS"
 
 
 def test_legacy_default_key_is_accepted_but_only_the_canonical_key_is_written():
+    existing = {
+        "glue_targets": [
+            {"process": "TRUEBLUE", "valid_from": None, "module_types": {}}
+        ]
+    }
     out = normalize_institute_settings_update(
-        {}, {"glue_process_default": "trueblue"}
+        existing, {"glue_process_default": "trueblue"}
     )
     assert out == {"glue_default_process": "TRUEBLUE"}
 
     canonical_wins = normalize_institute_settings_update(
-        {},
+        existing,
         {
             "glue_process_default": "POLARIS",
             "glue_default_process": "TRUEBLUE",
         },
     )
     assert canonical_wins == {"glue_default_process": "TRUEBLUE"}
+
+
+def test_default_process_must_match_the_effective_target_processes():
+    targets = [
+        {"process": "TRUEBLUE", "valid_from": None, "module_types": {}}
+    ]
+
+    assert normalize_institute_settings_update(
+        {"glue_targets": targets}, {"glue_default_process": "trueblue"}
+    ) == {"glue_default_process": "TRUEBLUE"}
+
+    with pytest.raises(
+        InstituteSettingsValidationError,
+        match="must match a process configured in glue_targets",
+    ):
+        normalize_institute_settings_update(
+            {"glue_targets": targets}, {"glue_default_process": "POLARIS"}
+        )
+
+    with pytest.raises(
+        InstituteSettingsValidationError,
+        match="must match a process configured in glue_targets",
+    ):
+        normalize_institute_settings_update(
+            {
+                "glue_targets": targets,
+                "glue_default_process": "TRUEBLUE",
+            },
+            {
+                "glue_targets": [
+                    {"process": "POLARIS", "valid_from": None, "module_types": {}}
+                ]
+            },
+        )
+
+
+def test_partial_type_override_is_normalised_against_the_base_formula():
+    out = normalize_institute_settings_update(
+        {},
+        {
+            "glue_weight_inputs": {
+                "hybrids": {
+                    "measured": "GW_A",
+                    "subtract": ["GW_B"],
+                    "result_code": "GW_RESULT",
+                    "by_type_code": {
+                        "r2": {"measured": "GW_C"},
+                        "r5m0": {"result_code": None},
+                    },
+                }
+            }
+        },
+    )
+    assert out["glue_weight_inputs"]["hybrids"]["by_type_code"]["R2"] == {
+        "measured": "GW_C",
+        "subtract": ["GW_B"],
+        "result_code": "GW_RESULT",
+    }
+    assert out["glue_weight_inputs"]["hybrids"]["by_type_code"]["R5M0"] == {
+        "measured": "GW_A",
+        "subtract": ["GW_B"],
+        "result_code": None,
+    }
 
 
 def test_null_disables_glue_derivation_without_a_runtime_fallback():
@@ -722,6 +903,65 @@ def test_null_disables_glue_derivation_without_a_runtime_fallback():
                 "hybrids": {"measured": "GW_A", "subtract": ["GW_B"], "result_code": "GW_B"}
             }
         },
+        {
+            "glue_weight_inputs": {
+                "hybrids": {"measured": "GW_A", "by_type_code": []}
+            }
+        },
+        {
+            "glue_weight_inputs": {
+                "hybrids": {
+                    "measured": "GW_A",
+                    "by_type_code": {"bad type": {}},
+                }
+            }
+        },
+        {
+            "glue_weight_inputs": {
+                "hybrids": {
+                    "measured": "GW_A",
+                    "by_type_code": {"r2": {}, "R2": {}},
+                }
+            }
+        },
+        {
+            "glue_weight_inputs": {
+                "hybrids": {
+                    "measured": "GW_A",
+                    "by_type_code": {"R2": {"label": "Not allowed"}},
+                }
+            }
+        },
+        {
+            "glue_weight_inputs": {
+                "hybrids": {
+                    "measured": "GW_A",
+                    "by_type_code": {
+                        "R2": {"measured": "GW_B", "subtract": ["GW_B"]}
+                    },
+                }
+            }
+        },
+        {
+            "glue_weight_inputs": {
+                "hybrids": {
+                    "measured": "GW_A",
+                    "by_type_code": {
+                        "R2": {"subtract": ["GW_B", "GW_B"]}
+                    },
+                }
+            }
+        },
+        {
+            "glue_weight_inputs": {
+                "hybrids": {
+                    "measured": "GW_A",
+                    "by_type_code": {
+                        "R2": {"subtract": ["GW_B"], "result_code": "GW_B"}
+                    },
+                }
+            }
+        },
         {"glue_weight_inputs": {"hybrids": {"measured": "GW_A", "test_type": "lower case"}}},
         {"glue_default_process": "true blue"},
         {"glue_process_default": "true blue"},
@@ -757,6 +997,34 @@ def test_glue_settings_survive_the_admin_endpoint(as_admin, session_factory, tud
     assert resp.status_code == 200, resp.text
     assert resp.json()["settings"]["glue_targets"][0]["process"] == "TRUEBLUE"
     assert resp.json()["settings"]["glue_default_process"] == "TRUEBLUE"
+
+
+def test_admin_endpoint_removes_the_legacy_default_after_migration(
+    as_admin, session_factory, tudo
+):
+    with session_factory() as session:
+        profile = session.scalar(
+            select(InstituteProfile).where(InstituteProfile.code == tudo["code"])
+        )
+        assert profile is not None
+        profile.settings = {
+            **(profile.settings or {}),
+            "glue_targets": [
+                {"process": "TRUEBLUE", "valid_from": None, "module_types": {}}
+            ],
+            "glue_process_default": "TRUEBLUE",
+        }
+        session.commit()
+
+    resp = as_admin.patch(
+        f"/api/institutes/{tudo['code']}",
+        json={"settings": {"glue_default_process": "TRUEBLUE"}},
+    )
+
+    assert resp.status_code == 200, resp.text
+    settings = resp.json()["settings"]
+    assert settings["glue_default_process"] == "TRUEBLUE"
+    assert "glue_process_default" not in settings
 
 
 # --- the worksheet row -----------------------------------------------------

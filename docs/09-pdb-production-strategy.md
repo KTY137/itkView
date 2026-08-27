@@ -443,7 +443,7 @@ brauchte 29 Minuten fuer nur 262 Module (~1336 serielle PDB-Roundtrips a
 ~1,3 s); mit dem inzwischen erweiterten Scope (~1086 Komponenten inkl.
 Sensoren) waere der naechste Volllauf in die Stunden gegangen, und ein
 Ausfall mitten in der Attachment-Phase sah wie ein eingefrorener Sync aus.
-Vier Aenderungen (`app/sync_jobs.py`, `app/attachment_store.py`):
+Fuenf Aenderungen (`app/sync_jobs.py`, `app/attachment_store.py`):
 
 - **Begrenzt paralleler Evidence-Fetch.** Die per-Komponente-Reads
   (`getComponent` + `getTestRun` je Lauf) sind unabhaengige Netzwerk-Reads
@@ -461,7 +461,12 @@ Vier Aenderungen (`app/sync_jobs.py`, `app/attachment_store.py`):
   (inkl. des einen Auto-Retries). Weil die Retry-Leitern jetzt in den
   Workern laufen (die nie in die DB schreiben), schreibt der wartende
   Job-Thread alle `PARALLEL_FETCH_HEARTBEAT_SECONDS` (30 s) einen
-  Zwischen-Heartbeat.
+  Zwischen-Heartbeat. Scheitert ein Worker terminal, werden noch nicht
+  gestartete Futures abgebrochen und bereits laufende Reads mit periodischem
+  Job-Heartbeat gejoint, bevor der Job fehlschlaegt oder sein Auto-Retry
+  beginnen kann; auch eine lange letzte Retry-Leiter verliert dadurch ihre
+  Lease nicht, und kein alter Pool liest parallel zum Nachfolger weiter aus
+  der Produktions-PDB.
 - **Ein Worker je Job-Art.** Der Manager besitzt jetzt getrennte
   Single-Worker-Executor fuer Komponenten- und Evidence-Jobs: ein
   stundenlanger Evidence-Sweep blockiert keinen Komponenten-Sync mehr.
@@ -472,7 +477,10 @@ Vier Aenderungen (`app/sync_jobs.py`, `app/attachment_store.py`):
   `QUEUED_HEARTBEAT_INTERVAL_SECONDS` (60 s) aufgefrischt, solange der
   besitzende Prozess lebt — sonst haette ihn die Drei-Minuten-Grenze der
   Lease-Uebernahme als verwaist geschlossen. Stirbt der Prozess, bleiben die
-  Refreshes aus und die Reaping-Regel greift wie gehabt.
+  Refreshes aus und die Reaping-Regel greift wie gehabt. Wird ein Job zwar
+  angelegt, aber vom Executor nicht angenommen, entfernt der Manager den
+  Queue-Watch sofort, terminalisiert die Zeile und gibt die Lease frei; ein
+  niemals gestarteter Job kann damit nicht kuenstlich frisch bleiben.
 - **Outage-Circuit-Breaker in der Attachment-Phase.** Jeder transiente
   Datei-Fehlschlag hat seine volle Retry-Leiter bereits verbrannt
   (Versuche × bis zu 60 s Read-Timeout + Backoff ≈ Minuten pro Datei);
@@ -487,7 +495,10 @@ Vier Aenderungen (`app/sync_jobs.py`, `app/attachment_store.py`):
   zurueck und bleiben Best-Effort pro Datei wie bisher. Schlaegt schon der
   Client-Aufbau transient fehl, zaehlen die danach schnell scheiternden
   Dateien ebenfalls als transient, sodass der Breaker den Sweep zuegig
-  beendet; ein permanenter Konfigurationsfehler loest ihn nicht aus.
+  beendet; ein permanenter Konfigurationsfehler loest ihn nicht aus. Ein lokal
+  bereits vorhandener, nur wiederverwendeter Anhang ist fuer den Breaker
+  neutral: ohne Netzrequest beweist er keine Erholung und darf die Serie nicht
+  zuruecksetzen.
 - **Eine Attachment-Planungsrunde statt zwei.** Die Pending-Deskriptoren
   werden einmal pro Komponente in kurzlebigen Sessions gelesen und treiben
   sowohl das Datei-Total als auch die Downloads (`download_attachments`
@@ -497,6 +508,19 @@ Vier Aenderungen (`app/sync_jobs.py`, `app/attachment_store.py`):
   Attachment-Downloads selbst bleiben bewusst seriell: die Byte-Transfers
   sind nicht der Engpass, und „consecutive" als Breaker-Signal sowie die
   Client-Unavailable-Schnellpfade waeren unter Parallelitaet mehrdeutig.
+- **Dauerhafter Component→Evidence-Follow-up.** Eine Evidence-Phase kann ihren
+  Komponenten-Scope schon vor dem parallel erfolgreichen Component-Sync
+  aufgenommen haben. Der Component-Commit speichert deshalb atomar einen
+  privaten Follow-up-Wunsch. Nur ein danach gestarteter und erfolgreicher
+  Evidence-Snapshot loescht ihn. Startup und Future-Ende reconciliieren diese
+  Generation; eine frische fremde Lease wird nur beobachtet, eine stale Lease
+  nur per Heartbeat-CAS uebernommen. Auch die Entscheidung fuer genau einen
+  transienten Auto-Retry wird zusammen mit diesem Wunsch dauerhaft
+  gespeichert: ein Crash vor dem prozesslokalen Timer verliert den Retry
+  nicht, permanente Fehler und ein bereits erschoepfter Retry starten dagegen
+  keine Schleife. Die internen Marker werden vom oeffentlichen
+  Job-Result-Schema herausgefiltert und tauchen weder in `/active`, `/latest`
+  noch Ops-Antworten auf.
 
 Der Background-Executor setzt weiterhin genau **einen FastAPI/Uvicorn-App-
 Prozess** voraus (jetzt mit einem Worker-Thread je Job-Art in diesem
@@ -504,6 +528,263 @@ Prozess); sowohl `start-itkflow.ps1` als auch das Docker-CMD erfuellen
 diesen Vertrag. Mehrere Uvicorn-Worker duerfen erst aktiviert werden, wenn der
 Lease einen Prozess-Owner mit Heartbeat/Expiry besitzt und Startup-Recovery
 nur verwaiste Jobs dieses Owners schliesst.
+
+## Evidence-Sweep: Index-dann-Bulk statt ein Request pro Komponente (2026-08-27)
+
+**Das gemessene Problem.** Der Institutssweep fragte die PDB einmal *pro
+Komponente* (`getComponent`), auch wenn sich nichts geaendert hatte. Am echten
+TUDO-Spiegel sind das **1170 Komponenten = 1170 Requests je Sweep**, bei ~1,3 s
+pro Request also ~25 min seriell bzw. ~6 min bei der Default-Parallelitaet 4.
+Die Ebene *darunter* war laengst inkrementell: von 14 759 gespiegelten Laeufen
+tragen alle den Marker `detail_synced`, ein unveraenderter Lauf kostet also
+keinen `getTestRun` mehr. Der gesamte verbleibende Aufwand steckte im
+Ein-Request-pro-Komponente.
+
+**Die Ablaufform.** Drei Schritte statt einem (`app/pdb_test_evidence.py`,
+`app/sync_jobs.py`):
+
+1. **Index** — `listTestRunsByComponent` mit `filterMap.serialNumber` als
+   *Liste* vieler Seriennummern liefert die billigen Listendaten aller Laeufe
+   dieser Komponenten (Lauf-Id, Testtyp, `passed`/`problems`, `state`,
+   Zeitstempel). Bewusst **ohne** `state`-Filter: ein zurueckgezogener Lauf
+   (`state='deleted'`) muss genau hier ankommen, weil dies der billige Pfad
+   ist, auf dem eine Zurueckziehung ueberhaupt erkannt wird.
+2. **Diff** — derselbe `flat_fingerprint`-Vergleich gegen den Mirror wie
+   bisher; nur neue oder veraenderte Laeufe brauchen Detail.
+3. **Bulk-Detail** — `getTestRunBulk` mit `{"testRun": [id, …]}` holt viele
+   Detailobjekte in einem Request. Ids, die die Antwort auslaesst, werden mit
+   je einem `getTestRun` nachgeholt — genau der Aufruf, den der
+   Pro-Komponente-Pfad ohnehin macht.
+
+**Woher die Endpunkt-Formen stammen.** Aus dem installierten Client selbst:
+`backend/.venv/Lib/site-packages/itkdb/client.py::_get_duplicate_test_runs`
+baut `filterMap` (`serialNumber`/`code`, `testType`, `stage`, `state`) und ruft
+`get("listTestRunsByComponent", json={"filterMap": …})`, liest daraus
+`test_run["id"]`, und ruft danach
+`get("getTestRunBulk", json={"testRun": test_run_ids})`, wo es `passed`,
+`problems`, `id` und `properties` je Eintrag liest. Dass filterMap-Werte
+Listen sein duerfen, ist die Konvention, die `app/pdb_sync.py` fuer
+`institute`/`currentLocation` bereits nutzt. **Nicht** verifizierbar war
+irgendetwas davon gegen eine echte PDB — es gibt keine Testinstanz, und diese
+Session darf die Produktion nicht anfassen. Deshalb der naechste Abschnitt.
+
+**Vollstaendigkeit vor Geschwindigkeit: wann der Index geglaubt wird.** Der
+Sweep behandelt jede batched Antwort als unbewiesen, bis sie sich selbst
+beweist. Faellt eine Pruefung, geht **nur der betroffene Umfang** zurueck auf
+den bewaehrten `getComponent`-Pfad — nie wird weniger gespiegelt:
+
+- **Strukturell (ganze Batch unbrauchbar → Rest des Sweeps laeuft pro
+  Komponente):** fehlende Lauf-Id, fehlender Testtyp (das Feld `code` wird
+  bewusst *nicht* als Ersatz gelesen — auf einem Lauf-Eintrag ist das der Code
+  des Laufs, nicht der Testtyp), fehlendes `passed`/`problems` (`_passed`
+  wuerde sonst still `False` erfinden, also ein *falsches* Messergebnis),
+  ein Eintrag fuer eine **nicht angefragte** Seriennummer (Filter nicht
+  honoriert), eine wiederholte Lauf-Id (Zeilenzahl ist kein
+  Vollstaendigkeitsbeweis — genau so lief der `useOrInLocationSearch`-Fehler
+  durch jede Pruefung), driftende Paginierungs-Metadaten, sowie eine
+  metadatenfreie Antwort, die die angeforderte Seitengroesse **exakt fuellt**
+  (von einer abgeschnittenen ersten Seite nicht unterscheidbar).
+- **Kalibrierungs-Probe (einmal je Sweep, 1 Request):** die erste Komponente
+  des ersten Batches wird zusaetzlich per `getComponent` gelesen und Lauf fuer
+  Lauf gegen den Index verglichen (Id, Testtyp, `passed`, `measured_at`,
+  `state`, `problems`). Weichen sie ab, wird der **ganze** Sweep auf den
+  Pro-Komponente-Pfad degradiert. Das ist der einzige Beweis, den man offline
+  fuehren kann, dass der Index dasselbe erzaehlt wie der Endpunkt, auf dem der
+  ganze Spiegel aufgebaut wurde.
+- **Pro Komponente (nur diese eine wird nachgelesen):**
+  1. Der Index deckt nicht jeden Lauf ab, den wir als **lebend** gespiegelt
+     haben. Zurueckgezogen-worden und vom-Filter-verloren sind von hier aus
+     ununterscheidbar, und nur eines davon darf man glauben. Ein bereits als
+     `deleted` gespiegelter Lauf ist ausgenommen: dieser Zustand ist terminal,
+     sein Fehlen im Index beweist nichts. (Damit heilt sich der Fall selbst,
+     falls der Endpunkt geloeschte Laeufe gar nicht ausliefert: der erste
+     Sweep liest die betroffene Komponente voll, danach steht `deleted` im
+     Spiegel und sie faellt nicht mehr zurueck.) Verschwindet ein Lauf
+     dagegen **ganz** aus der PDB — ohne `deleted`-Zustand —, bleibt die
+     betroffene Komponente dauerhaft auf dem Pro-Komponente-Pfad; das ist der
+     bewusst in Kauf genommene Preis dafuer, „zurueckgezogen" nie zu raten.
+     Beobachtet ist dieser Fall nicht: die PDB liefert geloeschte Laeufe
+     weiter aus (siehe Abschnitt „Zurueckgezogene Testlaeufe").
+  2. Der Index wuerde einen **bekannten** `run_state` oder ein bekanntes
+     `measured_at` durch „unbekannt" ersetzen. Ersteres wuerde einen
+     zurueckgezogenen Lauf still wieder gueltig machen, letzteres den
+     Zeitstempel loeschen, der ueberall entscheidet, welcher Lauf der juengste
+     ist.
+  3. Der Index meldet **gar keine** Laeufe, obwohl derselbe Batch nie gezeigt
+     hat, dass der Mehrfach-Seriennummern-Filter ueberhaupt honoriert wurde.
+     Als Beweis genuegt: Laeufe fuer mindestens **zwei verschiedene**
+     angefragte Komponenten. „Diese Komponente hat nichts" ist genau die
+     Antwort, die ein stillschweigend ignorierter Filter erzeugt — und genau
+     die, die in der UI als lauter fehlende Pflichttests erscheint.
+
+Ein **transienter** Ausfall degradiert *nicht*: das waere nur der Weg in
+1170 ebenso aussichtslose Einzel-Requests. Nach dem geteilten Retry-Budget
+(`ITKFLOW_SYNC_PAGE_MAX_ATTEMPTS`, exponentieller Backoff, Heartbeat vor jedem
+Backoff) scheitert der Job ehrlich transient und faellt in den bestehenden
+einmaligen Auto-Retry. Nicht-transiente Fehler (Endpunkt existiert hier nicht,
+strukturelle Anomalie) degradieren einmal und still — protokolliert wird nur
+die eigene, uebersetzte Meldung, nie Upstream-Text: `_safe_page_error_summary`
+liefert ausschliesslich „HTTP 404" / „transient network error" /
+„non-retryable PDB error", und jedes Re-Raise ist `from None`, weil eine
+itkdb-Exception einen gerenderten Auth-Request und damit Access-Codes tragen
+kann.
+
+**Bulk-Detail degradiert ebenfalls statt zu luegen.** Nur eine echte Antwort
+darf `detail_synced` setzen. Ids, die die Bulk-Antwort auslaesst, werden per
+`getTestRun` repariert. Traegt schon der **erste** Bulk-Batch in keinem
+einzigen Eintrag Detailfelder, gilt der Endpunkt fuer diesen Job als
+nutzlos — der Rest wird per `getTestRun` geholt, statt Laeufe auf ein leeres
+Objekt hin als „detailliert gespiegelt" zu markieren und sie damit fuer immer
+flach einzufrieren.
+
+**Request-Profil (Zahlen aus dem echten TUDO-Spiegel: 1170 Komponenten im
+Sweep-Scope, 14 759 Laeufe, Defaults 50 SN/Index-Request, 100 Eintraege/Seite,
+50 Ids/Bulk-Request).**
+
+| Lauf | bisher | neu | Faktor |
+|---|---|---|---|
+| Wiederholungs-Sweep (nichts geaendert) | 1170 `getComponent` | ~24 Index-Requests, wegen Paginierung ~150–166 Seiten insgesamt, 0 Bulk, 1 Probe | ~7× |
+| Erst-Sweep (leerer Spiegel) | 1170 + 14 759 = 15 929 | ~166 Index + ~296 Bulk + 1 Probe ≈ 463 | ~34× |
+| Endpunkt nicht nutzbar | 1170 | 1170 + 1 verworfener Index-Request | ~1× (bewusst) |
+
+Bei den Wiederholungs-Sweeps dominiert die **Paginierung**, nicht die
+Batch-Groesse: ~12,6 Laeufe je Komponente × 50 Komponenten = ~630 Eintraege je
+Batch = ~7 Seiten. Wer den Sweep weiter druecken will, dreht deshalb an
+`ITKFLOW_SYNC_EVIDENCE_INDEX_PAGE_SIZE`, nicht an der Batch-Groesse.
+
+**Neue Settings** (alle mit Praefix `ITKFLOW_`, validierte Grenzen):
+
+| Setting | Default | Bedeutung |
+|---|---|---|
+| `SYNC_EVIDENCE_STRATEGY` | `index_bulk` | `per_component` stellt exakt den bisherigen Sweep wieder her — die Ein-Schalter-Notbremse, weil die batched Endpunkte nicht live verifiziert werden konnten. |
+| `SYNC_EVIDENCE_INDEX_BATCH_SIZE` | 50 (1–500) | Seriennummern je `listTestRunsByComponent`-Request. |
+| `SYNC_EVIDENCE_INDEX_PAGE_SIZE` | 100 (10–500) | Seitengroesse des Index. Erhoehen senkt die Requestzahl **und** vergroessert den Sicherheitsabstand zur „metadatenfreie Antwort fuellt die Seite exakt"-Regel. |
+| `SYNC_EVIDENCE_BULK_BATCH_SIZE` | 50 (1–200) | Lauf-Ids je `getTestRunBulk`-Request; klein gehalten, damit die Reparatur ausgelassener Ids billig bleibt. |
+
+**Warum `index_bulk` der Default ist.** Der einzige Weg, wie der neue Pfad
+weniger spiegeln koennte, waere eine Antwort, die *alle* obigen Pruefungen
+besteht und trotzdem luegt. Jede Pruefung, die faellt, kostet Requests statt
+Daten. Der teuerste Fehlerfall ist exakt das heutige Verhalten. Wer trotzdem
+nichts riskieren will, setzt `ITKFLOW_SYNC_EVIDENCE_STRATEGY=per_component`.
+
+**Unveraendert:** Commit-Granularitaet je Komponente (ein abgeschossenes
+Fenster verliert nichts Geholtes), monotoner Fortschritt ueber beide Routen
+mit einem gemeinsamen Zaehler (jede Komponente zaehlt genau einmal), der
+dauerhafte Heartbeat waehrend langer Operationen, das Retry-/Backoff-Budget
+samt Heartbeat-Callback, die strikte Fehlersemantik als Futter fuer den
+einmaligen Auto-Retry, der Attachment-Circuit-Breaker, und die
+Threading-Regel (ein Gateway je Worker-Thread; der Index-Pfad laeuft
+ausschliesslich auf dem Job-Thread, `ITKFLOW_SYNC_FETCH_CONCURRENCY` steuert
+weiterhin den Pro-Komponente-Pfad). Der Einzelkomponenten-Sync
+(`POST /api/components/{sn}/sync-evidence`) bleibt unangetastet ein strikter
+Voll-Fetch mit Detail.
+
+**Was nur ein echter PDB-Lauf bestaetigen kann** (offline nicht entscheidbar,
+alle mit definiertem sicheren Ausgang):
+
+- ob `listTestRunsByComponent` eine **Liste** von Seriennummern honoriert
+  (sonst: Fremd-SN oder unbewiesene Leerantworten → Degradierung);
+- ob die Eintraege die Komponente in einer der akzeptierten Formen nennen
+  (`serialNumber`, `componentSerialNumber`, `component.serialNumber`,
+  `component.alternativeIdentifier`, oder ein String/Code, der in der Batch
+  vorkommt) — ein blosser Objekt-Id-String zaehlt bewusst nicht;
+- ob sie `state`, `date`/`cts`/`stateTs` und `passed`/`problems` genauso
+  tragen wie `getComponent` (sonst schlaegt die Kalibrierungs-Probe an);
+- ob **zurueckgezogene** (`deleted`) Laeufe im Index erscheinen;
+- ob der Endpunkt das mitgeschickte `pageInfo` im Body akzeptiert und
+  Paginierungs-Metadaten zurueckliefert, und ob `getTestRunBulk` paginiert
+  (ein abgelehnter Request degradiert, fehlende Ids werden einzeln repariert);
+- ob `getTestRunBulk` `results`/`properties`/`attachments` traegt und ob es
+  `noEosToken` akzeptiert. Der Bulk-Request sendet das Flag **nicht** (itkdb
+  tut es auch nicht); ein etwaiger EOS-Token wird stattdessen von
+  `_attachment_summaries` aus der URL gestrippt und der Downloader holt sich
+  ohnehin eine frische URL.
+
+## Unbeaufsichtigter Auto-Sync (`app/auto_sync.py`, 2026-08-27)
+
+Ein Sweep war frueher zu teuer, um ihn auf einen Timer zu legen: ein Request
+je Komponente bedeutete 1170 Requests fuer TUDO. Erst Index-dann-Bulk (siehe
+oben) druckt einen Wiederholungs-Sweep auf ~150 Requests — **das billige
+Primitiv ist der Grund, warum dieser Scheduler ueberhaupt existieren darf**,
+nicht umgekehrt.
+
+Es ist die einzige Stelle in itkFlow, an der PDB-Verkehr entsteht, ohne dass
+jemand zusieht. Entsprechend eng sind die Grenzen:
+
+- **Opt-in je Institut, in den Admin Settings.** „Wie oft und wann" ist eine
+  Institutsentscheidung (harte Regel 4) und steht deshalb im Institutsprofil
+  unter `settings["auto_sync"]`, nicht in einer Env-Variable:
+
+  ```json
+  {"enabled": false, "interval_minutes": 60,
+   "window_start": "22:00", "window_end": "06:00",
+   "weekdays": [1, 2, 3, 4, 5]}
+  ```
+
+  Fehlt der Block oder steht `enabled: false`, entsteht **kein**
+  unbeaufsichtigter Verkehr — das ist der Default. `interval_minutes` ist die
+  Mindestwartezeit ab der neueren Grenze aus letztem erfolgreichen Sync und
+  letztem Scheduled-Versuch (einschliesslich dessen Auto-Retry); Werte unter **15** werden
+  abgelehnt und vom Reader als *aus* behandelt. `weekdays` sind ISO-Nummern (1 = Montag …
+  7 = Sonntag), fehlend = jeden Tag. **Der Reader scheitert geschlossen:** ein
+  fehlerhafter Block (kaputte `HH:MM`, halbes Fensterpaar, Wochentag ausser
+  Bereich) wird als *aus* gelesen statt zu einem Rateergebnis repariert — die
+  Validierung im API sagt der Person, was falsch war; ein ratender Reader
+  wuerde zu Zeiten syncen, die niemand gewaehlt hat.
+  Deployment-seitig bleibt nur `ITKFLOW_AUTO_SYNC_POLL_MINUTES` (Default 5):
+  wie oft der Scheduler **auswertet** — eine Datenbankabfrage, kein
+  PDB-Verkehr. `0` schaltet den Scheduler ganz ab.
+- **Fenster ueber Mitternacht sind der Normalfall, nicht der Sonderfall.**
+  `22:00`–`06:00` heisst „nachts, wenn niemand arbeitet"; eine naive
+  `start <= jetzt <= end`-Pruefung waere hier immer falsch. Zusaetzlich gilt
+  ein Nachtfenster dem **Wochentag, an dem es geoeffnet hat**: Freitag
+  22:00–06:00 laeuft um 02:00 am Samstag weiter, sonst wuerde „nur werktags"
+  stillschweigend jede halbe Freitagnacht mit abschalten.
+- **Zwei Uhren, mit Absicht.** Fenster und Wochentag werden gegen die
+  **lokale** Serverzeit geprueft (das ist die Zeit, die die Person gemeint
+  hat), das Intervall dagegen gegen **UTC**, weil `finished_at` in UTC
+  gespeichert ist. Beides mit einer Uhr zu messen waere um den UTC-Offset
+  falsch — im Berliner Sommer zwei Stunden, was ein Nachtfenster lautlos in
+  den Vormittag schoebe. Ein Test scheitert, wenn jemand die beiden zusammen-
+  legt. **Bewusste Grenze:** das Profil traegt keine benannte Zeitzone; die
+  Deployment-Zeitzone ist Teil der Serverkonfiguration. Das Desktop-Bundle
+  nutzt die Betriebssystemzeit. Das Compose-Image enthaelt `tzdata` und liest
+  `TZ` aus `deploy/.env` (z. B. `Europe/Berlin`); ohne Anpassung gilt der
+  sichtbare Default `Etc/UTC`. Vor dem Aktivieren eines Zeitfensters muss `TZ`
+  deshalb zur lokalen Institutszeit passen.
+- **Er setzt nur fort, was ein Mensch begonnen hat.** Der Scheduler hat keine
+  eigenen Credentials. Je Institut laeuft er als die Person, deren **eigener**
+  Komponenten-Sync dort zuletzt erfolgreich war — jemand, der das Spiegeln
+  dieses Instituts bereits selbst gewaehlt hat. Ein Institut, das nie von Hand
+  gesynct wurde, wird nie automatisch gesynct.
+- **Er endet von selbst.** Der Credential-Owner muss weiterhin aktiver
+  Operator/Admin im passenden Institute-Scope sein. Deaktivierung, Downgrade,
+  fremder Scope, geloeschte Codes sowie unbekannter, kaputter oder `invalid`
+  Credential-Status stoppen den Zeitplan fuer dieses Institut still.
+  `unreachable` stoppt ihn bewusst **nicht** — das heisst nur, dass beim
+  letzten Test das Netz weg war, also genau der Fall, fuer den ein spaeterer
+  Versuch existiert.
+- **Er kann nicht stapeln.** Jobs entstehen ueber dieselbe dauerhafte
+  `active_key`-Lease wie in der UI; ein geplanter Lauf konvergiert auf einen
+  bereits laufenden Sweep, statt sich dahinter zu haengen.
+- **Er liest.** Komponenten-Sync und der daran haengende Evidence-Job (ADR 006)
+  sind read-only; `pdb_write_scope="dummy_only"` bleibt unberuehrt, kein
+  Schreibpfad fuehrt durch dieses Modul.
+- **Er ist ehrlich.** Jobs tragen `scheduled refresh (<email>)` in
+  `requested_by` — Marker zuerst, Eigentuemer benannt, weil dessen Zugang die
+  PDB erreicht hat. Ein Audit-Trail, der eine unbeaufsichtigte Aktion einer
+  Person zuschreibt, waere schlimmer als einer, der sie weglaesst.
+
+**Fairness bei mehreren Instituten:** Die Komponenten-Sync-Lease ist
+absichtlich **global** (ein autoritativer Mirror-Fetch zur Zeit im ganzen
+Deployment), ein Tick kann also nur **einen** Sweep starten. Bei fester
+Reihenfolge wuerde dasselbe Institut jeden Tick gewinnen und ein zweiter
+Standort nie aktualisiert. `institutes_by_staleness()` sortiert deshalb nach
+„neueste relevante Aktivitaet (Erfolg oder Scheduled-Versuch), aeltester
+zuerst"; nie gesyncte Institute sortieren als laengste Wartezeit. Scheduled-
+Fehler inklusive Auto-Retry verschieben diese Grenze, damit ein altes
+Erfolgsdatum nicht bei jedem Poll neue Jobs erzeugt; manuelle Fehler tun es
+bewusst nicht. Kein gespeicherter Cursor, der driften koennte.
 
 ## Verifikation
 

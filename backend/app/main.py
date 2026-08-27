@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 from app import __version__
 from app.api import router
+from app.auto_sync import AutoSyncScheduler
 from app.config import Settings, get_settings
 from app.db import Base, ensure_phase0_sqlite_schema, make_engine, make_session_factory
 from app.notifications import make_notifier
@@ -60,6 +61,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         app.state.outbox_processor = None
     app.state.sync_job_manager = SyncJobManager(app.state.session_factory, settings)
+    # Unattended mirror refresh, off unless a deployment asks for it. Built
+    # after the manager because it hands jobs to it (docs/09, app/auto_sync.py).
+    if settings.auto_sync_poll_minutes > 0:
+        app.state.auto_sync_scheduler = AutoSyncScheduler(
+            app.state.session_factory,
+            settings,
+            app.state.sync_job_manager,
+            app.state.component_fetcher,
+        )
+        app.router.add_event_handler("startup", app.state.auto_sync_scheduler.start)
+        app.router.add_event_handler("shutdown", app.state.auto_sync_scheduler.stop)
+    else:
+        app.state.auto_sync_scheduler = None
+    # Shutdown is registration-ordered. The scheduler must first stop and join
+    # any ``asyncio.to_thread`` tick; only then may its shared manager reject
+    # new executor submissions and cancel queued work.
     app.router.add_event_handler("shutdown", app.state.sync_job_manager.shutdown)
     # FastAPI/Starlette in this environment stores included routers lazily as
     # `_IncludedRouter`, which TestClient resolves but the live Uvicorn server

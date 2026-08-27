@@ -12,15 +12,15 @@ from __future__ import annotations
 import logging
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from time import sleep
-from typing import Any
+from typing import Any, Literal
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -37,12 +37,18 @@ from app.pdb_credentials import PdbAccessCodes, PdbCredentialError, load_pdb_cre
 from app.pdb_gateway import PdbGateway
 from app.pdb_sync import FetchResult, PdbSyncUnavailable, SyncProgress
 from app.pdb_test_evidence import (
+    IndexedTestRun,
     PdbEvidenceUnavailable,
+    PdbIndexUnusable,
+    fetch_test_run_detail,
+    fetch_test_run_details_bulk,
     fetch_test_run_evidence,
+    fetch_test_run_index,
     flat_fingerprint,
+    records_from_index,
 )
 from app.sync import UnknownParentError, sync_components
-from app.test_run_evidence import EvidenceSyncStats, upsert_test_run_evidence
+from app.test_run_evidence import EvidenceSyncStats, is_withdrawn, upsert_test_run_evidence
 from app.tool_sync import sync_tools_from_components
 
 log = logging.getLogger(__name__)
@@ -51,6 +57,11 @@ COMPONENT_SYNC_KIND = "components"
 COMPONENT_SYNC_ACTIVE_KEY = "components"
 EVIDENCE_SYNC_KIND = "evidence"
 EVIDENCE_SYNC_ACTIVE_KEY_PREFIX = "evidence:"
+EVIDENCE_FOLLOWUP_PENDING_KEY = "_evidence_followup_pending"
+EVIDENCE_FOLLOWUP_RETRY_KEY = "_evidence_followup_retry"
+FOLLOWUP_RETRY_DUE = "due"
+FOLLOWUP_RETRY_BLOCKED = "blocked"
+FOLLOWUP_RETRY_EXHAUSTED = "exhausted"
 ACTIVE_SYNC_STATUSES = frozenset({"queued", "running"})
 # How long a job may go without a progress heartbeat before startup recovery
 # treats it as orphaned. The slowest legitimate quiet stretch is one PDB page
@@ -146,12 +157,30 @@ class EvidenceSyncContext:
     user_id: int
     requested_by: str = ""
     auto_retry: bool = False
+    # True when this attempt covered a durable component generation. Its retry
+    # is reconstructed from that component row, so the process-local timer
+    # must re-enter reconciliation rather than enqueue blindly.
+    followup_retry_managed: bool = False
 
 
 def auto_retry_requested_by(original: str) -> str:
     """The retry job's durable requester label, marker prefix included."""
 
     return f"{AUTO_RETRY_REQUESTED_BY_PREFIX} ({original})"[:120]
+
+
+def component_followup_requested_by(original: str) -> str:
+    """Keep the evidence retry budget independent from a component retry.
+
+    A successful automatic *component* retry still starts the first evidence
+    attempt for that new component generation.  Carrying the component job's
+    ``automatic retry`` prefix into that evidence job would incorrectly spend
+    the evidence job's own one-retry budget before it had made any attempt.
+    """
+
+    if not original.startswith(AUTO_RETRY_REQUESTED_BY_PREFIX):
+        return original
+    return f"component follow-up ({original})"[:120]
 
 
 def acquire_component_sync_lease(
@@ -186,7 +215,9 @@ def acquire_component_sync_lease(
                 # restart leaves the heartbeat looking fresh at boot). Close
                 # the zombie so its lease cannot stay blocked forever, then
                 # create the replacement below.
-                _close_interrupted_job(active)
+                if not _close_stale_job_if_unchanged(session, active):
+                    session.rollback()
+                    continue
                 session.commit()
 
             now = utcnow()
@@ -255,7 +286,9 @@ def acquire_evidence_sync_lease(
                 if not _job_heartbeat_stale(active):
                     return SyncLease(job=active, created=False)
                 # Same zombie takeover as the component lease (see there).
-                _close_interrupted_job(active)
+                if not _close_stale_job_if_unchanged(session, active):
+                    session.rollback()
+                    continue
                 session.commit()
 
             now = utcnow()
@@ -303,27 +336,65 @@ def _job_heartbeat_stale(job: SyncJob, *, now: datetime | None = None) -> bool:
     return heartbeat <= (now or utcnow()) - SYNC_HEARTBEAT_GRACE
 
 
-def _close_interrupted_job(job: SyncJob) -> None:
-    """Close one orphaned active job and release its single-flight lease."""
+def _timestamp_after(value: datetime | None, boundary: datetime | None) -> bool:
+    """Compare persisted UTC timestamps conservatively across DB backends."""
 
-    previous_phase = job.phase
+    if value is None or boundary is None:
+        return False
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    if boundary.tzinfo is None:
+        boundary = boundary.replace(tzinfo=timezone.utc)
+    # Equality can be a database timestamp-resolution tie between an older
+    # scope claim and the later component commit. One redundant sweep is safer
+    # than declaring that ambiguous generation covered.
+    return value > boundary
+
+
+def _close_stale_job_if_unchanged(session: Session, job: SyncJob) -> bool:
+    """Close a stale lease only if no other process refreshed it meanwhile."""
+
+    if not _job_heartbeat_stale(job):
+        return False
+    observed_heartbeat = job.updated_at
+    heartbeat_unchanged = (
+        SyncJob.updated_at.is_(None)
+        if observed_heartbeat is None
+        else SyncJob.updated_at == observed_heartbeat
+    )
     finished = utcnow()
-    job.status = "interrupted"
+    previous_phase = job.phase
     if job.kind == EVIDENCE_SYNC_KIND:
-        job.message = "Evidence sync was interrupted by a server restart."
-        job.error = (
+        message = "Evidence sync was interrupted by a server restart."
+        error = (
             f"Server restarted during phase '{previous_phase}'. Evidence and files "
             "already mirrored remain valid; start the sync again to continue."
         )
     else:
-        job.message = "Component sync was interrupted by a server restart."
-        job.error = (
+        message = "Component sync was interrupted by a server restart."
+        error = (
             f"Server restarted during phase '{previous_phase}'; "
             "no partial mirror changes were committed. Start the sync again."
         )
-    job.active_key = None
-    job.updated_at = finished
-    job.finished_at = finished
+    closed = session.execute(
+        update(SyncJob)
+        .where(
+            SyncJob.id == job.id,
+            SyncJob.status.in_(ACTIVE_SYNC_STATUSES),
+            SyncJob.active_key == job.active_key,
+            heartbeat_unchanged,
+        )
+        .values(
+            status="interrupted",
+            message=message,
+            error=error,
+            active_key=None,
+            updated_at=finished,
+            finished_at=finished,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return closed.rowcount == 1
 
 
 class SyncJobManager:
@@ -363,6 +434,7 @@ class SyncJobManager:
         self._watch_lock = threading.Lock()
         self._watch_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
+        self._resume_evidence_followups()
 
     def start(self, job_id: int, fetcher: ComponentFetcher) -> None:
         def schedule_retry(context: ComponentSyncContext) -> None:
@@ -381,14 +453,234 @@ class SyncJobManager:
 
     def start_evidence(self, job_id: int) -> None:
         self._watch_queued(job_id)
-        self._evidence_executor.submit(
-            run_evidence_sync_job,
-            self._session_factory,
-            self._settings,
-            self._evidence_gateway_factory,
-            job_id,
-            self._schedule_evidence_retry,
-        )
+        try:
+            future = self._evidence_executor.submit(
+                run_evidence_sync_job,
+                self._session_factory,
+                self._settings,
+                self._evidence_gateway_factory,
+                job_id,
+                self._schedule_evidence_retry,
+            )
+        except Exception:
+            # A rejected submit has no Future whose completion callback could
+            # clean up the watch. Leaving it watched would keep a never-run
+            # queued lease fresh forever.
+            self._unwatch_queued(job_id)
+            raise
+        if isinstance(future, Future):
+            future.add_done_callback(
+                lambda _completed, completed_id=job_id: self._after_evidence_future(
+                    completed_id
+                )
+            )
+
+    def _resume_evidence_followups(self) -> None:
+        """Reconcile durable component-success generations after startup."""
+
+        with self._session_factory() as session:
+            jobs = list(
+                session.scalars(
+                    select(SyncJob).where(
+                        SyncJob.kind == COMPONENT_SYNC_KIND,
+                        SyncJob.status == "succeeded",
+                    )
+                )
+            )
+            institute_codes = {
+                job.institute_code
+                for job in jobs
+                if bool((job.result or {}).get(EVIDENCE_FOLLOWUP_PENDING_KEY))
+            }
+        for institute_code in institute_codes:
+            self._submit_followup_reconcile(institute_code)
+
+    def _submit_followup_reconcile(self, institute_code: str) -> None:
+        if self._watch_stop.is_set():
+            return
+        try:
+            self._evidence_executor.submit(
+                self._reconcile_evidence_followup, institute_code
+            )
+        except RuntimeError:
+            if not self._watch_stop.is_set():
+                log.error(
+                    "Could not schedule evidence follow-up reconciliation for %s.",
+                    institute_code,
+                )
+
+    def _after_evidence_future(self, job_id: int) -> None:
+        """Retry an unclaimed row or reconcile its component generation."""
+
+        if self._watch_stop.is_set():
+            return
+        with self._session_factory() as session:
+            job = session.get(SyncJob, job_id)
+            if job is None:
+                return
+            institute_code = job.institute_code
+            status = job.status
+        if status == "queued":
+            # A component transaction can be active when this evidence worker
+            # first reaches the queue. Its durable row stays canonical and a
+            # later attempt claims it after that commit becomes visible.
+            self._schedule_retry(lambda: self.start_evidence(job_id))
+            return
+        self._submit_followup_reconcile(institute_code)
+
+    @staticmethod
+    def _after(value: datetime | None, boundary: datetime | None) -> bool:
+        return _timestamp_after(value, boundary)
+
+    def _reconcile_evidence_followup(
+        self, institute_code: str, *, retry_now: bool = False
+    ) -> None:
+        """Ensure the latest committed component generation gets one attempt."""
+
+        if self._watch_stop.is_set():
+            return
+        try:
+            with self._session_factory() as session:
+                component_jobs = list(
+                    session.scalars(
+                        select(SyncJob)
+                        .where(
+                            SyncJob.kind == COMPONENT_SYNC_KIND,
+                            SyncJob.institute_code == institute_code,
+                            SyncJob.status == "succeeded",
+                        )
+                        .order_by(SyncJob.id.desc())
+                    )
+                )
+                pending = [
+                    job
+                    for job in component_jobs
+                    if bool((job.result or {}).get(EVIDENCE_FOLLOWUP_PENDING_KEY))
+                ]
+                if not pending:
+                    return
+                latest_component = pending[0]
+                attempts = list(
+                    session.scalars(
+                        select(SyncJob)
+                        .where(
+                            SyncJob.kind == EVIDENCE_SYNC_KIND,
+                            SyncJob.institute_code == institute_code,
+                            SyncJob.started_at.is_not(None),
+                        )
+                        .order_by(SyncJob.started_at.desc(), SyncJob.id.desc())
+                    )
+                )
+                covering_attempt = next(
+                    (
+                        job
+                        for job in attempts
+                        if self._after(job.started_at, latest_component.finished_at)
+                    ),
+                    None,
+                )
+                if covering_attempt is not None and covering_attempt.status == "succeeded":
+                    for component_job in pending:
+                        result = dict(component_job.result or {})
+                        result[EVIDENCE_FOLLOWUP_PENDING_KEY] = False
+                        result.pop(EVIDENCE_FOLLOWUP_RETRY_KEY, None)
+                        component_job.result = result
+                    session.commit()
+                    return
+                if (
+                    covering_attempt is not None
+                    and covering_attempt.status == "interrupted"
+                    and covering_attempt.requested_by.startswith(
+                        AUTO_RETRY_REQUESTED_BY_PREFIX
+                    )
+                ):
+                    # The one automatic retry had already started when its
+                    # owning process died. Treat that budget as consumed; a
+                    # restart must not silently turn it into a fresh first
+                    # attempt with another retry of its own.
+                    for component_job in pending:
+                        if not _timestamp_after(
+                            covering_attempt.started_at, component_job.finished_at
+                        ):
+                            continue
+                        result = dict(component_job.result or {})
+                        result[EVIDENCE_FOLLOWUP_RETRY_KEY] = (
+                            FOLLOWUP_RETRY_EXHAUSTED
+                        )
+                        component_job.result = result
+                    session.commit()
+                    return
+                if covering_attempt is not None and covering_attempt.status == "failed":
+                    retry_state = (latest_component.result or {}).get(
+                        EVIDENCE_FOLLOWUP_RETRY_KEY
+                    )
+                    if retry_state != FOLLOWUP_RETRY_DUE:
+                        # Permanent failures and an exhausted automatic retry
+                        # stay visible without spinning. A later manual run may
+                        # still satisfy and clear the durable intent.
+                        return
+                    if not retry_now:
+                        # Preserve the normal outage backoff. Startup and the
+                        # Future callback both discover the same durable state;
+                        # any duplicate timers re-check it before acquiring the
+                        # unique lease, so they cannot create a second retry.
+                        self._schedule_retry(
+                            lambda: self._reconcile_evidence_followup(
+                                institute_code, retry_now=True
+                            )
+                        )
+                        return
+                    requester = auto_retry_requested_by(covering_attempt.requested_by)
+                else:
+                    requester = component_followup_requested_by(
+                        latest_component.requested_by
+                    )
+                user_id = latest_component.user_id
+
+            if user_id is None:
+                log.error(
+                    "Component evidence follow-up for %s has no credential owner.",
+                    institute_code,
+                )
+                return
+            with self._session_factory() as session:
+                lease = acquire_evidence_sync_lease(
+                    session,
+                    institute_code=institute_code,
+                    requested_by=requester,
+                    user_id=user_id,
+                )
+            if lease.created:
+                try:
+                    self.start_evidence(lease.job.id)
+                except Exception:
+                    fail_sync_job(
+                        self._session_factory,
+                        lease.job.id,
+                        "Evidence sync could not be scheduled.",
+                    )
+                    # Keep the component intent durable, but avoid a timer loop
+                    # that would manufacture one failed queued row per minute
+                    # while an executor is permanently broken. A later startup
+                    # or manual reconciliation can try the released lease.
+                    self._submit_followup_reconcile(institute_code)
+                    return
+            else:
+                # Another process (or the older snapshot) owns the canonical
+                # scope. Recheck after it finishes or crosses the normal stale
+                # heartbeat grace; never take over a fresh live worker.
+                self._schedule_retry(
+                    lambda: self._submit_followup_reconcile(institute_code)
+                )
+        except Exception:
+            log.error(
+                "Could not reconcile evidence after the component sync for %s.",
+                institute_code,
+            )
+            if not self._watch_stop.is_set():
+                self._schedule_retry(
+                    lambda: self._submit_followup_reconcile(institute_code)
+                )
 
     # -- queued-job heartbeat keeper ----------------------------------------
 
@@ -402,6 +694,10 @@ class SyncJobManager:
                     daemon=True,
                 )
                 self._watch_thread.start()
+
+    def _unwatch_queued(self, job_id: int) -> None:
+        with self._watch_lock:
+            self._queued_watch.discard(job_id)
 
     def _queued_heartbeat_loop(self) -> None:
         while not self._watch_stop.wait(QUEUED_HEARTBEAT_INTERVAL_SECONDS):
@@ -449,7 +745,21 @@ class SyncJobManager:
                 user_id=user_id,
             )
         if lease.created:
-            self.start_evidence(lease.job.id)
+            try:
+                self.start_evidence(lease.job.id)
+            except Exception:
+                # Lease creation is already committed. Release that lease and
+                # leave a truthful terminal row so a durable component marker
+                # or a manual start can enqueue a replacement.
+                fail_sync_job(
+                    self._session_factory,
+                    lease.job.id,
+                    "Evidence sync could not be scheduled.",
+                )
+                self._submit_followup_reconcile(institute_code)
+                raise
+        else:
+            self._submit_followup_reconcile(institute_code)
         return lease
 
     # -- bounded automatic retry after a transient job failure --------------
@@ -458,8 +768,9 @@ class SyncJobManager:
     # visible and lease-free, so a person can start a new sync at any moment.
     # When the timer fires it goes through the normal lease acquisition — if
     # someone already queued a job, the retry converges on it instead of
-    # stacking a second one. A process death during the delay simply drops
-    # the retry; the failed job row keeps telling the truth.
+    # stacking a second one. A standalone evidence/component retry remains
+    # process-local; component-follow-up evidence additionally persists its
+    # retry verdict on the component job and reconstructs this timer at boot.
 
     def _schedule_retry(self, runner: Callable[[], None]) -> None:
         timer = threading.Timer(SYNC_AUTO_RETRY_DELAY_SECONDS, runner)
@@ -491,6 +802,11 @@ class SyncJobManager:
 
     def _start_evidence_retry(self, context: EvidenceSyncContext) -> None:
         try:
+            if context.followup_retry_managed:
+                self._reconcile_evidence_followup(
+                    context.institute.code, retry_now=True
+                )
+                return
             self.enqueue_evidence(
                 context.institute.code,
                 auto_retry_requested_by(context.requested_by),
@@ -601,6 +917,12 @@ def run_component_sync_job(
                 "stale": stats.stale,
                 "total": stats.total,
             }
+            if on_success is not None:
+                # This private extra survives the component commit but is
+                # ignored by ComponentSyncOut. It is the restart-safe wake-up
+                # intent; evidence reconciliation clears it only after a
+                # post-commit snapshot attempt reaches a terminal outcome.
+                result[EVIDENCE_FOLLOWUP_PENDING_KEY] = True
             finished = utcnow()
             job.status = "succeeded"
             job.phase = "complete"
@@ -618,7 +940,7 @@ def run_component_sync_job(
             try:
                 on_success(
                     context.institute.code,
-                    context.requested_by,
+                    component_followup_requested_by(context.requested_by),
                     context.user_id,
                 )
             except Exception:
@@ -659,6 +981,18 @@ def _claim_evidence_job(
         job = session.get(SyncJob, job_id)
         if job is None or job.status != "queued" or job.kind != EVIDENCE_SYNC_KIND:
             return None
+        component_sync = session.scalar(
+            select(SyncJob).where(
+                SyncJob.active_key == COMPONENT_SYNC_ACTIVE_KEY
+            )
+        )
+        if component_sync is not None:
+            if not _job_heartbeat_stale(component_sync):
+                return None
+            if not _close_stale_job_if_unchanged(session, component_sync):
+                session.rollback()
+                return None
+            session.commit()
         if job.user_id is None:
             raise RuntimeError(
                 "Evidence sync has no credential owner; start it again while signed in."
@@ -670,22 +1004,57 @@ def _claim_evidence_job(
             raise RuntimeError(
                 f"Institute '{job.institute_code}' disappeared before its evidence sync started."
             )
+        user_id = job.user_id
+        requested_by = job.requested_by
+        expected_active_key = job.active_key
+        if expected_active_key is None:
+            return None
+        canonical_active_key = evidence_sync_active_key(job.institute_code)
         started = utcnow()
-        job.status = "running"
-        job.phase = "fetching"
-        job.current = 0
-        job.total = None
-        job.percent = None
-        job.message = "Loading the local evidence sync scope."
-        job.started_at = started
-        job.updated_at = started
-        session.expunge(institute)
-        session.commit()
+        try:
+            claimed = session.execute(
+                update(SyncJob)
+                .where(
+                    SyncJob.id == job_id,
+                    SyncJob.status == "queued",
+                    SyncJob.active_key == expected_active_key,
+                )
+                .values(
+                    status="running",
+                    phase="fetching",
+                    current=0,
+                    total=None,
+                    percent=None,
+                    message="Loading the local evidence sync scope.",
+                    result=None,
+                    active_key=canonical_active_key,
+                    started_at=started,
+                    updated_at=started,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if claimed.rowcount != 1:
+                session.rollback()
+                return None
+            # The conditional UPDATE is the final cross-process claim arbiter.
+            session.expunge(institute)
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            return None
+        except OperationalError as exc:
+            session.rollback()
+            if _is_sqlite_busy(exc):
+                # The Future completion callback resubmits this still-queued
+                # row; a transient SQLite writer must not turn it into a
+                # terminal failed sync and lose the durable component intent.
+                return None
+            raise
         return EvidenceSyncContext(
             institute=institute,
-            user_id=job.user_id,
-            requested_by=job.requested_by,
-            auto_retry=job.requested_by.startswith(AUTO_RETRY_REQUESTED_BY_PREFIX),
+            user_id=user_id,
+            requested_by=requested_by,
+            auto_retry=requested_by.startswith(AUTO_RETRY_REQUESTED_BY_PREFIX),
         )
 
 
@@ -727,18 +1096,35 @@ def _fetch_evidence_with_retry(
             sleep(0.5 * (2 ** (attempt - 1)))
 
 
-def _mirrored_flat_fingerprints(
-    session: Session, component_sns: list[str]
-) -> dict[str, tuple]:
-    """Fingerprints of mirrored runs that already carry their fetched detail.
+@dataclass(frozen=True)
+class MirroredEvidence:
+    """What the local mirror already knows about one scope's PDB test runs.
 
-    Only rows marked `detail_synced` qualify: a flat-only row (from an older
-    sweep, or a run whose detail fetch failed) must take the detail round trip
-    on the next sync rather than being frozen in its shallow state.
+    Read once per sweep, in bounded chunks, and used for three different
+    questions:
+
+    * `known_flat` — which runs may skip their detail round trip (the
+      incremental contract; only rows that really carry mirrored detail).
+    * `live_refs` — which runs of a component the PDB still stood behind last
+      time. The batched index has to account for every one of them, or its
+      answer for that component is not provably complete.
+    * `run_meta` — the mirrored `(run_state, measured_at)` of a run, so a
+      batched answer can never write "unknown" over something we know. That
+      would silently un-withdraw a retracted run, or drop the timestamp that
+      decides which run is the latest one.
     """
-    fingerprints: dict[str, tuple] = {}
+
+    known_flat: dict[str, tuple]
+    live_refs: dict[str, set[str]]
+    run_meta: dict[str, tuple[str | None, datetime | None]]
+
+
+def _mirrored_evidence(session: Session, component_sns: list[str]) -> MirroredEvidence:
+    known_flat: dict[str, tuple] = {}
+    live_refs: dict[str, set[str]] = {}
+    run_meta: dict[str, tuple[str | None, datetime | None]] = {}
     if not component_sns:
-        return fingerprints
+        return MirroredEvidence(known_flat, live_refs, run_meta)
     # Production scopes reach thousands of serial numbers; keep every IN list
     # bounded (same batch size as the tool sync). The payload JSON column is
     # still read whole per chunk: its `detail_synced`/`state`/`problems` keys
@@ -748,9 +1134,11 @@ def _mirrored_flat_fingerprints(
         sn_chunk = component_sns[offset : offset + FINGERPRINT_CHUNK_SIZE]
         rows = session.execute(
             select(
+                TestRunEvidence.component_sn,
                 TestRunEvidence.external_ref,
                 TestRunEvidence.passed,
                 TestRunEvidence.measured_at,
+                TestRunEvidence.run_state,
                 TestRunEvidence.payload,
             ).where(
                 TestRunEvidence.source == "pdb",
@@ -758,17 +1146,69 @@ def _mirrored_flat_fingerprints(
                 TestRunEvidence.component_sn.in_(sn_chunk),
             )
         )
-        for external_ref, passed, measured_at, payload in rows:
+        for component_sn, external_ref, passed, measured_at, run_state, payload in rows:
             payload = payload or {}
+            run_meta[external_ref] = (run_state, measured_at)
+            if not is_withdrawn(run_state):
+                live_refs.setdefault(component_sn, set()).add(external_ref)
             if not payload.get("detail_synced"):
                 continue
-            fingerprints[external_ref] = flat_fingerprint(
+            known_flat[external_ref] = flat_fingerprint(
                 passed=passed,
                 measured_at=measured_at,
                 state=payload.get("state"),
                 problems=payload.get("problems"),
             )
-    return fingerprints
+    return MirroredEvidence(known_flat, live_refs, run_meta)
+
+
+def _mirrored_flat_fingerprints(
+    session: Session, component_sns: list[str]
+) -> dict[str, tuple]:
+    """Fingerprints of mirrored runs that already carry their fetched detail.
+
+    Only rows marked `detail_synced` qualify: a flat-only row (from an older
+    sweep, or a run whose detail fetch failed) must take the detail round trip
+    on the next sync rather than being frozen in its shallow state.
+    """
+    return _mirrored_evidence(session, component_sns).known_flat
+
+
+def index_answer_is_trustworthy(
+    component_sn: str,
+    runs: Sequence[IndexedTestRun],
+    *,
+    mirror: MirroredEvidence,
+    multi_serial_proven: bool,
+) -> bool:
+    """Whether the batched index may be believed for this one component.
+
+    Completeness over speed. Three ways an answer stays unproven, each of which
+    sends exactly that component back through `getComponent` rather than
+    letting it look like a component with fewer runs than it has:
+
+    1. It does not account for a run we mirrored as live. A withdrawal and a
+       lossy filter are indistinguishable from here, and only one of them is
+       safe to believe. (A run already mirrored as `deleted` is exempt: that
+       state is terminal, so the index dropping it proves nothing.)
+    2. It would replace a known run state or a known timestamp with "unknown".
+    3. It reports *no* runs at all while the same batch never demonstrated that
+       the multi-serial filter was honoured — "this component has nothing" is
+       exactly the answer a silently ignored filter produces.
+    """
+    indexed_refs = {run.run_id for run in runs}
+    if mirror.live_refs.get(component_sn, set()) - indexed_refs:
+        return False
+    for run in runs:
+        previous = mirror.run_meta.get(run.run_id)
+        if previous is None:
+            continue
+        previous_state, previous_measured_at = previous
+        if previous_state is not None and run.run_state is None:
+            return False
+        if previous_measured_at is not None and run.measured_at is None:
+            return False
+    return bool(runs) or multi_serial_proven
 
 
 def run_evidence_sync_job(
@@ -815,16 +1255,18 @@ def run_evidence_sync_job(
                 )
             )
 
-        # Incremental detail: runs whose cheap listing data still matches the
-        # mirrored fingerprint skip their per-run getTestRun round trip. On a
-        # repeat sync that collapses the fetch phase from one request per run
-        # to one request per component.
-        with session_factory() as fingerprint_session:
-            known_flat = _mirrored_flat_fingerprints(fingerprint_session, component_sns)
+        # What the mirror already holds, read once: which runs may skip their
+        # detail round trip (the incremental contract), which runs a batched
+        # answer has to account for, and which states/timestamps it may not
+        # overwrite with "unknown".
+        with session_factory() as mirror_session:
+            mirror = _mirrored_evidence(mirror_session, component_sns)
+        known_flat = mirror.known_flat
 
         component_total = len(component_sns)
         evidence_stats = EvidenceSyncStats()
         runs_seen = 0
+        completed = 0
         _update_progress(
             session_factory,
             job_id,
@@ -854,51 +1296,230 @@ def run_evidence_sync_job(
                 unchanged=evidence_stats.unchanged + batch_stats.unchanged,
             )
 
-        fetch_concurrency = max(1, int(getattr(settings, "sync_fetch_concurrency", 1)))
-        if fetch_concurrency == 1:
-            # Fully serial sweep (the historical behavior, selectable via
-            # ITKFLOW_SYNC_FETCH_CONCURRENCY=1): one shared gateway, and the
-            # retry ladder writes its own heartbeat before every backoff.
-            for index, component_sn in enumerate(component_sns, start=1):
+        def report_component_done() -> None:
+            # One shared counter for both routes, so a sweep that mirrors part
+            # of its scope in batches and re-reads the rest per component still
+            # counts every component exactly once and never moves backwards.
+            nonlocal completed
+            completed += 1
+            _update_progress(
+                session_factory,
+                job_id,
+                "fetching",
+                completed,
+                component_total,
+                message=(
+                    f"Fetched {completed}/{component_total} components "
+                    f"and {runs_seen} test runs."
+                ),
+            )
 
-                def fetch_retry_heartbeat(
-                    attempt: int,
-                    *,
-                    sn: str = component_sn,
-                    done: int = index - 1,
-                ) -> None:
-                    _update_progress(
-                        session_factory,
-                        job_id,
-                        "fetching",
-                        done,
-                        component_total,
-                        message=(
-                            f"Retrying {sn} after a transient PDB read error "
-                            f"(attempt {attempt + 1}/{settings.sync_page_max_attempts})."
-                        ),
-                    )
+        def calibrate_index(probe_sn: str, indexed_runs: Sequence[IndexedTestRun]) -> None:
+            """Check the batched index against the endpoint we already trust.
 
-                records = _fetch_evidence_with_retry(
-                    gateway,
-                    component_sn,
-                    known_flat=known_flat,
-                    max_attempts=settings.sync_page_max_attempts,
-                    on_retry=fetch_retry_heartbeat,
+            One extra `getComponent` per sweep buys the only real evidence
+            available offline that `listTestRunsByComponent` reports the same
+            runs, the same pass/fail, the same state and the same timestamps as
+            the path the whole mirror was built on. Disagreement demotes the
+            sweep rather than quietly mirroring a second opinion.
+            """
+            probe = fetch_test_run_evidence(gateway, probe_sn, with_detail=False, strict=True)
+            listed = {
+                record.external_ref: (
+                    record.test_type,
+                    flat_fingerprint(
+                        passed=record.passed,
+                        measured_at=record.measured_at,
+                        state=(record.payload or {}).get("state"),
+                        problems=(record.payload or {}).get("problems"),
+                    ),
                 )
-                commit_component_records(records)
+                for record in probe
+                if record.external_ref
+            }
+            observed = {run.run_id: (run.test_type, run.fingerprint) for run in indexed_runs}
+            if listed != observed:
+                raise PdbIndexUnusable(
+                    "The batched test-run index disagrees with getComponent about "
+                    f"{probe_sn} ({len(observed)} indexed run(s) against "
+                    f"{len(listed)} listed)."
+                )
+
+        def sweep_via_index(serial_numbers: list[str]) -> list[str]:
+            """Mirror what the batched endpoints can prove; return the rest.
+
+            Three steps per batch: index the runs of many components in one
+            request, diff them against the mirrored fingerprints exactly as the
+            per-component sweep does, then pull the detail of the new/changed
+            runs in bulk. Anything unproven is returned to the caller for the
+            per-component path — never mirrored as if it were whole.
+            """
+            try:
+                client = gateway.client()
+            except Exception:
+                # The per-component path owns the canonical "no connection"
+                # failure; producing a second phrasing here would only make the
+                # same outage look like two different problems.
+                return list(serial_numbers)
+
+            deferred: list[str] = []
+            batch_size = max(1, int(getattr(settings, "sync_evidence_index_batch_size", 50)))
+            page_size = max(1, int(getattr(settings, "sync_evidence_index_page_size", 100)))
+            bulk_size = max(1, int(getattr(settings, "sync_evidence_bulk_batch_size", 50)))
+            calibrated = False
+            bulk_usable = True
+
+            def batch_retry_heartbeat(attempt: int) -> None:
                 _update_progress(
                     session_factory,
                     job_id,
                     "fetching",
-                    index,
+                    completed,
                     component_total,
                     message=(
-                        f"Fetched {index}/{component_total} components "
-                        f"and {runs_seen} test runs."
+                        "Retrying a batched PDB test-run read after a transient "
+                        f"error (attempt {attempt + 1}/"
+                        f"{settings.sync_page_max_attempts})."
                     ),
                 )
-        else:
+
+            def batch_progress_heartbeat(seen: int, total: int | None) -> None:
+                # Fired per index page and per bulk batch. A batch can span
+                # several slow pages while no component finishes, and a job
+                # that stays silent past SYNC_HEARTBEAT_GRACE is reaped as
+                # orphaned by any second instance.
+                _update_progress(
+                    session_factory,
+                    job_id,
+                    "fetching",
+                    completed,
+                    component_total,
+                    message=(
+                        f"Indexing test runs in batches ({completed}/"
+                        f"{component_total} components done; {seen}"
+                        f"{f' of {total}' if total is not None else ''} runs read)."
+                    ),
+                )
+
+            for start in range(0, len(serial_numbers), batch_size):
+                batch = serial_numbers[start : start + batch_size]
+                try:
+                    indexed = fetch_test_run_index(
+                        client,
+                        batch,
+                        page_size=page_size,
+                        max_attempts=settings.sync_page_max_attempts,
+                        on_retry=batch_retry_heartbeat,
+                        on_page=batch_progress_heartbeat,
+                        sleeper=sleep,
+                    )
+                    if not calibrated:
+                        calibrate_index(batch[0], indexed.get(batch[0]) or [])
+                        calibrated = True
+                except PdbIndexUnusable as exc:
+                    # Not an outage — this PDB does not answer in a way we can
+                    # verify. Hand the remainder to the proven path in one go
+                    # instead of buying a doomed request per batch.
+                    log.info(
+                        "Batched evidence index unusable; the rest of job %s uses "
+                        "the per-component sweep: %s",
+                        job_id,
+                        exc,
+                    )
+                    deferred.extend(serial_numbers[start:])
+                    return deferred
+
+                # Did this batch demonstrate that the multi-serial filter was
+                # honoured at all? Runs attributed to two different requested
+                # components is the cheapest available proof, and it is what
+                # makes an empty answer for a third component believable.
+                multi_serial_proven = sum(1 for runs in indexed.values() if runs) >= 2
+                trusted: dict[str, list[IndexedTestRun]] = {}
+                for component_sn in batch:
+                    runs = indexed.get(component_sn) or []
+                    if index_answer_is_trustworthy(
+                        component_sn,
+                        runs,
+                        mirror=mirror,
+                        multi_serial_proven=multi_serial_proven,
+                    ):
+                        trusted[component_sn] = runs
+                    else:
+                        deferred.append(component_sn)
+
+                changed_runs = [
+                    run.run_id
+                    for runs in trusted.values()
+                    for run in runs
+                    if known_flat.get(run.run_id) != run.fingerprint
+                ]
+                details: dict[str, dict[str, Any]] = {}
+                if changed_runs and bulk_usable:
+                    details, bulk_usable = fetch_test_run_details_bulk(
+                        client,
+                        changed_runs,
+                        batch_size=bulk_size,
+                        max_attempts=settings.sync_page_max_attempts,
+                        on_retry=batch_retry_heartbeat,
+                        on_batch=lambda seen: batch_progress_heartbeat(seen, None),
+                        sleeper=sleep,
+                    )
+
+                for component_sn in batch:
+                    runs = trusted.get(component_sn)
+                    if runs is None:
+                        continue
+                    commit_component_records(
+                        records_from_index(
+                            runs,
+                            details=details,
+                            known_flat=known_flat,
+                            # A run the bulk answer skipped is repaired with the
+                            # same single-run call the per-component sweep uses,
+                            # so a partial bulk answer costs requests, not data.
+                            repair=lambda run_id: fetch_test_run_detail(client, run_id),
+                        )
+                    )
+                    report_component_done()
+            return deferred
+
+        def sweep_per_component(serial_numbers: list[str]) -> None:
+            """The proven route: one `getComponent` per component, plus one
+            `getTestRun` per new or changed run."""
+
+            if not serial_numbers:
+                return
+            fetch_concurrency = max(1, int(getattr(settings, "sync_fetch_concurrency", 1)))
+            if fetch_concurrency == 1:
+                # Fully serial sweep (the historical behavior, selectable via
+                # ITKFLOW_SYNC_FETCH_CONCURRENCY=1): one shared gateway, and the
+                # retry ladder writes its own heartbeat before every backoff.
+                for component_sn in serial_numbers:
+
+                    def fetch_retry_heartbeat(attempt: int, *, sn: str = component_sn) -> None:
+                        _update_progress(
+                            session_factory,
+                            job_id,
+                            "fetching",
+                            completed,
+                            component_total,
+                            message=(
+                                f"Retrying {sn} after a transient PDB read error "
+                                f"(attempt {attempt + 1}/{settings.sync_page_max_attempts})."
+                            ),
+                        )
+
+                    records = _fetch_evidence_with_retry(
+                        gateway,
+                        component_sn,
+                        known_flat=known_flat,
+                        max_attempts=settings.sync_page_max_attempts,
+                        on_retry=fetch_retry_heartbeat,
+                    )
+                    commit_component_records(records)
+                    report_component_done()
+                return
+
             # Bounded fetch pool: the per-component evidence reads
             # (getComponent plus per-run getTestRun) are independent network
             # round trips — on a real sweep they dominate the runtime at
@@ -929,17 +1550,19 @@ def run_evidence_sync_job(
             )
             try:
                 pending: deque[tuple[str, Future]] = deque()
-                sn_iter = iter(component_sns)
+                submitted: set[Future] = set()
+                sn_iter = iter(serial_numbers)
 
                 def top_up() -> None:
                     while len(pending) < fetch_concurrency:
                         next_sn = next(sn_iter, None)
                         if next_sn is None:
                             return
-                        pending.append((next_sn, pool.submit(fetch_component, next_sn)))
+                        future = pool.submit(fetch_component, next_sn)
+                        submitted.add(future)
+                        pending.append((next_sn, future))
 
                 top_up()
-                index = 0
                 while pending:
                     component_sn, future = pending.popleft()
                     top_up()
@@ -956,32 +1579,53 @@ def run_evidence_sync_job(
                             session_factory,
                             job_id,
                             "fetching",
-                            index,
+                            completed,
                             component_total,
                             message=(
-                                f"Fetching evidence ({index}/{component_total} components "
-                                "done; waiting on in-flight PDB reads)."
+                                f"Fetching evidence ({completed}/{component_total} "
+                                "components done; waiting on in-flight PDB reads)."
                             ),
                         )
                     # Raises PdbEvidenceUnavailable once this component's own
                     # retry budget is exhausted — the job then fails
                     # transiently, exactly like the serial sweep.
                     records = future.result()
-                    index += 1
                     commit_component_records(records)
-                    _update_progress(
-                        session_factory,
-                        job_id,
-                        "fetching",
-                        index,
-                        component_total,
-                        message=(
-                            f"Fetched {index}/{component_total} components "
-                            f"and {runs_seen} test runs."
-                        ),
-                    )
+                    report_component_done()
             finally:
-                pool.shutdown(wait=False, cancel_futures=True)
+                # Stop work that has not started, then drain active reads with
+                # the same heartbeat cadence as the normal consume loop. A
+                # sibling can still be inside its full retry ladder when the
+                # first Future fails; a bare shutdown(wait=True) could stay
+                # silent past SYNC_HEARTBEAT_GRACE and let another process
+                # steal this live lease.
+                for submitted_future in submitted:
+                    if not submitted_future.done():
+                        submitted_future.cancel()
+                active = [future for future in submitted if not future.done()]
+                while active:
+                    futures_wait(active, timeout=PARALLEL_FETCH_HEARTBEAT_SECONDS)
+                    active = [future for future in active if not future.done()]
+                    if active:
+                        _update_progress(
+                            session_factory,
+                            job_id,
+                            "fetching",
+                            completed,
+                            component_total,
+                            message=(
+                                "Stopping in-flight PDB reads after a fetch failure; "
+                                f"{len(active)} still running."
+                            ),
+                        )
+                pool.shutdown(wait=True, cancel_futures=True)
+
+        # Index-then-bulk first, per component for whatever it could not prove.
+        # `per_component` restores the historical sweep without a code change.
+        outstanding = list(component_sns)
+        if getattr(settings, "sync_evidence_strategy", "index_bulk") == "index_bulk":
+            outstanding = sweep_via_index(outstanding)
+        sweep_per_component(outstanding)
 
         # One planning pass drives both the file total and the downloads.
         # Short-lived sessions on purpose: each component's evidence rows
@@ -1111,8 +1755,28 @@ def run_evidence_sync_job(
     except Exception as exc:
         detail = _public_sync_error(exc, access_codes=access_codes, kind=EVIDENCE_SYNC_KIND)
         log.error("Evidence sync job %s failed: %s", job_id, detail)
-        fail_sync_job(session_factory, job_id, detail)
-        _maybe_schedule_auto_retry(exc, context, on_transient_failure)
+        followup_retry_state: Literal["due", "blocked", "exhausted"] | None = None
+        if context is not None:
+            if _is_transient_job_failure(exc):
+                followup_retry_state = (
+                    FOLLOWUP_RETRY_EXHAUSTED
+                    if context.auto_retry
+                    else FOLLOWUP_RETRY_DUE
+                )
+            else:
+                followup_retry_state = FOLLOWUP_RETRY_BLOCKED
+        followup_retry_managed = fail_sync_job(
+            session_factory,
+            job_id,
+            detail,
+            followup_retry_state=followup_retry_state,
+        )
+        retry_context = (
+            replace(context, followup_retry_managed=followup_retry_managed)
+            if context is not None
+            else None
+        )
+        _maybe_schedule_auto_retry(exc, retry_context, on_transient_failure)
 
 
 def _is_transient_job_failure(error: Exception) -> bool:
@@ -1282,17 +1946,28 @@ def _progress_message(phase: str, current: int, total: int | None) -> str:
 
 
 def fail_sync_job(
-    session_factory: sessionmaker[Session], job_id: int, error: Exception | str
-) -> None:
-    """Move a live job to failed and release the global lease."""
+    session_factory: sessionmaker[Session],
+    job_id: int,
+    error: Exception | str,
+    *,
+    followup_retry_state: Literal["due", "blocked", "exhausted"] | None = None,
+) -> bool:
+    """Move a live job to failed and release its lease.
+
+    For an evidence attempt that covered a pending component generation, the
+    retry verdict is written into that component job's private result in the
+    same transaction.  A crash can therefore lose the process-local timer but
+    never the information needed to recreate exactly its one allowed retry.
+    """
 
     detail = (
         error.strip() if isinstance(error, str) else _public_sync_error(error).strip()
     ) or "Component sync failed."
+    followup_retry_managed = False
     with session_factory() as session:
         job = session.get(SyncJob, job_id)
         if job is None or job.status not in ACTIVE_SYNC_STATUSES:
-            return
+            return False
         finished = utcnow()
         job.status = "failed"
         job.message = (
@@ -1302,16 +1977,40 @@ def fail_sync_job(
         job.active_key = None
         job.updated_at = finished
         job.finished_at = finished
+        if (
+            job.kind == EVIDENCE_SYNC_KIND
+            and job.started_at is not None
+            and followup_retry_state is not None
+        ):
+            component_jobs = session.scalars(
+                select(SyncJob).where(
+                    SyncJob.kind == COMPONENT_SYNC_KIND,
+                    SyncJob.institute_code == job.institute_code,
+                    SyncJob.status == "succeeded",
+                )
+            )
+            for component_job in component_jobs:
+                result = dict(component_job.result or {})
+                if not bool(result.get(EVIDENCE_FOLLOWUP_PENDING_KEY)):
+                    continue
+                if not _timestamp_after(job.started_at, component_job.finished_at):
+                    continue
+                result[EVIDENCE_FOLLOWUP_RETRY_KEY] = followup_retry_state
+                component_job.result = result
+                followup_retry_managed = True
         session.commit()
+    return followup_retry_managed
 
 
 def recover_interrupted_sync_jobs(session_factory: sessionmaker[Session]) -> int:
-    """Fail closed after restart; never resume a partial authoritative fetch.
+    """Close stale process-owned jobs before follow-up reconciliation.
 
     Only jobs whose progress heartbeat has gone stale are closed. Starting a
     second app instance therefore no longer aborts a sync the first one is
     still running — that turned "open the app again" into "lose the sync",
-    observed against production at 600 of 3766 components.
+    observed against production at 600 of 3766 components. A pending component
+    generation lives in the terminal component result, so closing an orphaned
+    evidence attempt cannot lose the startup-resumable intent.
     """
 
     recovered = 0
@@ -1323,7 +2022,7 @@ def recover_interrupted_sync_jobs(session_factory: sessionmaker[Session]) -> int
         for job in jobs:
             if not _job_heartbeat_stale(job, now=now):
                 continue  # someone is still working on this one
-            _close_interrupted_job(job)
-            recovered += 1
+            if _close_stale_job_if_unchanged(session, job):
+                recovered += 1
         session.commit()
     return recovered

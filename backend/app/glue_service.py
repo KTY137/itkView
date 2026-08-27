@@ -56,7 +56,7 @@ __all__ = [
 
 
 def institute_glue_model(session: Session, institute_code: str | None) -> GlueDerivationModel:
-    """The derivation model of one institute, seed defaults where unconfigured."""
+    """The explicitly configured derivation model of one institute."""
     profile = (
         session.scalar(select(InstituteProfile).where(InstituteProfile.code == institute_code))
         if institute_code

@@ -13,8 +13,10 @@
 > drei Bausteine im Code fehlen oder anders heißen, ist dieses Dokument älter
 > als der Code.
 >
-> Zuständigkeit laut `docs/00-doc-map.md`: dieses Dokument (Zeile ist noch
-> nachzutragen, siehe Abschnitt 9).
+> Zuständigkeit laut `docs/00-doc-map.md`: dieses Dokument (Zeile seit
+> 2026-08-27 eingetragen). Die Metrologie ist bewusst ausgelagert:
+> [`13-metrology-artifacts.md`](13-metrology-artifacts.md) misst diese Mechanik
+> am realen Metrologie-Bestand und leitet die Schlüsselregeln daraus ab.
 
 ## 1. Kurzfassung
 
@@ -32,6 +34,20 @@
 5. Häufigster praktischer Befund in der Entwicklungsumgebung: es gibt **zwei**
    Attachment-Wurzeln, weil `attachment_dir` unkonfiguriert relativ zum
    Arbeitsverzeichnis des Serverprozesses aufgelöst wird (Abschnitt 4.1).
+6. **Ein Bild kann gespiegelt und trotzdem unerreichbar sein.** Drei Ursachen
+   dieser Art sind am 2026-08-27 behoben worden, alle drei am Live-Spiegel
+   gemessen: das Listen-Limit zählte Attachment-**Zeilen** statt Komponenten
+   (83 statt 279 Kacheln, Abschnitt 5.3), die Galerie einer Komponente kannte
+   die Bilder ihrer **Kinder** nicht (3 von 432 Bildern liegen auf Modulen,
+   241 auf deren direkten Kindern, Abschnitt 5.1), und eine zweite
+   CERNBox-URL-Form wurde nie umgeschrieben (20 Zeilen, Abschnitt 2.3).
+   „Es sind keine Bilder da" hieß in allen drei Fällen: sie sind da, sie
+   stehen nur nicht auf dieser Seite.
+7. **Metrologie ist der Sonderfall, an dem diese Mechanik am wenigsten hilft:**
+   104 Läufe, 104 Anhänge, **0 Bilder**, 80× derselbe Dateiname, 102 von 104
+   mit demselben Titel und ein einziger Content-Type für alle. Gemessen und mit
+   den Code-Regeln, die daraus folgen, in
+   [`13-metrology-artifacts.md`](13-metrology-artifacts.md).
 
 ## 2. Die drei Speicherwege
 
@@ -100,10 +116,18 @@ eine **vorsignierte URL** auf `eosatlas.cern.ch`, die kurz gültig ist.
   - URL zeigt nicht auf `eosatlas.cern.ch` → abgelehnt, ohne Request.
   - Transiente Fehler beim Nachholen der URL zählen als transient und lösen
     den normalen Retry aus.
-- **Praxisstand:** Bei TUDO existieren **keine** EOS-Attachments (Spec §F:
-  alle 360 gescannten Attachments waren Binary-Store). Der Mechanismus ist
-  über die itkdb-Dokumentation belegt und im Code implementiert, aber gegen
-  echte EOS-Daten **nicht** verifiziert — *offen*.
+- **Praxisstand (korrigiert 2026-08-27, gemessen am Live-Spiegel
+  `%LOCALAPPDATA%\itkflow\itkflow.db`, nur lesend geöffnet):** EOS ist bei
+  TUDO **der Hauptweg für Bilder**, kein theoretischer Fall. Von 3772
+  Attachment-Zeilen zeigen **425 Deskriptoren** auf `eosatlas.cern.ch`, und
+  über sie kommen **422 der 432** gespiegelten Bilddateien — fast alles
+  Sichtprüfungsfotos, weit überwiegend auf **Sensoren**.
+- **Die alte Aussage an dieser Stelle war falsch** („bei TUDO existieren keine
+  EOS-Attachments"). Sie stammte aus Spec §F, wo 360 Attachments einer
+  **kleineren, älteren Arbeitskopie** gescannt wurden, und war die
+  folgenschwerste Fehlannahme dieses Dokuments: sie hat jede Bildersuche von
+  genau dem Weg weggeführt, auf dem praktisch alle Bilder liegen. Wer eine
+  Zahl aus einem Teilbestand liest, muss den Bestand mitschreiben.
 
 ### 2.3 Öffentliche Share-Links in Result-Feldern (CERNBox / Sync&Share)
 
@@ -144,6 +168,36 @@ Attachments, sondern als öffentliche Links **im Wert eines Result-Feldes**.
   `/index.php/s/<token>/download` wird **bewusst nie** erzeugt — diese Form ist
   bei der Live-Validierung an der Namensauflösung gescheitert. Endet der Pfad
   bereits auf `/download`, wird nichts umgeschrieben.
+- **Zweite Form derselben Freigabe (neu 2026-08-27):** die Weboberfläche von
+  CERNBox adressiert dieselbe öffentliche Freigabe als
+  `/files/link/public/<token>[/<Pfad in der Freigabe>]`, und aus dem Browser
+  kopierte Links tragen genau diese Form. Im Live-Spiegel sind das **20
+  Attachment-Zeilen** (87 Vorkommen auf 76 `PWB`-Komponenten, Titel „Link to
+  Picture" — eine Ordner-Freigabe, deren letztes Segment der Dateiname ist).
+  Sie wurden bisher **nicht** umgeschrieben, bekamen die Single-Page-App als
+  HTML, wurden von der HTML-Abwehr korrekt abgelehnt und waren deshalb **nie**
+  gespeichert. Neue Regel:
+  1. `https://<host>/remote.php/dav/public-files/<token>[/<Pfad>]`,
+  2. `https://<host>/s/<token>/download` **nur bei leerem Pfad**,
+  3. die Original-URL als letzte Möglichkeit.
+
+  Der Verzicht auf (2) bei nicht-leerem Pfad ist Absicht: auf einer
+  Ordner-Freigabe liefert `/download` den **ganzen Ordner als ZIP**, und der
+  läge dann unter dem Code eines Bildes im Spiegel. Eine falsche Datei, die
+  aussieht wie eine gespeicherte, ist schlimmer als eine fehlende.
+- **Keine öffentliche Freigabe → gar kein Request:** Pfade der Form
+  `[index.php/]apps/files/…` und `files/spaces/…` sind die **Dateibrowser**
+  einer angemeldeten Sitzung, kein Share. `_share_link_candidates` liefert
+  dafür eine **leere Liste**, `_fetch_share_link` bricht ohne einen einzigen
+  HTTP-Request ab und schreibt eine `INFO`-Zeile (nur der Code, nie die URL).
+  Der Spiegel enthält genau **eine** solche Zeile (`20USES50000771`, ein
+  persönlicher CERNBox-Bereich). Sie ist per Konstruktion unerreichbar —
+  itkFlow hat dafür keine Credentials und soll keine bekommen —, und die
+  Formprüfung ist der Grund, warum sie **nicht in jedem Sweep erneut** eine
+  Login-Seite abholt. Ein persistentes „permanent gescheitert"-Flag in der
+  Datenbank wäre die naheliegende Alternative und wurde **verworfen**: es
+  hätte genau die 20 Bilder oben eingefroren, die dieselbe Runde repariert
+  hat. Ein Code-Fix muss alte Fehlschläge wieder in Reichweite bringen.
 - **Sicherheitsrahmen (ADR 006, Punkt 6):** Der Abruf läuft **ohne jede
   Authentifizierung** über `urllib` mit eigenem Opener — es werden nie
   PDB-Credentials an einen fremden Host geschickt. `_safe_http_url` lehnt
@@ -177,7 +231,7 @@ Attachments, sondern als öffentliche Links **im Wert eines Result-Feldes**.
 | Authentifizierung | persönliche PDB-Codes | persönliche PDB-Codes | keine |
 | URL dauerhaft speicherbar | entfällt | **nein** (Signatur) | ja (aber nie im Read-Model) |
 | Typischer Fehlerfall | HTML-Seite statt Datei | abgelaufene Signatur | HTML-Betrachterseite |
-| Bei TUDO beobachtet | ja (alle 360) | nein | ja (siehe 8.) |
+| Bei TUDO beobachtet | ja | **ja — 425 Deskriptoren, 422 der 432 Bilder** | ja (29 URLs, siehe 8.) |
 
 ## 3. Der lokale Spiegel
 
@@ -390,18 +444,39 @@ Stand `frontend/src/screens/ComponentsScreen.tsx`, `frontend/src/TestResults.tsx
 - Abschnitt **„Metrology & inspection images"** (`ImagesSection`), gerendert
   **immer** und **außerhalb** jedes eingeklappten Bereichs, ganz unten auf der
   Detailseite.
-- Quelle: `GET /api/components/{sn}/attachments` — der **gesamte** lokale
-  Attachment-Index der Komponente, unabhängig vom Testlauf.
-- Filter: `stored && is_image`. Alles andere (Instrumentdaten, PDFs, nicht
-  geladene Dateien) erscheint hier **gar nicht**.
+- Quelle: `GET /api/components/{sn}/attachments`. Die Antwortform hat sich in
+  der aktuellen Arbeitskopie geändert (`schemas.ComponentAttachmentsOut`):
+  statt einer flachen Liste liefert die Route jetzt
+  `{component_sn, attachments, children}` — `attachments` ist weiter der
+  **gesamte** lokale Attachment-Index der Komponente selbst, unabhängig vom
+  Testlauf; `children` gruppiert zusätzlich die **Bild**-Attachments jedes
+  **direkten** Kindbauteils (z. B. Sensor/Hybrid eines Moduls), je Kind mit
+  `sn`, `component_type`, `type_code` und `local_name`
+  (`attachment_store.child_image_attachments`, eine Query für die ganze
+  Familie, ein Hop, nur Zeilen mit `relative_path` und `is_image`). Motivation
+  laut Docstring: auf dem Owner-Spiegel liegen nur 3 von 432 Bildern auf einem
+  Modul selbst, 241 auf direkten Sensor-Kindern — nach Seriennummer allein
+  gefiltert waren diese für eine Modulseite unerreichbar.
+- Filter (serverseitig für `children`, clientseitig für `attachments`):
+  `stored && is_image`. Alles andere (Instrumentdaten, PDFs, nicht geladene
+  Dateien) erscheint hier **gar nicht**.
 - Leerzustand: „No locally mirrored images yet. Run the institute sync or
   refresh this component's test evidence."
 - Klick öffnet die Lightbox (`ImageLightbox`), die dieselbe lokale URL
   benutzt.
+- Frontend-Seite verifiziert (2026-08-27): `frontend/src/api.ts`
+  (`getComponentAttachments`, Typ `ComponentAttachments`) und `ImagesSection`
+  in `ComponentsScreen.tsx` sind bereits auf `{component_sn, attachments,
+  children}` verdrahtet — `family.attachments` für die eigene Galerie,
+  `family.children` für die Kind-Gruppen. Eigener Contract-Test
+  `ComponentsScreen.gallery.test.tsx` deckt beide Fälle ab; `tsc --noEmit` und
+  die Test-Suite sind grün.
 
 **Das ist der wichtigste Punkt für die aktuelle Frage:** die Galerie hängt
 **nicht** hinter „All mirrored runs". Sind Bilder für eine Komponente
-gespiegelt, müssen sie hier ohne jeden Klick sichtbar sein.
+gespiegelt, müssen sie hier ohne jeden Klick sichtbar sein — sobald die
+Frontend-Seite der Antwort wieder zur Route passt, gilt das auch für
+Kind-Bilder.
 
 ### 5.2 Bilder pro Testlauf
 
@@ -432,11 +507,30 @@ gespiegelt, müssen sie hier ohne jeden Klick sichtbar sein.
 
 - `GET /api/components/thumbnails` liefert eine Abbildung
   Seriennummer → **ein** Attachment-Code. Aufgenommen wird nur, was
-  `relative_path is not None`, `is_image` und `resolve_path() != None`
-  erfüllt; die erste passende Zeile je Seriennummer gewinnt
-  (Sortierung nach `component_sn, id`). Limit 1..5000, Default 2000.
+  `relative_path is not None`, Bild-Content-Type und `resolve_path() != None`
+  erfüllt; die Zeile mit der kleinsten `id` je Seriennummer gewinnt.
+- **`limit` begrenzt seit 2026-08-27 Komponenten, nicht Attachment-Zeilen**
+  (1..5000, Default 2000). Beide Einschränkungen stehen jetzt im SQL:
+  `lower(content_type) LIKE 'image/%'` (`attachment_store.is_image_sql()`;
+  kleingeschrieben, weil `LIKE` unter PostgreSQL case-sensitiv ist und unter
+  SQLite nicht) und `GROUP BY component_sn` / `MIN(id)`, **bevor** das Limit
+  greift.
+- **Warum das ein Fehler war:** 3734 der 3772 Zeilen des Live-Spiegels haben
+  eine Datei, und 2671 davon sind Instrument-`.txt`. Die ersten 2000 **Zeilen**
+  (nach `component_sn, id`) erreichten nur **460 von 759** Seriennummern und
+  ergaben **83** Kacheln, obwohl **279** Komponenten ein gespiegeltes Bild
+  haben. Nach der Korrektur: **279**. (Gemessen am Live-Spiegel, nur lesend,
+  mit demselben Statement, das der Endpunkt baut.)
+- **`GROUP BY`/`MIN(id)` statt Fensterfunktion:** identische Semantik — es ist
+  genau die Zeile, die die alte Sortierung als erste traf — aber ohne
+  Abhängigkeit von SQLite ≥ 3.25; PostgreSQL plant beides gleich.
+- Preis der strengen Ein-Zeile-Regel: fehlt **dieser** Datei die Platte, bleibt
+  die Komponente diesmal ohne Kachel, auch wenn ein zweites Bild dort läge.
+  Am Live-Spiegel trifft das auf **keine** der 279 Komponenten zu.
 - Verwendet in der Komponentenliste (`ComponentsScreen`) und in den
-  Gruppenköpfen des `Staged`-Screens.
+  Gruppenköpfen des `Staged`-Screens. `frontend/src/api.ts` übergibt bewusst
+  **kein** Limit: der Default deckt jede gespiegelte Komponente ab, seit er
+  Komponenten zählt.
 - Der Aufruf ist bewusst „best effort": schlägt er fehl, bleibt die Liste
   unverändert, nur ohne Bilder.
 
@@ -537,26 +631,64 @@ Kalibrierung der Erwartung:
 - Keine `.part`-Reste gefunden; die letzten Downloads sind sauber
   abgeschlossen.
 
+### 8.1 Live-Spiegel des Owners (2026-08-27, nur lesend gemessen)
+
+Die Zahlen oben stammen aus dem **Dateisystem** der Arbeitskopie. Die App
+liest jedoch `%LOCALAPPDATA%\itkflow\itkflow.db`; dort gemessen
+(`file:…?mode=ro`, kein Schreibzugriff, kein PDB-Kontakt):
+
+| Größe | Wert |
+|---|---:|
+| Attachment-Indexzeilen | 3772 |
+| davon mit Datei (`relative_path`) | 3734 |
+| Bilddateien (per Magic Bytes bestätigt) | 432 |
+| Seriennummern mit mindestens einem Bild | 279 |
+| Bildquelle EOS / CERNBox-Share / PDB-Binary | 422 / 8 / 2 |
+| Bilder auf `MODULE`-Komponenten | 3 |
+| Bilder auf direkten Kindern eines Moduls | 241 (auf 159 Kindern, 156 Modulen) |
+| Bild-Seriennummern ohne Elternteil (noch nicht verbaut) | 120 |
+| Share-Link-URLs gesamt / davon Weboberflächen-Form / privat | 29 / 20 / 1 |
+
+Die letzte Zeile erklärt den Unterschied zwischen „432 Bilder liegen im
+Spiegel" und „ein Modul zeigt sie": 422 der 432 kommen über EOS, fast alle auf
+Sensoren, und **kein** Modul kam vor 2026-08-27 an sie heran.
+
 Diese Zahlen ändern sich mit jedem Sync. Sie sind ein Datenpunkt, keine
 Zusicherung.
 
 ## 9. Offene Punkte
 
-- **Nicht verifiziert:** EOS-Pfad gegen echte EOS-Attachments (bei TUDO nicht
-  vorhanden). Code und Doku beruhen auf der itkdb-Dokumentation.
+- **Verifiziert (2026-08-27, ersetzt „nicht verifiziert"):** der EOS-Pfad
+  trägt im Live-Spiegel 425 Deskriptoren und 422 der 432 Bilder (Abschnitt 2.2
+  und 8.1). Nicht geprüft bleibt allein das Verhalten einer **abgelaufenen**
+  Signatur — dafür müsste man eine URL absichtlich altern lassen.
 - **Nicht verifiziert:** ob die Share-Link-Erkennung alle zFlow-Feldformen der
   Fremdinstitute abdeckt; erkannt wird an der Wertform, geprüft wurde bisher
   nur gegen `URLSCRATCHPAD`/`URLS1..6` aus der Referenz.
+- **Nicht verifiziert (Netzwerk):** dass die DAV-Route der 20
+  Weboberflächen-Links wirklich Bytes liefert. Die Umschreibung ist an der
+  URL-Form getestet, der Abruf gegen einen Fake; ein echter Abruf verlangt VPN
+  und persönliche Rechte und gehört an den Owner, nicht an einen Agenten.
+- **Unerreichbar, bewusst nicht repariert:** eine Zeile (`20USES50000771`)
+  zeigt auf einen persönlichen CERNBox-Bereich statt auf eine Freigabe. Sie
+  wird ohne Request abgelehnt (Abschnitt 2.3); reparierbar wäre sie nur, indem
+  jemand die Datei als öffentlichen Share neu verlinkt.
 - **Nicht verifiziert:** exakte Patch-Version (0.2.2 oder 0.2.3), mit der die
   Laufansicht hinter „All mirrored runs" gewandert ist.
 - **Offen:** ob der Fall „Datei gespeichert, aber `content_type` leer →
   unsichtbar" real vorkommt (Abschnitt 3.3).
+- **Erledigt/entkräftet (2026-08-27):** ein zuvor hier vermerkter Verdacht auf
+  Backend/Frontend-Bruch bei `GET /api/components/{sn}/attachments`
+  (`{component_sn, attachments, children}` vs. alte Listenform) hat sich bei
+  Gegenprüfung als bereits behoben erwiesen — `frontend/src/api.ts` und
+  `ImagesSection` sind auf die neue Form verdrahtet (Abschnitt 5.1).
 - **Offen:** Zukunft der beiden Live-`/images`-Endpunkte (Abschnitt 4.2).
 - **Offen (aus docs/04 übernommen):** `.part`-Dedupe bei `force` mit geteilten
   Attachment-Codes; `.part`-Aufräumen für aus der PDB verschwundene
   Attachments.
-- **Nachzutragen von der Doc-Map-Zuständigkeit:** Zeile für dieses Dokument in
-  `docs/00-doc-map.md` (dieses Dokument hat sie bewusst nicht selbst gesetzt).
+- **Erledigt (2026-08-27):** die Doc-Map-Zeile für dieses Dokument steht jetzt
+  in `docs/00-doc-map.md`, zusammen mit der für
+  [`13-metrology-artifacts.md`](13-metrology-artifacts.md).
 
 ## 10. Quellen
 

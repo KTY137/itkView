@@ -102,6 +102,8 @@ from app.schemas import (
     AssemblyStageOut,
     AttachmentSyncOut,
     AuditOut,
+    ChildAttachmentsOut,
+    ComponentAttachmentsOut,
     ComponentDetailOut,
     ComponentImageOut,
     ComponentOut,
@@ -1066,10 +1068,17 @@ def update_institute(
         except InstituteSettingsValidationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
+        next_settings = {**current_settings, **settings_patch}
+        # The short-lived legacy name is accepted at the request boundary but
+        # must disappear from storage as soon as a canonical default is saved.
+        # A plain shallow merge cannot express that deletion on its own.
+        if "glue_default_process" in settings_patch:
+            next_settings.pop("glue_process_default", None)
+        missing = object()
         changed_settings_keys = sorted(
             key
-            for key, value in settings_patch.items()
-            if key not in current_settings or current_settings[key] != value
+            for key in set(current_settings) | set(next_settings)
+            if current_settings.get(key, missing) != next_settings.get(key, missing)
         )
         if "notification_channels" in changed_settings_keys:
             previous_channels = current_settings.get("notification_channels")
@@ -1081,7 +1090,7 @@ def update_institute(
                 if previous_channels.get(name) != next_channels.get(name)
             )
         if changed_settings_keys:
-            institute.settings = {**current_settings, **settings_patch}
+            institute.settings = next_settings
 
     if changed_fields or changed_settings_keys:
         detail: dict[str, list[str]] = {}
@@ -1946,24 +1955,47 @@ def component_thumbnails(
     discover that most have no picture.
 
     Only attachments whose bytes are actually on disk are returned, so the
-    caller can render every entry it receives without a fallback state."""
-    from app.attachment_store import resolve_path
+    caller can render every entry it receives without a fallback state.
+
+    `limit` bounds *components*, which is what a caller asking for a list of
+    components means by it. Both restrictions therefore belong in the
+    statement: an attachment-row cap counted mostly instrument `.txt` output —
+    on the owner's mirror 3734 rows for 759 serials — so the first 2000 rows
+    reached only 460 serials and produced 83 tiles where 279 components have a
+    picture.
+
+    One row per component is picked with GROUP BY / MIN(id) rather than a
+    window function: identical semantics (the lowest id, exactly the row the
+    previous ordering hit first), and no dependency on SQLite being new enough
+    for window functions, while PostgreSQL plans it the same either way. If
+    that one row's file has meanwhile disappeared from disk the component
+    simply has no tile this time — measured against the owner's mirror, that
+    is true of none of the 279."""
+    from app.attachment_store import is_image_sql, resolve_path
 
     settings = request.app.state.settings
-    stmt = (
-        select(TestRunAttachment)
-        .where(TestRunAttachment.relative_path.is_not(None))
-        .order_by(TestRunAttachment.component_sn, TestRunAttachment.id)
-    )
+    first_per_component = select(
+        TestRunAttachment.component_sn.label("component_sn"),
+        func.min(TestRunAttachment.id).label("id"),
+    ).where(TestRunAttachment.relative_path.is_not(None), is_image_sql())
     if institute_code:
-        stmt = stmt.join(
+        first_per_component = first_per_component.join(
             Component, Component.sn == TestRunAttachment.component_sn
         ).where(Component.institute_code == institute_code)
+    chosen = (
+        first_per_component.group_by(TestRunAttachment.component_sn)
+        .order_by(TestRunAttachment.component_sn)
+        .limit(max(1, min(limit, 5000)))
+        .subquery()
+    )
 
     thumbnails: dict[str, str] = {}
-    for row in db.scalars(stmt.limit(max(1, min(limit, 5000)))):
-        if row.component_sn in thumbnails or not row.is_image:
-            continue
+    rows = db.scalars(
+        select(TestRunAttachment)
+        .join(chosen, TestRunAttachment.id == chosen.c.id)
+        .order_by(TestRunAttachment.component_sn)
+    )
+    for row in rows:
         if resolve_path(settings, row) is None:
             continue
         thumbnails[row.component_sn] = row.pdb_code
@@ -3347,7 +3379,7 @@ def component_test_details(
 
 @router.get(
     "/api/components/{sn}/attachments",
-    response_model=list[TestRunAttachmentOut],
+    response_model=ComponentAttachmentsOut,
     tags=["components"],
 )
 def component_attachments(
@@ -3355,12 +3387,39 @@ def component_attachments(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
-) -> list[TestRunAttachmentOut]:
-    """The locally mirrored attachment index for one component."""
-    from app.attachment_store import known_attachments
+) -> ComponentAttachmentsOut:
+    """This component's mirrored attachment index, plus its children's images.
+
+    The operator works on a module; the photographs hang on the parts bonded
+    into it. On the owner's mirror 3 of 432 mirrored images sit on a module and
+    241 on sensors that are a module's direct child — filtered by serial number
+    alone, a module page can never show them.
+
+    They arrive in their own per-child group, tagged with the child's serial
+    and component type, never merged into `attachments`: a photograph of a
+    sensor is a statement about that sensor. This follows the worksheet's child
+    evidence groups (`preview._child_evidence_groups`), including their cost
+    rule — one extra query for the whole family, never one per child.
+
+    The per-run attachment lists in `GET /api/components/{sn}/tests` are
+    untouched: a run belongs to exactly one component."""
+    from app.attachment_store import child_image_attachments, known_attachments
 
     settings = request.app.state.settings
-    return [_attachment_out(settings, row) for row in known_attachments(db, sn)]
+    return ComponentAttachmentsOut(
+        component_sn=sn,
+        attachments=[_attachment_out(settings, row) for row in known_attachments(db, sn)],
+        children=[
+            ChildAttachmentsOut(
+                sn=child.sn,
+                component_type=child.component_type,
+                type_code=child.type_code,
+                local_name=child.local_name,
+                attachments=[_attachment_out(settings, row) for row in rows],
+            )
+            for child, rows in child_image_attachments(db, sn)
+        ],
+    )
 
 
 @router.post(

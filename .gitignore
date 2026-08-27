@@ -17,7 +17,11 @@ dist/
 # Local state / secrets — never commit
 .env
 *.db
+*.db-shm
+*.db-wal
 *.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
 # itkdb HTTP response cache — may hold real PDB data (hard rule #3)
 .webcache/
 
