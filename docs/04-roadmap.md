@@ -31,6 +31,167 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-27)
 
+- **Die Bilder werden sichtbar: drei Ursachen, alle am Live-Spiegel gemessen
+  (2026-08-27).** Der Bestand hielt 432 echte Bilddateien; ein Operator sah
+  fast keine. (1) **Das Listen-Limit zaehlte Zeilen, nicht Komponenten.**
+  `GET /api/components/thumbnails` deckelte auf 2000 Attachment-**Zeilen**, und
+  2671 der 3734 Zeilen sind Instrument-`.txt`: die ersten 2000 erreichten 460
+  von 759 Seriennummern und ergaben **83 Kacheln, wo 279 Komponenten ein Bild
+  haben**. Filter und Ein-Zeile-je-Komponente stehen jetzt im SQL
+  (`GROUP BY`/`MIN(id)` statt Fensterfunktion — gleiche Semantik, keine
+  SQLite-3.25-Abhaengigkeit), das Limit begrenzt seither Komponenten: **279**.
+  (2) **Eine Modulseite kannte die Bilder ihrer Kinder nicht.** Nur 3 der 432
+  Bilder liegen auf einem Modul, 241 auf dessen direkten Kindern (159 Sensoren
+  an 156 Modulen). `GET /api/components/{sn}/attachments` liefert jetzt
+  `{component_sn, attachments, children}`: die Bilder je Kind in einer eigenen
+  Gruppe mit Seriennummer und Bauteiltyp, **nie** in die eigenen gemischt —
+  dieselbe Form wie die Kind-Evidenz im Worksheet (Commit `e3ba33f`), samt
+  deren Kostenregel: **eine** zusaetzliche Query fuer die ganze Familie, per
+  Test festgenagelt. Die Anhaenge **pro Lauf** bleiben unberuehrt, ein Lauf
+  gehoert genau einer Komponente. (3) **Eine zweite CERNBox-URL-Form wurde nie
+  umgeschrieben.** 20 Zeilen auf Powerboards tragen die Weboberflaechen-Route
+  `/files/link/public/<token>[/<Datei>]`; sie bekamen die HTML-Seite und wurden
+  korrekt abgelehnt — also nie gespeichert. Sie wird jetzt auf dieselbe
+  DAV-Route abgebildet; `/s/<token>/download` bleibt bei Ordner-Freigaben
+  bewusst aussen vor (es lieferte den ganzen Ordner als ZIP unter dem Code
+  eines Bildes). Eine weitere Zeile zeigt auf einen **persoenlichen**
+  CERNBox-Bereich: an der Form erkannt, ohne einen einzigen Request abgelehnt,
+  damit sie nicht in jedem Sweep dieselbe Login-Seite abholt. Ein
+  DB-Flag „permanent gescheitert" waere die naheliegende Alternative gewesen
+  und ist verworfen worden — es haette genau die 20 Bilder eingefroren, die
+  dieselbe Runde repariert. Alle Schutzmechanismen unveraendert (HTML-Abwehr
+  doppelt, Groessenlimit, Redirect-Pruefung). Doku: `docs/12` (§1, §2.2, §2.3,
+  §5.3, §8.1, §9) und `docs/13` (§2.1) — dort auch die zwei widerlegten
+  Aussagen: TUDO hat sehr wohl EOS-Attachments (425 Deskriptoren, **422 der
+  432 Bilder**), und „metrology images" ist eine UI-Panel-Beschriftung, kein
+  Testtyp (0 Bilder an allen vier Metrologie-Testtypen, alle 432 an
+  Sichtpruefungen).
+
+- **Sync-Runde 2: Index-dann-Bulk, rollierende Anzeige, optionaler Auto-Sync
+  (2026-08-27).** Die vorige Runde hatte den Sweep parallelisiert, aber den
+  Boden „ein Request pro Komponente" stehen lassen — bei TUDO 1170 Requests je
+  Sweep, auch wenn sich nichts geaendert hat. Aus dem lokal installierten
+  `itkdb` (0.6.20, im venv, **kein** PDB-Zugriff noetig) liessen sich zwei
+  ungenutzte Sammel-Endpunkte belegen: `listTestRunsByComponent` (Lauf-Index
+  fuer viele Seriennummern) und `getTestRunBulk` (`{"testRun": [ids]}`, viele
+  Detail-Laeufe in einem Request).
+  (1) **Der Evidence-Sweep ist jetzt Index → Diff → Bulk.** Wiederholungssweep
+  ~1170 → ~150 Requests (≈7×), Erstsweep 15 929 → ~460 (≈34×). Weil die
+  Endpunkte nicht gegen eine echte PDB validiert werden konnten, ist der
+  bewaehrte Pro-Komponenten-Pfad kein toter Code, sondern **automatischer
+  Fallback** pro Komponente; alles, was die Sammelantwort nicht als
+  vollstaendig beweisen kann, wird einzeln nachgelesen. `ITKFLOW_SYNC_EVIDENCE_
+  STRATEGY=per_component` stellt das alte Verhalten mit einer Env-Variable her.
+  Der `run_state`-Vertrag (zurueckgezogene Laeufe) bleibt gewahrt: `state` ist
+  Teil des Fingerprints, eine Ruecknahme kommt auf dem billigen Pfad an.
+  (2) **Rollierende Anzeige („rolling shutter").** Der Sweep committet jede
+  Komponente einzeln, die Oberflaeche las aber erst bei `succeeded` neu — man
+  starrte minutenlang auf alte Zeilen. `componentSync.ts` liefert jetzt
+  `dataEpoch`; Liste, Thumbnails **und eine geoeffnete Detailseite** (Preview,
+  Pflichttest-Status) ziehen waehrend des Laufs nach. Zwei Schutzbedingungen,
+  beide mutationsgetestet: nur bei echtem Fortschritt, hoechstens alle 8 s.
+  Nur fuer den Evidence-Sweep — der Komponenten-Sync schreibt in einer
+  einzigen Abschlusstransaktion und hat zwischendurch nichts zu zeigen.
+  (3) **Unbeaufsichtigter Auto-Sync** (`app/auto_sync.py`), **per Default aus**.
+  Erst durch (1) vertretbar. „Wie oft und wann" ist eine Institutsentscheidung
+  (harte Regel 4) und steht deshalb im Institutsprofil unter
+  `settings["auto_sync"]`, editierbar in den Admin Settings: `enabled`,
+  `interval_minutes` (Untergrenze 15), optionales Fenster
+  `window_start`/`window_end` und `weekdays`. Fenster ueber Mitternacht sind
+  ausdruecklich unterstuetzt (`22:00`–`06:00` = nachts) und gelten dem
+  Wochentag, an dem sie geoeffnet haben — sonst schaltete „nur werktags" jede
+  halbe Freitagnacht mit ab. Fenster/Wochentag werden gegen **lokale**
+  Serverzeit geprueft, das Intervall gegen **UTC** (gespeicherte Zeitstempel).
+  Das Profil traegt bewusst keine benannte Zeitzone: Desktop nutzt die
+  Betriebssystemzeit, Compose installiert `tzdata` und bezieht `TZ` aus
+  `deploy/.env` (sichtbarer Default `Etc/UTC`). Ein fehlerhafter Profilblock
+  wird als *aus* gelesen, nie geraten.
+  Deployment-seitig bleibt nur `ITKFLOW_AUTO_SYNC_POLL_MINUTES` (Default 5,
+  `0` = Scheduler aus) — wie oft ausgewertet wird, kein PDB-Verkehr.
+  Er hat keine eigenen Credentials: je Institut laeuft er als die
+  Person, deren eigener Komponenten-Sync dort zuletzt erfolgreich war. Die
+  Person muss dort weiterhin aktiver Operator/Admin sein; deaktivierte oder
+  herabgestufte Konten, fremder Institute-Scope, geloeschte Codes sowie
+  unbekannter, kaputter oder `invalid` Status werden fail-closed uebersprungen
+  (`unreachable` bleibt bewusst nutzbar). Jobs tragen
+  `scheduled refresh (<email>)`, damit nichts so aussieht, als haette jemand
+  geklickt. Da die Komponenten-Lease global ist, sortiert
+  `institutes_by_staleness()` nach laengster Wartezeit — sonst verhungert bei
+  mehreren Instituten dauerhaft eines. Details docs/09, UI-Teil docs/05.
+
+- **Auto-Sync: Profil-Validierung und Admin-UI (2026-08-27).** Der Zeitplan
+  ist jetzt Institutsdaten statt Env-Variable: `auto_sync` in
+  `InstituteProfile.settings`, validiert in `app/institute_settings.py` und
+  bedient im Admin-Settings-Abschnitt `Scheduled sync`. Der Reader in
+  `app/auto_sync.py` faellt bewusst still auf „aus" zurueck; damit ist der
+  Validator die einzige Stelle, die einer Person ueberhaupt sagt, dass ihre
+  Eingabe falsch war — jede Ablehnung nennt deshalb den akzeptierten Wert.
+  Abgelehnt statt repariert werden: Intervall < 15 min, halbe
+  Zeitfenster, identische Fenstergrenzen, Wochentage ausserhalb 1–7, doppelte
+  oder leere Wochentagslisten, unbekannte Keys (`timezone`!). Ausdruecklich
+  **nicht** geprueft wird `start <= end`: `22:00`–`06:00` ist ein
+  Nachtfenster, und die UI benennt es auch so. Ein Institut ohne Zeitplan
+  bekommt durch ein unabhaengiges Speichern keinen Block — Abwesenheit ist,
+  wie „kein unbeaufsichtigter Verkehr" gespeichert wird. UI-Teil docs/05 §7.
+  Das Intervall wird gegen die neuere Grenze aus letztem erfolgreichen Sync
+  und letztem Scheduled-Versuch (einschliesslich dessen Auto-Retry) gemessen;
+  ein Fehlschlag erzeugt daher nicht bei jedem Poll einen neuen Job. Ein
+  manueller Fehlschlag verschiebt die Zeitplangrenze bewusst nicht.
+
+- **Befund festgehalten: die Metrologie hat kein Bild, und ihre Dateinamen sind
+  wertlos (2026-08-27, neues Dokument
+  [`13-metrology-artifacts.md`](13-metrology-artifacts.md)).** Am kanonischen
+  TUDO-Spiegel gezählt: **104 `MODULE_METROLOGY`-Läufe, 104 Anhänge, 0 Bilder**
+  — jeder Anhang eine `text/plain`-Rohdatei. **24 verschiedene Dateinamen auf
+  104 Läufe, davon 80× `result.txt`**; ein Modul (`20USEM20000056`) trägt fünf
+  Läufe in fünf Schreibweisen bis hin zu
+  `R2_module_result_tryAgain_20USEM20000056_OutputFile.txt`; **fünf Module
+  haben zwei Läufe mit identischem Dateinamen** — wer auf
+  `(Seriennummer, Dateiname)` schlüsselt, verliert je eine Messung lautlos.
+  `title` ist bei allen 104 `resultsFile`, `content_type` bei allen 104
+  `text/plain`: zwei Felder, die nichts unterscheiden können. Dazu **zwei
+  Handle-Formen** (32 Hex = PDB-Code, 64 Hex = von itkFlow für
+  CERNBox-Share-Links erzeugt) und **drei Schreibweisen derselben Maschine**
+  (`Keyence VR-3200` 98×, `Keyence` 5×, plus ein DESY-`Flash CNC 300
+  Smartscope`/`DESYv0`-Lauf im TUDO-Bestand). Daraus die verbindliche Regel:
+  **eindeutig ist nur `(test_run_ref, pdb_code)`**, und die Metrologie-Kachel
+  darf kein Bild versprechen. Offen bleibt, wo die Bilddateien der Keyence
+  überhaupt landen — die PDB sieht sie nie. Doku-Verkabelung im selben Change:
+  Doc-Map-Zeilen für [`12`](12-attachments-and-images.md) und
+  [`13`](13-metrology-artifacts.md), Querverweise in 12 und `docs/README.md`.
+  Reine Dokumentation, kein Code geändert.
+- **Das Klebegewichts-Urteil existiert (2026-08-27, Etappe E2 aus
+  [`superpowers/specs/2026-08-27-modulseite-als-arbeitsblatt.md`](superpowers/specs/2026-08-27-modulseite-als-arbeitsblatt.md)
+  §9).** `glue_targets`, `glue_weight_inputs`, der ausdrückliche
+  `glue_default_process` und `glue_process_property` sind validierte
+  Institutsprofildaten. Fehlende, `null`- oder fehlerhafte Profile aktivieren
+  **keine globalen TUDO-Seeds**; auch ein einziger Regelsatz wird nie als
+  Prozessdefault geraten. Der sessiongebundene Adapter
+  `backend/app/glue_service.py` speist `WorksheetRow.derived` und den
+  Ingest-Dry-Run. **Der Server rechnet, die Anzeige färbt** — Gramm aus der PDB
+  werden an genau einer Grenze in Milligramm umgerechnet; `unknown` trägt immer
+  `no_run`, `missing_inputs` oder `no_target`.
+  **Historische Auswahl:** größtes `valid_from` ≤ echter Messzeitpunkt,
+  `valid_from: null` als einziger Rückfall für undatierte Läufe. Der Ingest
+  reicht den Upload-Messzeitpunkt durch und verwendet für Institutswahl,
+  Pflichtfelder und Ableitung dasselbe endgültige Profil; widersprüchliche
+  Payload-/Operator-Auswahl scheitert geschlossen. Profildefinierte eigene
+  Glue-Testtypen erscheinen bereits ohne Lauf als Additional-/`no_run`-Zeile.
+  **Sheet-/zFlow-Abgleich:** der echte Spiegel führt
+  `R5M1_HALFMODULE`/`R5M0_HALFMODULE`/`R2`, nicht die Blattkurzformen; die
+  belegte TUDO-Basis ist die H1-Kette. Optionale, exakte `by_type_code`-Formeln
+  bilden zFlows H1/H1H2-Topologieauswahl ab, ohne aus gefüllten Ergebnisfeldern
+  zu raten. `GW_METHOD` bleibt korrekt die Auftragsart, nicht der Kleber. Der
+  Zahlendreher des Blattes (R2-Gesamttoleranz 22 statt 25+11=36) wird nicht
+  übernommen. Admins können Prozessdefault und Run-Property einstellen;
+  verschachtelte Typformeln überstehen jeden Formular-Roundtrip verlustfrei.
+  Fokussiert verifiziert: 88 Backend-Glue-Tests und 28 Admin-UI-Tests, Ruff und
+  TypeScript sauber. Gegen den Echtbestand reproduziert die Rechnung die
+  gespeicherten Werte auf 1 mg genau in 25 von 31 vollständigen Hybrid- und 13
+  von 18 Powerboard-Sätzen; die übrigen 11 Läufe widersprechen ihren eigenen
+  Waagenwerten. **Offene E3-Naht:** `pdb_submit`/`pdb_upload` mischen die auf der
+  Outbox-Action gestagten `derived_results` noch nicht in das hochgeladene
+  Dokument.
 - **Zwei Falschaussagen der Modulseite behoben (2026-08-27, Etappe E1 aus
   [`superpowers/specs/2026-08-27-modulseite-als-arbeitsblatt.md`](superpowers/specs/2026-08-27-modulseite-als-arbeitsblatt.md)
   §1; beide gegen den echten TUDO-Spiegel gemessen).**
@@ -69,9 +230,10 @@ vom Design-Ziel abdriftet.
   Antwort. **Bewusst nicht geaendert:** was ein Stage-Gate oeffnet. Ob der
   bestandene Test eines Kindes die Anforderung des Elternteils erfuellt (zFlow
   aggregiert ueber Halbmodule), ist eine offene Owner-Entscheidung; die
-  Evidenz wird gezeigt, nicht stillschweigend verrechnet. Offener Nachzug: die
-  aufgeklappte Lauf-Ansicht kennzeichnet einen zurueckgezogenen Lauf noch
-  nicht sichtbar als „withdrawn" (`run_state` liegt am Wire bereit).
+  Evidenz wird gezeigt, nicht stillschweigend verrechnet. Die aufgeklappte
+  Lauf-Ansicht kennzeichnet den terminalen PDB-Zustand `deleted` jetzt als
+  `withdrawn in PDB`; `requestedToDelete` bleibt bis zum Abschluss ein
+  lebender Lauf und zeigt weiterhin sein Ergebnis.
   Verifiziert: 838 Backend-Tests (PYTEST_EXIT=0), ruff clean, Frontend-`tsc`
   sauber, 121 Vitest-Tests gruen. Details docs/09 und docs/05.
 - Monorepo steht mit `backend/`, `frontend/`, `agent/`, `deploy/`, CI- und
@@ -175,7 +337,22 @@ vom Design-Ziel abdriftet.
   speicherfressende Attachment-Planung (gesamte Evidence-Tabelle inkl.
   ~10-KB-Payloads in einer Identity-Map) ist durch **eine** Planung in
   kurzlebigen Sessions ersetzt. Attachment-Downloads bleiben bewusst seriell
-  (Begruendung in docs/09). Details docs/09.
+  (Begruendung in docs/09). (5) Der Component-Sync und der Evidence-Snapshot
+  konnten sich ueberholen: eine bereits laufende Evidence-Phase hielt ihren
+  alten Komponenten-Scope, waehrend der erfolgreiche Component-Callback nur
+  auf diese Lease konvergierte. Der Component-Commit speichert jetzt atomar
+  einen privaten, restart-sicheren Follow-up-Wunsch; Startup und Future-Ende
+  gleichen `finished_at`/`started_at` ab, frische Fremd-Leases werden nie
+  uebernommen und erst ein neuerer erfolgreicher Snapshot loescht den Wunsch.
+  Der private Marker wird aus allen Public-Schemas gefiltert. Zwei Restfehler
+  des Parallel-Schnitts sind ebenfalls geschlossen: ein lokal wiederverwendeter
+  Anhang ist fuer den Outage-Breaker neutral (nur ein echter Download beweist
+  Erholung), und der innere Fetch-Pool joint laufende Reads mit Heartbeats vor
+  terminalem Jobstatus/Retry. Der Follow-up-Retry-Zustand ist jetzt ebenfalls
+  dauerhaft (Crash vor dem Timer verliert ihn nicht), und ein abgelehnter
+  Executor-Submit gibt Queue-Watch und Lease wieder frei. Fokussiert
+  verifiziert: 56 Sync- und 76 Attachment-Tests.
+  Details docs/09.
 - **Modul-Worksheet als Primaeransicht der Detailseite (2026-08-26):** Die
   Detailansicht rendert nicht mehr jeden Lauf voll (Kurven + komplettes
   Wertegitter) — bei >100 Laeufen eine unlesbare, ueberlappende Zahlenwand.

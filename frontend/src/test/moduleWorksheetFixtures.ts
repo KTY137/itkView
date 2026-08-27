@@ -94,6 +94,7 @@ export const ivRun: TestRunDetail = {
   external_ref: "RUN-IV-3",
   measured_at: "2026-08-24T09:12:00Z",
   run_number: "3",
+  run_state: null,
   results: {
     VOLTAGE: IV_VOLTAGES,
     CURRENT: IV_CURRENTS,
@@ -122,6 +123,7 @@ export const metrologyRun: TestRunDetail = {
   external_ref: "RUN-METRO-1",
   measured_at: "2026-08-25T14:05:00Z",
   run_number: "1",
+  run_state: null,
   results: {
     "Hybrid glue thickness [um]": METROLOGY_THICKNESS,
     "Capacitor heights [um]": {},

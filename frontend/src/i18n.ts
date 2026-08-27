@@ -592,8 +592,17 @@ const en = {
     },
   },
   images: {
+    // Panel label, not a test type: no image in the mirror hangs on a
+    // metrology test type — all 432 come from visual inspection (docs/13 §2).
     title: "Metrology & inspection images",
     empty: "No locally mirrored images yet. Run the institute sync or refresh this component's test evidence.",
+    // Nearly every photograph is taken of a part, not of the assembly it ends
+    // up in: 241 of 432 mirrored images hang on a sensor that is a module's
+    // direct child, 3 on modules themselves (docs/12 §8).
+    childrenTitle: "Images on assembled parts",
+    childrenIntro:
+      "Photographed on the parts built into this component, not on it. Shown with the serial they belong to.",
+    ownEmpty: "No images mirrored for this component itself.",
     offlineHint: "Locally mirrored images are unavailable while the backend is offline.",
     untitled: "image",
     close: "Close",
@@ -1271,6 +1280,7 @@ const en = {
       "Use the run property when glue records name their process. Otherwise, the explicit default is used. The application method (for example stencil or dispenser) is not a glue process.",
     glueDefaultProcessLabel: "Default glue process",
     glueDefaultProcessUnset: "No default process",
+    glueDefaultProcessMissing: "Default glue process must match a configured rule set.",
     glueProcessPropertyLabel: "Run process property",
     glueProcessPropertyPlaceholder: "Optional, e.g. GW_PROCESS",
     addGlueRuleSet: "Add rule set",
@@ -1305,6 +1315,56 @@ const en = {
     addEvidenceType: "Add component type",
     evidenceTypeLabel: (index: number) => `Component type ${index}`,
     evidenceTypePlaceholder: "e.g. MODULE",
+    autoSyncTitle: "Scheduled sync",
+    autoSyncHint:
+      "Off unless you switch it on here. This is the only setting that makes itkFlow contact the ITk Production Database on its own, without anyone asking for it at that moment — everything else waits for a person to press sync.",
+    autoSyncIdentityHint:
+      "A scheduled refresh has no login of its own. It runs under the identity of the person whose own component sync for this institute succeeded most recently, and every scheduled job is labelled “scheduled refresh” so it never looks like they pressed anything. It only reads: a schedule never writes to the PDB.",
+    autoSyncIdentityDetail:
+      "Only an active operator or administrator for this institute can lend their access codes. Deactivated or downgraded accounts, users from another institute, missing codes, and codes with an unknown, corrupt, or invalid status are skipped; codes that were merely unreachable are still used. If nobody qualifies, this institute is simply never refreshed and the schedule stays quiet.",
+    autoSyncClockHint:
+      "The window and the weekdays are read from the server’s own clock — the machine running itkFlow, not UTC and not your browser. A window may cross midnight: 22:00 to 06:00 runs overnight only, 07:00 to 19:00 runs during the day only, and leaving both fields empty allows any time of day. The interval below is measured in UTC from the newer of the last successful sync and the last scheduled attempt, so failures cannot create a request on every scheduler poll.",
+    autoSyncEnabledLabel: "Refresh this institute on a schedule",
+    autoSyncEnabledNote:
+      "On. itkFlow will contact the PDB by itself, within the limits below.",
+    autoSyncDisabledNote:
+      "Off. itkFlow reaches the PDB only when a person presses sync.",
+    autoSyncIntervalLabel: "Wait at least this long after sync activity",
+    autoSyncIntervalHint: "At least 15 minutes. A smaller number is refused, not rounded up.",
+    autoSyncWindowStartLabel: "Window start (server time, optional)",
+    autoSyncWindowEndLabel: "Window end (server time, optional)",
+    autoSyncWindowAnyTime: "No window: a refresh may start at any time of day.",
+    autoSyncWindowDaytime: (start: string, end: string) =>
+      `Daytime window: refreshes start between ${start} and ${end}, server time.`,
+    autoSyncWindowOvernight: (start: string, end: string) =>
+      `Overnight window: refreshes start from ${start} until ${end} the next morning, server time. Crossing midnight is supported on purpose.`,
+    autoSyncWeekdaysLabel: "Weekdays",
+    autoSyncWeekdaysHint:
+      "Which days a window may open on. A window that crosses midnight belongs to the day it opened: a Friday 22:00 to 06:00 window keeps running into Saturday morning. Leave all seven selected to allow every day.",
+    autoSyncWeekdayName: (isoWeekday: number) =>
+      [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+      ][isoWeekday - 1] ?? String(isoWeekday),
+    autoSyncWeekdayShortName: (isoWeekday: number) =>
+      ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][isoWeekday - 1] ??
+      String(isoWeekday),
+    autoSyncDirtyWarning:
+      "Unsaved change to the scheduled sync. Saving is what starts or stops unattended PDB traffic for this institute.",
+    autoSyncWindowPairRequired:
+      "Set both the window start and the window end, or clear both to allow any time of day.",
+    autoSyncWindowFormat: "The sync window needs times as HH:MM on a 24-hour clock.",
+    autoSyncWindowIdentical:
+      "Window start and window end must differ. Clear both to allow any time of day; 22:00 to 06:00 is a valid overnight window.",
+    autoSyncWeekdaysRequired:
+      "Select at least one weekday, or select all seven to refresh every day.",
+    autoSyncMalformedWarning:
+      "The stored scheduled-sync settings are invalid, so unattended refresh is off. Edit this section and save to replace them; unrelated saves leave them untouched.",
     remove: "Remove",
     reset: "Reset",
     save: "Save settings",

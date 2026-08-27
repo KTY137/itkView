@@ -999,7 +999,9 @@ export type TestRunDetail = {
 /** Serial number -> attachment code, for one locally stored image per component.
  *
  * One request for a whole list: a per-row lookup would open a connection per
- * module only to learn that most have no picture. */
+ * module only to learn that most have no picture. The server's `limit`
+ * (default 2000) bounds *components*, not attachment rows, so the default
+ * covers every mirrored component; no caller needs to pass one. */
 export function getComponentThumbnails(
   instituteCode?: string,
   signal?: AbortSignal,
@@ -1015,11 +1017,33 @@ export function getComponentTests(sn: string, signal?: AbortSignal): Promise<Tes
   return request<TestRunDetail[]>(`/api/components/${encodeURIComponent(sn)}/tests`, { signal });
 }
 
+/** One direct child's locally stored images, tagged with whose they are. */
+export type ChildAttachments = {
+  sn: string;
+  component_type: string;
+  type_code: string;
+  local_name: string | null;
+  attachments: TestRunAttachment[];
+};
+
+/** A component's own mirrored attachment index plus its children's images.
+ *
+ * The children arrive in their own groups rather than folded into
+ * `attachments`: on the owner's mirror 241 of 432 mirrored images hang on a
+ * sensor that is a module's direct child and 3 on modules themselves, and a
+ * photograph of a sensor is a statement about that sensor. Each group carries
+ * the child's serial, so its bytes are fetched under the child's own URL. */
+export type ComponentAttachments = {
+  component_sn: string;
+  attachments: TestRunAttachment[];
+  children: ChildAttachments[];
+};
+
 export function getComponentAttachments(
   sn: string,
   signal?: AbortSignal,
-): Promise<TestRunAttachment[]> {
-  return request<TestRunAttachment[]>(
+): Promise<ComponentAttachments> {
+  return request<ComponentAttachments>(
     `/api/components/${encodeURIComponent(sn)}/attachments`,
     { signal },
   );

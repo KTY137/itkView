@@ -24,6 +24,9 @@ services:
       context: ../backend
       dockerfile: ../deploy/backend.Dockerfile
     environment:
+      # Scheduled-sync windows use this container-local wall clock. Set TZ in
+      # deploy/.env to the institute's deployment timezone (docs/09).
+      TZ: ${TZ:-Etc/UTC}
       ITKFLOW_DATABASE_URL: postgresql+psycopg://itkflow:${POSTGRES_PASSWORD}@postgres:5432/itkflow
       ITKFLOW_PDB_INSTANCE: ${ITKFLOW_PDB_INSTANCE:-production}
       ITKFLOW_ALLOW_PRODUCTION: ${ITKFLOW_ALLOW_PRODUCTION:-true}
@@ -47,6 +50,7 @@ services:
       dockerfile: ../deploy/backend.Dockerfile
     command: ["python", "-m", "app.run_worker"]
     environment:
+      TZ: ${TZ:-Etc/UTC}
       ITKFLOW_DATABASE_URL: postgresql+psycopg://itkflow:${POSTGRES_PASSWORD}@postgres:5432/itkflow
       ITKFLOW_PDB_INSTANCE: ${ITKFLOW_PDB_INSTANCE:-production}
       ITKFLOW_ALLOW_PRODUCTION: ${ITKFLOW_ALLOW_PRODUCTION:-true}

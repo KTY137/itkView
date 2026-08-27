@@ -71,9 +71,11 @@ schneller sein muss als das Sheet, sonst gewinnt das Sheet.
 **Deployment:** Ein `docker-compose.yml` (app, worker, postgres, optional minio). Kein CERN-Dienst
 nötig; läuft auf einem Lab-PC oder Instituts-VM. Updates via Container-Tag.
 
-**Auth:** Lokale Accounts + optional OIDC (CERN SSO / Instituts-IdP). Rollen: `viewer`, `operator`
-(erfassen), `coordinator` (PDB-Writes freigeben, Stage-Moves), `admin` (Instituts-Profil).
-PDB-Zugang: pro Nutzer hinterlegte, serverseitig verschluesselte
+**Auth:** Lokale Accounts + optional OIDC (CERN SSO / Instituts-IdP). Geplant waren vier
+Rollen (`viewer`, `operator`, `coordinator` fuer PDB-Writes/Stage-Moves, `admin`); umgesetzt
+sind drei (`backend/app/auth.py`, `ROLES = ("viewer", "operator", "admin")`) — `operator`
+uebernimmt sowohl Erfassung als auch Freigabe/Push, eine eigene Vier-Augen-Rolle ist nicht
+entstanden. PDB-Zugang: pro Nutzer hinterlegte, serverseitig verschluesselte
 Plus4U/PDB-Access-Codes (ADR 004). Web- und Worker-Aktionen haben keinen
 Instituts-/Server-Credential-Fallback; jede PDB-Aktion loggt und bindet, unter
 welcher lokalen und PDB-Identitaet sie lief.
@@ -173,7 +175,11 @@ Pilot bei einem zweiten Institut.
 
 ## 6. Offene Entscheidungen (kurz mit dir zu klären)
 
-1. **PDB-Zugang für Dev**: Zugang zur PDB-Sandbox/Test-Instanz vorhanden? (Voraussetzung Phase 0/1)
+1. **PDB-Zugang für Dev**: ~~Zugang zur PDB-Sandbox/Test-Instanz vorhanden?~~ **Geklärt:**
+   es gibt keine PDB-Testinstanz (mehr) — Code-Default ist `offline` (kein PDB-Zugriff),
+   Dev/CI bleiben es auch; markierte Integrationsläufe nutzen Produktion read-only oder
+   DUMMY-gescoped (siehe Phase 0 oben, [`09`](09-pdb-production-strategy.md),
+   [ADR 003](adr/003-pdb-dummy-write-scope.md)).
 2. **Hosting**: Instituts-VM (DESY) vs. Lab-PC — beeinflusst nur Deployment-Doku.
 3. **Auth**: Reichen lokale Accounts für v1, OIDC später?
 4. **Scope v1**: Endcap-Workflows (wie Zeuthen) zuerst; Barrel-Spezifika als Profil-Erweiterung ok?

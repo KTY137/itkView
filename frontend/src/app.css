@@ -3560,3 +3560,24 @@ g:hover > .curve-line {
   color: var(--accent-hi);
   background: var(--accent-soft);
 }
+
+/* Scheduled sync: a switch that starts unattended PDB traffic, and seven
+   weekday toggles that stay large enough to hit on a lab touchscreen. */
+.admin-settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-weight: 600;
+}
+.admin-settings-weekdays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0;
+}
+.admin-settings-weekday {
+  min-width: 58px;
+  min-height: 40px;
+  justify-content: center;
+}

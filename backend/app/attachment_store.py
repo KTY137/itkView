@@ -35,10 +35,10 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, aliased
 
-from app.models import TestRunAttachment, TestRunEvidence, utcnow
+from app.models import Component, TestRunAttachment, TestRunEvidence, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -146,6 +146,56 @@ def known_attachments(session: Session, component_sn: str) -> list[TestRunAttach
             .order_by(TestRunAttachment.test_type, TestRunAttachment.id)
         )
     )
+
+
+def is_image_sql():
+    """SQL form of ``TestRunAttachment.is_image``, for filtering in the database.
+
+    The Python property answers per row; a listing endpoint has to ask the
+    question of thousands of rows at once, and doing that after the fact makes
+    a row limit meaningless. Lower-cased explicitly because ``LIKE`` is
+    case-sensitive on PostgreSQL and case-insensitive on SQLite — the same
+    statement must select the same rows on both.
+    """
+    return func.lower(TestRunAttachment.content_type).like("image/%")
+
+
+def child_image_attachments(
+    session: Session, parent_sn: str
+) -> list[tuple[Component, list[TestRunAttachment]]]:
+    """Stored images of a component's *direct* children, grouped per child.
+
+    An operator works on a module while the photographs hang on the parts
+    bonded into it: in the owner's mirror 3 of 432 mirrored images sit on a
+    module and 241 on sensors that are one module's direct child. Those images
+    are unreachable from any module page as long as the index is filtered by
+    serial number alone.
+
+    Only images, and only rows that claim a file: this feeds a gallery, and
+    pulling a sensor's several hundred instrument `.txt` rows into a module
+    page would cost far more than it shows. Grandchildren are deliberately not
+    walked — one hop is the assembly relation the page already displays.
+
+    One query for the whole family, never one per child.
+    """
+    parent = aliased(Component)
+    rows = session.execute(
+        select(Component, TestRunAttachment)
+        .join(TestRunAttachment, TestRunAttachment.component_sn == Component.sn)
+        .where(
+            Component.parent_id
+            == select(parent.id).where(parent.sn == parent_sn).scalar_subquery(),
+            TestRunAttachment.relative_path.is_not(None),
+            is_image_sql(),
+        )
+        .order_by(Component.sn, TestRunAttachment.id)
+    )
+    grouped: list[tuple[Component, list[TestRunAttachment]]] = []
+    for child, attachment in rows:
+        if not grouped or grouped[-1][0].sn != child.sn:
+            grouped.append((child, []))
+        grouped[-1][1].append(attachment)
+    return grouped
 
 
 def attachment_read_model(settings: Any, attachment: TestRunAttachment) -> dict[str, Any]:
@@ -497,8 +547,30 @@ def _response_content_type(response: Any) -> str | None:
     return value.split(";", 1)[0].strip() if isinstance(value, str) and value else None
 
 
+# Web *file-browser* routes of an ownCloud/Reva deployment (CERNBox, DESY
+# syncandshare, Nextcloud). These address a signed-in session's own storage,
+# not a public share: there is no share token to turn into a download route,
+# itkFlow holds no credentials for them and never will (ADR 006, point 6), and
+# every request returns the same login-walled single-page app. Recognising the
+# shape lets the mirror refuse such a link once and for free, instead of
+# fetching the same HTML page on every sweep forever.
+_PRIVATE_WEB_UI_ROUTES = (("apps", "files"), ("files", "spaces"))
+
+# The web UI's own route to a *public* share: `/files/link/public/<token>` for
+# a shared file, plus one or more path segments when the share is a folder.
+_PUBLIC_SHARE_WEB_ROUTE = ("files", "link", "public")
+
+
+def _dav_public_url(base: tuple[str, str], token: str, rest: list[str]) -> str:
+    """The WebDAV route that serves a public share's bytes."""
+    return urlunsplit((*base, "/".join(["/remote.php/dav/public-files", token, *rest]), "", ""))
+
+
 def _share_link_candidates(url: str) -> list[str]:
     """URLs to try for one public share link, most direct first.
+
+    An empty list means "do not even ask": the URL is recognisably not a
+    public share (see ``_PRIVATE_WEB_UI_ROUTES``).
 
     ownCloud/Reva-family shares (CERNBox, DESY syncandshare, …) render an
     HTML viewer page at the plain ``/s/<token>`` URL — verified live: it
@@ -509,19 +581,43 @@ def _share_link_candidates(url: str) -> list[str]:
     ``/index.php/s/<token>/download`` is deliberately never generated — that
     form failed name resolution during the live validation.
 
-    The pattern is recognised by URL *shape* (a ``/s/<token>`` path), not by
-    host name: this is a share-provider convention, not an institute detail.
+    The same share also has a *web UI* address,
+    ``/files/link/public/<token>[/<path inside the share>]``, and links pasted
+    out of a browser carry that form: 20 powerboard pictures in the owner's
+    mirror do, were never rewritten, received the single-page app's HTML and
+    were correctly refused, so their bytes were never stored. It maps onto the
+    same DAV route, path and all.
+
+    For that folder form ``/s/<token>/download`` is deliberately *not* offered
+    as a fallback: on a folder share it answers with the whole folder as a zip,
+    which would then be stored under this attachment's code. A wrong file that
+    looks stored is worse than a missing one.
+
+    The pattern is recognised by URL *shape* (a ``/s/<token>`` or
+    ``/files/link/public/<token>`` path), not by host name: this is a
+    share-provider convention, not an institute detail.
     """
     parsed = urlsplit(url)
     path = parsed.path.rstrip("/")
     if path.endswith("/download") or "/download/" in path:
         return [url]
     segments = [segment for segment in path.split("/") if segment]
+    # `index.php` is an optional prefix of every route in this family.
+    routed = [segment for segment in segments if segment != "index.php"]
+    base = (parsed.scheme, parsed.netloc)
+    if tuple(routed[:2]) in _PRIVATE_WEB_UI_ROUTES:
+        return []
+    if tuple(routed[:3]) == _PUBLIC_SHARE_WEB_ROUTE and len(routed) >= 4:
+        token, rest = routed[3], routed[4:]
+        candidates = [_dav_public_url(base, token, rest)]
+        if not rest:
+            candidates.append(urlunsplit((*base, f"/s/{token}/download", "", "")))
+        candidates.append(url)
+        return candidates
     if len(segments) >= 2 and segments[-2] == "s":
         token = segments[-1]
-        base = (parsed.scheme, parsed.netloc)
         return [
-            urlunsplit((*base, f"/remote.php/dav/public-files/{token}", "", "")),
+            _dav_public_url(base, token, []),
             urlunsplit((*base, f"/s/{token}/download", "", "")),
             url,
         ]
@@ -534,9 +630,21 @@ def _fetch_share_link(
     url = descriptor.get("url")
     if not isinstance(url, str) or not _safe_http_url(url):
         return None
+    candidates = _share_link_candidates(url)
+    if not candidates:
+        # Not a public share at all but a personal web-UI location (one such
+        # row is in the owner's mirror). No request is made, this sweep or any
+        # later one: asking again cannot start working, and the answer would
+        # be the same login page every time. Never log the URL itself.
+        log.info(
+            "Share-link attachment %s addresses a private web-UI location rather "
+            "than a public share; skipped without a request.",
+            descriptor.get("code"),
+        )
+        return None
     transient_seen = False
     html_seen = False
-    for candidate in _share_link_candidates(url):
+    for candidate in candidates:
         if not _safe_http_url(candidate):
             continue
         try:
@@ -808,7 +916,9 @@ def _fetch_all(
             return
         if outcome.outcome == "failed":
             breaker.record_failure(transient=outcome.transient)
-        else:
+        elif outcome.outcome == "downloaded":
+            # Only a real network response proves that the outage is over.
+            # Reusing an already mirrored file is deliberately neutral.
             breaker.record_success()
 
     client: Any = None

@@ -39,6 +39,8 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 | [`docs/09-pdb-production-strategy.md`](09-pdb-production-strategy.md) | PDB-Produktionssicherheit, Read-/Write-Scopes |
 | [`docs/10-itk-domain-reference.md`](10-itk-domain-reference.md) | ITk-Workflow, Komponenten-Taxonomie (Sensor/ASIC/Modul), Label-Legende |
 | [`docs/11-logistics-operations.md`](11-logistics-operations.md) | Glue-Batches, Shipment-Mirror/Empfang, Reminder und Notification-Adapter |
+| [`docs/12-attachments-and-images.md`](12-attachments-and-images.md) | Attachment-/Bild-Mechanik: drei Speicherwege (Binary-Store, EOS, Share-Link), lokaler Spiegel, Fehlersuche |
+| [`docs/13-metrology-artifacts.md`](13-metrology-artifacts.md) | Metrologie-Artefakte: was wirklich am Lauf haengt, Benennungs-/Metadaten-Mehrdeutigkeit, Schluesselregeln |
 | [`docs/adr/001-outbox-status-contract.md`](adr/001-outbox-status-contract.md) | Outbox-Statusvertrag |
 | [`docs/adr/002-async-outbox-worker.md`](adr/002-async-outbox-worker.md) | Async-Outbox-Worker, Retry/Backoff |
 | [`docs/adr/003-pdb-dummy-write-scope.md`](adr/003-pdb-dummy-write-scope.md) | `pdb_write_scope=dummy_only` |
@@ -53,7 +55,7 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 | `backend/app/auth.py`, `models.User`/`UserSession`, `/api/auth`, `/api/users` | [`06`](06-users-roles-audit.md) |
 | `backend/app/pdb_gateway.py`, `pdb_sync.py`, `sync.py` (Mirror) | [`02`](02-revamp-plan.md) (Phase 1), [`09`](09-pdb-production-strategy.md) |
 | `backend/app/pdb_test_evidence.py`, `test_run_evidence.py`, `models.TestRunEvidence` | [`04`](04-roadmap.md), [`09`](09-pdb-production-strategy.md) |
-| `backend/app/attachment_store.py`, `models.TestRunAttachment`, `pdb_attachments.py` | [`04`](04-roadmap.md), [`09`](09-pdb-production-strategy.md) |
+| `backend/app/attachment_store.py`, `models.TestRunAttachment`, `pdb_attachments.py` | [`12`](12-attachments-and-images.md), [`13`](13-metrology-artifacts.md), [`04`](04-roadmap.md), [`09`](09-pdb-production-strategy.md) |
 | `backend/app/preview.py`, Component-Preview-Schemas und `/api/components/{sn}/preview` | [`adr/006`](adr/006-staged-first-ui-auto-mirror.md), [`04`](04-roadmap.md), [`05`](05-ui-design-reference.md) |
 | `models.TestTypeSchema`, `backend/app/pdb_test_types.py`, `test_type_schemas.py` und `/api/test-types` | [`adr/006`](adr/006-staged-first-ui-auto-mirror.md), [`04`](04-roadmap.md) |
 | Evidence-Job in `backend/app/sync_jobs.py`, EOS-/Share-Link-Mirror | [`adr/006`](adr/006-staged-first-ui-auto-mirror.md), [`04`](04-roadmap.md), [`09`](09-pdb-production-strategy.md) |
@@ -64,10 +66,12 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 | `models.OutboxPdbPrincipal`, `backend/app/pdb_submit.py` | [`adr/002`](adr/002-async-outbox-worker.md), [`adr/004`](adr/004-personal-pdb-credentials.md) |
 | `models.OutboxAction`/`AuditEvent`, Outbox-Status | [`adr/001`](adr/001-outbox-status-contract.md) |
 | `backend/app/ingestion.py`, `pdb_upload.py` | [`02`](02-revamp-plan.md) (Phase 2) |
-| `backend/app/domain/stages.py`, Stage-Suggestion | [`04`](04-roadmap.md), [`05`](05-ui-design-reference.md), [`10`](10-itk-domain-reference.md) §7 |
-| `backend/app/stats.py`, `/api/stats` | [`04`](04-roadmap.md) |
+| `backend/app/domain/stages.py`, `backend/app/stage_service.py`, Stage-Suggestion | [`04`](04-roadmap.md), [`05`](05-ui-design-reference.md), [`10`](10-itk-domain-reference.md) §7 |
+| `backend/app/stats.py`, `backend/app/measurement_stats.py`, `/api/stats` | [`04`](04-roadmap.md) |
 | `backend/app/tool_sync.py`, `models.Tool`, `/api/tools` | [`07`](07-jig-tool-quickselect.md) |
-| `backend/app/domain/glue.py`, `models.GlueBatch`/`GlueUsage`, `/api/glue-batches` | [`11`](11-logistics-operations.md) |
+| `backend/app/domain/glue.py`, `backend/app/glue_service.py`, `models.GlueBatch`/`GlueUsage`, `/api/glue-batches` | [`11`](11-logistics-operations.md) |
+| `backend/app/assembly.py`, Assembly-Wizard-Dry-Run | [`07`](07-jig-tool-quickselect.md), [`11`](11-logistics-operations.md) |
+| `backend/app/ops_health.py`, `/api/ops/health` | [`04`](04-roadmap.md) |
 | `backend/app/pdb_shipments.py`, `shipment_sync.py`, `shipment_reception.py`, `models.Shipment`, `/api/shipments` | [`11`](11-logistics-operations.md), [`09`](09-pdb-production-strategy.md) |
 | `backend/app/reminders.py`, `notifications.py`, `models.Reminder`, `/api/reminders`, `/api/notifications` | [`11`](11-logistics-operations.md), [`adr/002`](adr/002-async-outbox-worker.md) |
 | `backend/app/institute_settings.py`, Admin-Settings-UI und operative Institutsprofilwerte | [`11`](11-logistics-operations.md), [`05`](05-ui-design-reference.md), [`04`](04-roadmap.md) |

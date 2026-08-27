@@ -1,6 +1,7 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, Event
+from datetime import timedelta
+from threading import Barrier, Event, Thread
 
 from authutil import create_account, create_institute_profile
 from fastapi.testclient import TestClient
@@ -1265,6 +1266,31 @@ def test_an_automatic_component_retry_never_schedules_another_one(
     assert on_transient.contexts == []
 
 
+def test_successful_component_retry_does_not_spend_evidence_retry_budget(
+    client: TestClient, session_factory, tudo: dict, as_operator
+):
+    job_id = _queue_component_job(
+        session_factory,
+        requested_by=auto_retry_requested_by("operator@example.org"),
+    )
+    followup_requesters: list[str] = []
+    run_component_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, institute, codes, report: FetchResult(
+            records=[], skipped=0
+        ),
+        job_id,
+        lambda institute_code, requested_by, user_id: followup_requesters.append(
+            requested_by
+        ),
+    )
+
+    assert len(followup_requesters) == 1
+    assert followup_requesters[0].startswith("component follow-up")
+    assert not followup_requesters[0].startswith("automatic retry")
+
+
 def test_permanent_component_failure_does_not_schedule_a_retry(
     client: TestClient, session_factory, tudo: dict, as_operator
 ):
@@ -1330,21 +1356,54 @@ def test_the_retry_timer_uses_the_configured_delay(client, session_factory, monk
 
 
 def test_the_automatic_retry_really_queues_a_second_job(
-    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
+    client: TestClient, tmp_path, monkeypatch
 ):
     """End-to-end wiring through the real timer and executor: a transiently
     failed evidence job produces a second, durable, credential-owning job
     without anyone clicking. Only the positive outcome is awaited here; the
-    cap itself is proven synchronously above."""
+    cap itself is proven synchronously above.
+
+    This intentionally uses file-backed SQLite. The timer and executor use
+    genuinely concurrent sessions; an in-memory StaticPool gives all of them
+    one sqlite3 connection and can fail with "cannot rollback - no transaction
+    is active", which tests the fixture artifact rather than the job wiring.
+    """
     monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
     monkeypatch.setattr("app.sync_jobs.SYNC_AUTO_RETRY_DELAY_SECONDS", 0.0)
     client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
-    _add_module(session_factory, "20USEM00000603")
-    client.app.state.sync_job_manager = RecordingManager()
-    job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
+    engine = make_engine(f"sqlite:///{tmp_path / 'automatic-retry.db'}")
+    Base.metadata.create_all(engine)
+    file_session_factory = make_session_factory(engine)
+    institute = create_institute_profile(
+        file_session_factory,
+        code="TUDO",
+        name="TU Dortmund",
+        local_name_prefix="TUDO-",
+    )
+    user_id = create_account(
+        file_session_factory,
+        email="operator@example.org",
+        password="test-password-123",
+        role="operator",
+        institute_id=institute["id"],
+    )
+    with file_session_factory() as session:
+        save_pdb_credentials(
+            session,
+            user_id=user_id,
+            access_codes=PdbAccessCodes("offline-code-1", "offline-code-2"),
+            pdb_identity="offline-pdb-user",
+            institutions=("TUDO",),
+            encryption_key=client.app.state.settings.pdb_credential_encryption_key,
+        )
+        session.commit()
+    _add_module(file_session_factory, "20USEM00000603")
+    job_id = _queue_evidence_job(
+        file_session_factory, requested_by="operator@example.org"
+    )
 
     manager = SyncJobManager(
-        session_factory,
+        file_session_factory,
         client.app.state.settings,
         evidence_gateway_factory=lambda settings, codes: _EvidenceGateway(_DownClient()),
     )
@@ -1355,12 +1414,19 @@ def test_the_automatic_retry_really_queues_a_second_job(
         # 8s flaked once on a loaded machine while passing in isolation.
         jobs = _wait_for(
             lambda: (lambda rows: rows if len(rows) == 2 else None)(
-                _evidence_jobs(session_factory)
+                _evidence_jobs(file_session_factory)
             ),
             timeout=30.0,
         )
     finally:
         manager.shutdown()
+        # Production shutdown is intentionally non-blocking because an HTTP
+        # read cannot be cancelled safely. This fake outage returns promptly,
+        # so the test can join before disposing its temporary database and
+        # guarantee no thread escapes into another test.
+        manager._evidence_executor.shutdown(wait=True, cancel_futures=True)
+        manager._component_executor.shutdown(wait=True, cancel_futures=True)
+        engine.dispose()
 
     original, retry = jobs
     assert original.id == job_id and original.status == "failed"
@@ -1617,6 +1683,391 @@ def test_component_and_evidence_jobs_run_on_separate_workers(
         manager.shutdown()
 
 
+def test_component_followup_survives_restart_without_stealing_a_fresh_lease(
+    client: TestClient,
+    session_factory,
+    tudo: dict,
+    as_operator,
+    tmp_path,
+    monkeypatch,
+):
+    """The component commit, not its process-local callback, owns the rerun.
+
+    This models the exact failure boundary: an older evidence snapshot already
+    holds the canonical lease, the component mirror commits, and the process
+    exits before its success callback can wake a successor. A new manager must
+    leave the still-fresh foreign lease alone, then resume the durable component
+    generation when that lease later crosses the existing heartbeat grace.
+    """
+    from app.sync_jobs import (
+        EVIDENCE_FOLLOWUP_PENDING_KEY,
+        SYNC_HEARTBEAT_GRACE,
+    )
+
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    client.app.state.settings.sync_fetch_concurrency = 1
+    old_sn = "20USEM00000741"
+    new_sn = "20USEM00000742"
+
+    old_evidence_id = _queue_evidence_job(
+        session_factory, requested_by="operator@example.org"
+    )
+    old_snapshot_started = utcnow() - timedelta(minutes=1)
+    with session_factory() as session:
+        old_evidence = session.get(SyncJob, old_evidence_id)
+        old_evidence.status = "running"
+        old_evidence.phase = "fetching"
+        old_evidence.started_at = old_snapshot_started
+        old_evidence.updated_at = utcnow()
+        session.commit()
+
+    component_job_id = _queue_component_job(
+        session_factory, requested_by="operator@example.org"
+    )
+
+    class _SimulatedProcessExit(BaseException):
+        pass
+
+    def exit_before_wakeup(institute_code, requested_by, user_id):
+        raise _SimulatedProcessExit
+
+    process_exited = False
+    try:
+        run_component_sync_job(
+            session_factory,
+            client.app.state.settings,
+            lambda settings, institute, codes, report: FetchResult(
+                records=[record(old_sn), record(new_sn)], skipped=0
+            ),
+            component_job_id,
+            exit_before_wakeup,
+        )
+    except _SimulatedProcessExit:
+        process_exited = True
+    assert process_exited is True
+
+    with session_factory() as session:
+        component_job = session.get(SyncJob, component_job_id)
+        old_evidence = session.get(SyncJob, old_evidence_id)
+        assert component_job.status == "succeeded"
+        assert component_job.result[EVIDENCE_FOLLOWUP_PENDING_KEY] is True
+        assert old_evidence.status == "running"
+        assert old_evidence.updated_at is not None
+    # The private restart marker is an extra on a complete ComponentSyncOut and
+    # never leaks through the public result union.
+    public_result = client.get(f"/api/sync/jobs/{component_job_id}").json()["result"]
+    assert EVIDENCE_FOLLOWUP_PENDING_KEY not in public_result
+    latest_component_result = client.get(
+        "/api/sync/jobs/latest", params={"kind": "components"}
+    ).json()["result"]
+    assert EVIDENCE_FOLLOWUP_PENDING_KEY not in latest_component_result
+
+    scheduled: list = []
+    monkeypatch.setattr(
+        SyncJobManager,
+        "_schedule_retry",
+        lambda self, runner: scheduled.append(runner),
+    )
+    evidence_client = _EvidenceClient()
+    manager = SyncJobManager(
+        session_factory,
+        client.app.state.settings,
+        evidence_gateway_factory=lambda settings, codes: _EvidenceGateway(
+            evidence_client
+        ),
+    )
+    try:
+        _wait_for(lambda: scheduled or None)
+        with session_factory() as session:
+            # Startup observed another process's fresh heartbeat. It neither
+            # interrupted nor duplicated that canonical Evidence job.
+            assert session.get(SyncJob, old_evidence_id).status == "running"
+        assert len(_evidence_jobs(session_factory)) == 1
+        manager._submit_followup_reconcile("TUDO")
+        manager._submit_followup_reconcile("TUDO")
+        _wait_for(lambda: len(scheduled) >= 3)
+        assert len(_evidence_jobs(session_factory)) == 1
+        active = client.get(
+            "/api/sync/jobs/active",
+            params={"kind": "evidence", "institute_code": "TUDO"},
+        )
+        assert active.json()["id"] == old_evidence_id
+
+        with session_factory() as session:
+            old_evidence = session.get(SyncJob, old_evidence_id)
+            old_evidence.updated_at = utcnow() - SYNC_HEARTBEAT_GRACE - timedelta(
+                seconds=1
+            )
+            session.commit()
+        started: list[int] = []
+        manager.start_evidence = lambda job_id: started.append(job_id)
+        # Deterministically fire the manager's already-scheduled recheck. This
+        # is the same process: no second restart is needed after grace elapses.
+        scheduled.pop(0)()
+        _wait_for(lambda: started or None)
+        resumed_evidence_id = started[0]
+        with session_factory() as session:
+            assert session.get(SyncJob, old_evidence_id).status == "interrupted"
+            assert session.get(SyncJob, resumed_evidence_id).status == "queued"
+            component_job = session.get(SyncJob, component_job_id)
+            assert component_job.result[EVIDENCE_FOLLOWUP_PENDING_KEY] is True
+        # Run the claimed job synchronously: the test fixture deliberately uses
+        # one in-memory SQLite connection, so concurrent writers would test
+        # StaticPool transaction corruption rather than the durable state
+        # machine under review.
+        run_evidence_sync_job(
+            session_factory,
+            client.app.state.settings,
+            lambda settings, codes: _EvidenceGateway(evidence_client),
+            resumed_evidence_id,
+        )
+        manager._reconcile_evidence_followup("TUDO")
+        jobs = _evidence_jobs(session_factory)
+        assert len(jobs) == 2
+        assert jobs[0].status == "interrupted"
+        assert jobs[1].status == "succeeded"
+
+        def followup_was_satisfied():
+            with session_factory() as session:
+                job = session.get(SyncJob, component_job_id)
+                return (
+                    job
+                    if job.result[EVIDENCE_FOLLOWUP_PENDING_KEY] is False
+                    else None
+                )
+
+        _wait_for(
+            followup_was_satisfied,
+            timeout=10.0,
+        )
+        # Replaying every duplicate startup/live-lease recheck is harmless once
+        # the successful generation has cleared the durable pending bit.
+        remaining_rechecks, scheduled[:] = list(scheduled), []
+        for recheck in remaining_rechecks:
+            recheck()
+        manager._evidence_executor.submit(lambda: None).result(timeout=10)
+        assert len(_evidence_jobs(session_factory)) == 2
+    finally:
+        manager.shutdown()
+
+    with session_factory() as session:
+        mirrored = sorted(session.scalars(select(TestRunEvidence.component_sn)))
+        component_job = session.get(SyncJob, component_job_id)
+        assert component_job.result[EVIDENCE_FOLLOWUP_PENDING_KEY] is False
+    assert jobs[0].id == old_evidence_id
+    assert mirrored == [old_sn, new_sn]
+    assert evidence_client.component_requests == [old_sn, new_sn]
+
+
+def _commit_pending_component_generation(
+    session_factory, settings, component_sn: str
+) -> int:
+    job_id = _queue_component_job(
+        session_factory, requested_by="operator@example.org"
+    )
+    run_component_sync_job(
+        session_factory,
+        settings,
+        lambda settings, institute, codes, report: FetchResult(
+            records=[record(component_sn)], skipped=0
+        ),
+        job_id,
+        lambda institute_code, requested_by, user_id: None,
+    )
+    return job_id
+
+
+def test_transient_covering_failure_retries_once_after_timer_is_lost_on_restart(
+    client: TestClient,
+    session_factory,
+    tudo: dict,
+    as_operator,
+    tmp_path,
+    monkeypatch,
+):
+    """The component result, not the process-local timer, owns retry state."""
+    from app.sync_jobs import (
+        EVIDENCE_FOLLOWUP_PENDING_KEY,
+        EVIDENCE_FOLLOWUP_RETRY_KEY,
+        FOLLOWUP_RETRY_DUE,
+        FOLLOWUP_RETRY_EXHAUSTED,
+    )
+
+    monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        SyncJobManager, "_resume_evidence_followups", lambda self: None
+    )
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    client.app.state.settings.sync_evidence_strategy = "per_component"
+    client.app.state.settings.sync_fetch_concurrency = 1
+    component_id = _commit_pending_component_generation(
+        session_factory, client.app.state.settings, "20USEM00000751"
+    )
+    original_id = _queue_evidence_job(
+        session_factory, requested_by="operator@example.org"
+    )
+    lost_timer = _RecordingRetry()
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, codes: _EvidenceGateway(_DownClient()),
+        original_id,
+        lost_timer,
+    )
+
+    assert len(lost_timer.contexts) == 1  # process exits before invoking it
+    with session_factory() as session:
+        component_job = session.get(SyncJob, component_id)
+        assert component_job.result[EVIDENCE_FOLLOWUP_PENDING_KEY] is True
+        assert component_job.result[EVIDENCE_FOLLOWUP_RETRY_KEY] == FOLLOWUP_RETRY_DUE
+
+    manager = SyncJobManager(session_factory, client.app.state.settings)
+    started: list[int] = []
+    delayed: list = []
+    manager.start_evidence = lambda job_id: started.append(job_id)
+    manager._schedule_retry = lambda runner: delayed.append(runner)
+    try:
+        # A fresh manager reconstructs the lost timer from the durable state.
+        manager._reconcile_evidence_followup("TUDO")
+        assert started == []
+        assert len(delayed) == 1
+        delayed.pop(0)()
+        assert len(started) == 1
+        retry_id = started[0]
+        retry = _evidence_jobs(session_factory)[-1]
+        assert retry.id == retry_id
+        assert retry.requested_by.startswith("automatic retry")
+
+        retry_requests = _RecordingRetry()
+        run_evidence_sync_job(
+            session_factory,
+            client.app.state.settings,
+            lambda settings, codes: _EvidenceGateway(_DownClient()),
+            retry_id,
+            retry_requests,
+        )
+        assert retry_requests.contexts == []
+        with session_factory() as session:
+            component_job = session.get(SyncJob, component_id)
+            assert (
+                component_job.result[EVIDENCE_FOLLOWUP_RETRY_KEY]
+                == FOLLOWUP_RETRY_EXHAUSTED
+            )
+
+        # Exhaustion is durable too: repeated restart reconciliation cannot
+        # produce a third evidence attempt.
+        manager._reconcile_evidence_followup("TUDO")
+        assert len(_evidence_jobs(session_factory)) == 2
+        assert started == [retry_id]
+    finally:
+        manager.shutdown()
+
+    public_result = client.get(f"/api/sync/jobs/{component_id}").json()["result"]
+    assert EVIDENCE_FOLLOWUP_RETRY_KEY not in public_result
+
+
+def test_non_transient_covering_failure_is_durably_blocked_not_retried(
+    client: TestClient,
+    session_factory,
+    tudo: dict,
+    as_operator,
+    monkeypatch,
+):
+    from app.sync_jobs import (
+        EVIDENCE_FOLLOWUP_RETRY_KEY,
+        FOLLOWUP_RETRY_BLOCKED,
+    )
+
+    monkeypatch.setattr(
+        SyncJobManager, "_resume_evidence_followups", lambda self: None
+    )
+    component_id = _commit_pending_component_generation(
+        session_factory, client.app.state.settings, "20USEM00000752"
+    )
+    evidence_id = _queue_evidence_job(
+        session_factory, requested_by="operator@example.org"
+    )
+    retries = _RecordingRetry()
+
+    def broken_gateway(settings, codes):
+        raise ValueError("broken adapter")
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        broken_gateway,
+        evidence_id,
+        retries,
+    )
+    assert retries.contexts == []
+
+    manager = SyncJobManager(session_factory, client.app.state.settings)
+    started: list[int] = []
+    manager.start_evidence = lambda job_id: started.append(job_id)
+    try:
+        manager._reconcile_evidence_followup("TUDO")
+    finally:
+        manager.shutdown()
+
+    with session_factory() as session:
+        component_job = session.get(SyncJob, component_id)
+        assert component_job.result[EVIDENCE_FOLLOWUP_RETRY_KEY] == FOLLOWUP_RETRY_BLOCKED
+    assert started == []
+    assert len(_evidence_jobs(session_factory)) == 1
+
+
+def test_rejected_evidence_submit_releases_lease_and_unwatches_job(
+    client: TestClient,
+    session_factory,
+    tudo: dict,
+    as_operator,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        SyncJobManager, "_resume_evidence_followups", lambda self: None
+    )
+    _commit_pending_component_generation(
+        session_factory, client.app.state.settings, "20USEM00000753"
+    )
+    manager = SyncJobManager(session_factory, client.app.state.settings)
+    manager._evidence_executor.shutdown(wait=True, cancel_futures=True)
+
+    class _RejectingExecutor:
+        def submit(self, function, *args):
+            raise RuntimeError("executor rejected submit")
+
+        def shutdown(self, wait=True, *, cancel_futures=False):
+            return None
+
+    manager._evidence_executor = _RejectingExecutor()
+    with session_factory() as session:
+        user_id = session.scalar(select(User.id))
+    assert user_id is not None
+    rejected = False
+    try:
+        manager.enqueue_evidence("TUDO", "operator@example.org", user_id)
+    except RuntimeError:
+        rejected = True
+    assert rejected is True
+
+    failed = _evidence_jobs(session_factory)[0]
+    assert failed.status == "failed"
+    assert failed.active_key is None
+    assert failed.id not in manager._queued_watch
+
+    # The released lease lets the still-pending component marker reconcile to
+    # a replacement instead of converging forever on a never-run queued job.
+    started: list[int] = []
+    manager.start_evidence = lambda job_id: started.append(job_id)
+    try:
+        manager._reconcile_evidence_followup("TUDO")
+    finally:
+        manager.shutdown()
+    assert len(started) == 1
+    assert len(_evidence_jobs(session_factory)) == 2
+
+
 def test_a_queued_job_waiting_for_its_worker_is_kept_heartbeat_fresh(
     client: TestClient, session_factory, tudo: dict, as_operator
 ):
@@ -1768,6 +2219,101 @@ def test_parallel_fetch_commits_finished_components_and_fails_transiently(
     assert mirrored == ["20USEM00000721"]
     assert len(on_transient.contexts) == 1
     assert on_transient.contexts[0].auto_retry is False
+
+
+def test_parallel_fetch_joins_running_workers_before_job_returns(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
+):
+    """A failed future must not orphan a sibling PDB read behind the job."""
+    import app.sync_jobs as sync_jobs_module
+
+    monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
+    monkeypatch.setattr("app.sync_jobs.PARALLEL_FETCH_HEARTBEAT_SECONDS", 0.05)
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    client.app.state.settings.sync_evidence_strategy = "per_component"
+    client.app.state.settings.sync_fetch_concurrency = 2
+    client.app.state.settings.sync_page_max_attempts = 1
+    dead_sn = "20USEM00000741"
+    blocked_sn = "20USEM00000742"
+    _add_module(session_factory, dead_sn)
+    _add_module(session_factory, blocked_sn)
+    job_id = _queue_evidence_job(session_factory, requested_by="operator@example.org")
+
+    blocked_started = Event()
+    dead_failed = Event()
+    release_blocked = Event()
+    pool_shutdown_returned = Event()
+    job_returned = Event()
+    join_heartbeat = Event()
+    active_blocked_fetches = [0]
+
+    class _ObservedExecutor(ThreadPoolExecutor):
+        def shutdown(self, wait=True, *, cancel_futures=False):
+            result = super().shutdown(wait=wait, cancel_futures=cancel_futures)
+            pool_shutdown_returned.set()
+            return result
+
+    monkeypatch.setattr(sync_jobs_module, "ThreadPoolExecutor", _ObservedExecutor)
+    real_update = sync_jobs_module._update_progress
+
+    def spy(spy_factory, spy_job_id, phase, current, total, *, message=None):
+        if message and "stopping in-flight" in message.lower():
+            join_heartbeat.set()
+        real_update(spy_factory, spy_job_id, phase, current, total, message=message)
+
+    monkeypatch.setattr(sync_jobs_module, "_update_progress", spy)
+
+    class _OneDeadOneBlockedClient:
+        def get(self, action, json=None):
+            assert action == "getComponent"
+            sn = json["component"]
+            if sn == dead_sn:
+                assert blocked_started.wait(timeout=5)
+                dead_failed.set()
+                raise ConnectionResetError("Connection reset by peer")
+            assert sn == blocked_sn
+            active_blocked_fetches[0] += 1
+            blocked_started.set()
+            try:
+                assert release_blocked.wait(timeout=10)
+            finally:
+                active_blocked_fetches[0] -= 1
+            return {"tests": []}
+
+    def run_job() -> None:
+        try:
+            run_evidence_sync_job(
+                session_factory,
+                client.app.state.settings,
+                lambda settings, codes: _EvidenceGateway(_OneDeadOneBlockedClient()),
+                job_id,
+            )
+        finally:
+            job_returned.set()
+
+    runner = Thread(target=run_job, daemon=True)
+    runner.start()
+    try:
+        assert blocked_started.wait(timeout=5)
+        assert dead_failed.wait(timeout=5)
+        assert join_heartbeat.wait(timeout=5)
+        shutdown_returned_early = pool_shutdown_returned.wait(timeout=0.5)
+        job_returned_early = job_returned.is_set()
+        active_before_release = active_blocked_fetches[0]
+    finally:
+        release_blocked.set()
+        runner.join(timeout=10)
+
+    assert shutdown_returned_early is False
+    assert job_returned_early is False
+    assert active_before_release == 1
+    assert not runner.is_alive()
+    assert pool_shutdown_returned.is_set()
+    assert job_returned.is_set()
+    assert join_heartbeat.is_set()
+    assert active_blocked_fetches[0] == 0
+    with session_factory() as session:
+        assert session.get(SyncJob, job_id).status == "failed"
 
 
 def test_parallel_fetch_heartbeats_while_waiting_on_slow_reads(

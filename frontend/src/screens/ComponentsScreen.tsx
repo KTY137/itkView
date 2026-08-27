@@ -23,6 +23,7 @@ import {
   postTestTypeSchemaSync,
 } from "../api";
 import type {
+  ChildAttachments,
   ComponentDetail,
   ComponentOut,
   ComponentPreview,
@@ -1546,22 +1547,72 @@ function UnavailableStageSection() {
   );
 }
 
+function displayableImages(attachments: readonly TestRunAttachment[]): TestRunAttachment[] {
+  return attachments.filter((attachment) => attachment.stored && isDisplayableImage(attachment));
+}
+
+/** A grid of locally mirrored images, all belonging to the serial `sn`. */
+function ImageGrid({
+  sn,
+  images,
+  onOpen,
+}: {
+  sn: string;
+  images: readonly TestRunAttachment[];
+  onOpen: (sn: string, image: TestRunAttachment) => void;
+}) {
+  return (
+    <div className="img-grid">
+      {images.map((img) => (
+        <button
+          type="button"
+          className="img-thumb"
+          key={img.code}
+          title={img.title ?? img.filename ?? img.test_type}
+          onClick={() => onOpen(sn, img)}
+        >
+          <img
+            src={componentAttachmentUrl(sn, img.code)}
+            alt={img.title ?? img.filename ?? t.images.untitled}
+          />
+          <span className="img-tag">{img.test_type}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** Locally mirrored metrology / visual-inspection images for a component.
- * The detail view never streams from the PDB; evidence sync owns the bytes. */
+ * The detail view never streams from the PDB; evidence sync owns the bytes.
+ *
+ * The images of the parts built into this component come with it, in one group
+ * per child — an operator works on a module while the photographs were taken of
+ * its sensors. They are never merged into the component's own grid: whose part
+ * is in the picture is part of what the picture says. Each group fetches its
+ * bytes under the child's own serial, which is where the mirror filed them. */
 function ImagesSection({ sn, refreshKey }: { sn: string; refreshKey: number }) {
   const [images, setImages] = useState<TestRunAttachment[]>([]);
+  const [children, setChildren] = useState<ChildAttachments[]>([]);
   const [offline, setOffline] = useState(false);
-  const [lightbox, setLightbox] = useState<TestRunAttachment | null>(null);
+  const [lightbox, setLightbox] = useState<{ sn: string; attachment: TestRunAttachment } | null>(
+    null,
+  );
 
   useEffect(() => {
     const ctrl = new AbortController();
     setImages([]);
+    setChildren([]);
     setOffline(false);
     setLightbox(null);
     getComponentAttachments(sn, ctrl.signal)
-      .then((attachments) =>
-        setImages(attachments.filter((attachment) => attachment.stored && isDisplayableImage(attachment))),
-      )
+      .then((family) => {
+        setImages(displayableImages(family.attachments));
+        setChildren(
+          family.children
+            .map((child) => ({ ...child, attachments: displayableImages(child.attachments) }))
+            .filter((child) => child.attachments.length > 0),
+        );
+      })
       .catch((err: unknown) => {
         if (ctrl.signal.aborted) return;
         if (err instanceof ApiError && err.isNetwork) setOffline(true);
@@ -1569,36 +1620,57 @@ function ImagesSection({ sn, refreshKey }: { sn: string; refreshKey: number }) {
     return () => ctrl.abort();
   }, [refreshKey, sn]);
 
+  const nothingAnywhere = images.length === 0 && children.length === 0;
+
   return (
     <>
       <h3 className="section-title">{t.images.title}</h3>
       <div className="panel">
         {offline ? (
           <p className="state-note">{t.images.offlineHint}</p>
-        ) : images.length === 0 ? (
+        ) : nothingAnywhere ? (
           <p className="state-note">{t.images.empty}</p>
+        ) : images.length === 0 ? (
+          <p className="state-note">{t.images.ownEmpty}</p>
         ) : (
-          <div className="img-grid">
-            {images.map((img) => (
-              <button
-                type="button"
-                className="img-thumb"
-                key={img.code}
-                title={img.title ?? img.filename ?? img.test_type}
-                onClick={() => setLightbox(img)}
-              >
-                <img
-                  src={componentAttachmentUrl(sn, img.code)}
-                  alt={img.title ?? img.filename ?? t.images.untitled}
-                />
-                <span className="img-tag">{img.test_type}</span>
-              </button>
-            ))}
-          </div>
+          <ImageGrid
+            sn={sn}
+            images={images}
+            onOpen={(owner, attachment) => setLightbox({ sn: owner, attachment })}
+          />
         )}
       </div>
+      {!offline && children.length > 0 && (
+        <section className="ws-children">
+          <h3 className="section-title">{t.images.childrenTitle}</h3>
+          <p className="state-note">{t.images.childrenIntro}</p>
+          {children.map((child) => (
+            <div className="panel ws-group-panel" key={child.sn}>
+              <div className="ws-group-head">
+                <span className="chip neutral">
+                  {describeComponent({
+                    component_type: child.component_type,
+                    type_code: child.type_code,
+                  })}
+                </span>
+                <span className="mono">{child.sn}</span>
+                {child.local_name !== null && <span className="muted">{child.local_name}</span>}
+              </div>
+              <ImageGrid
+                sn={child.sn}
+                images={child.attachments}
+                onOpen={(owner, attachment) => setLightbox({ sn: owner, attachment })}
+              />
+            </div>
+          ))}
+        </section>
+      )}
       {lightbox !== null && (
-        <ImageLightbox sn={sn} attachment={lightbox} onClose={() => setLightbox(null)} />
+        <ImageLightbox
+          sn={lightbox.sn}
+          attachment={lightbox.attachment}
+          onClose={() => setLightbox(null)}
+        />
       )}
     </>
   );

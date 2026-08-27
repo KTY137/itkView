@@ -86,7 +86,11 @@ beforeEach(() => {
   vi.mocked(getComponentStaged).mockResolvedValue([]);
   vi.mocked(getStageSuggestion).mockResolvedValue(stageSuggestion);
   vi.mocked(getTestTypeSchemas).mockResolvedValue(testTypeSchemas);
-  vi.mocked(getComponentAttachments).mockResolvedValue([]);
+  vi.mocked(getComponentAttachments).mockResolvedValue({
+    component_sn: MODULE_SN,
+    attachments: [],
+    children: [],
+  });
   vi.mocked(getComponentTests).mockResolvedValue(mirroredRuns);
   vi.mocked(postIngestFile).mockImplementation(async (body: IngestFileCreate) => {
     pipeline.push(`ingest:${body.filename}`);

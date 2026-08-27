@@ -61,11 +61,38 @@ _GLUE_PROCESS_RE = re.compile(r"[A-Z][A-Z0-9_]{0,31}\Z")
 # `glue_weight_inputs` and each module type in `glue_targets`.
 _GLUE_STEP_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}\Z")
 _GLUE_TARGET_FIELDS = frozenset({"process", "label", "valid_from", "module_types"})
-_GLUE_INPUT_FIELDS = frozenset({"label", "test_type", "measured", "subtract", "result_code"})
+_GLUE_INPUT_FIELDS = frozenset(
+    {"label", "test_type", "measured", "subtract", "result_code", "by_type_code"}
+)
+_GLUE_INPUT_OVERRIDE_FIELDS = frozenset({"measured", "subtract", "result_code"})
 _GLUE_STEP_TARGET_FIELDS = frozenset({"target_mg", "tolerance_mg"})
 # Milligrams. A glue step is a smear of adhesive, not a payload: the ceiling
 # only exists so a slipped decimal point cannot be stored as a target.
 _MAX_GLUE_MG = 100_000.0
+
+# The unattended sync schedule read by `app.auto_sync.read_auto_sync_schedule`.
+# This is the only institute setting that makes itkFlow contact the ITk
+# Production Database on its own, without anyone asking for it at that moment
+# (the outbox worker also runs unattended, but it only executes a write a
+# person already approved). Its reader fails closed — a malformed block reads
+# as "off" and a too-small interval is lifted to the floor — which makes this
+# validator the only thing that ever *tells* a person their input was wrong.
+# Every message therefore names what was rejected and what is accepted.
+_AUTO_SYNC_FIELDS = frozenset(
+    {"enabled", "interval_minutes", "window_start", "window_end", "weekdays"}
+)
+# Wall-clock "HH:MM" on a 24-hour clock, zero-padded so the stored value is
+# unambiguous.
+_HHMM_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]\Z")
+# Mirrors `app.auto_sync.MIN_INTERVAL_MINUTES` (a contract test keeps the two
+# equal). Below this an unattended loop would hammer a shared production
+# database. Rejected here instead of clamped: the reader lifts a smaller
+# number to the floor, so without this rejection a person would be left
+# believing a five-minute schedule they never got.
+_MIN_AUTO_SYNC_INTERVAL_MINUTES = 15
+# A week. Past that, "on a timer" stops meaning anything and the honest way to
+# say it is `enabled: false`.
+_MAX_AUTO_SYNC_INTERVAL_MINUTES = 7 * 24 * 60
 
 
 class InstituteSettingsValidationError(ValueError):
@@ -686,6 +713,52 @@ def _glue_targets(value: Any) -> list[dict[str, Any]] | None:
     return normalised
 
 
+def _glue_formula(
+    value: dict[str, Any],
+    *,
+    defaults: dict[str, Any] | None = None,
+    label: str,
+) -> dict[str, Any]:
+    """Normalize one effective measured-minus-subtract formula."""
+    fallback = defaults or {}
+    measured = _result_code(
+        value.get("measured", fallback.get("measured")),
+        f"{label} measured code",
+    )
+    raw_subtract = value.get("subtract", fallback.get("subtract", []))
+    if not isinstance(raw_subtract, list):
+        raise InstituteSettingsValidationError(
+            f"{label} subtract must be a list of result codes."
+        )
+    subtract: list[str] = []
+    for raw_code in raw_subtract:
+        code = _result_code(raw_code, f"{label} subtracted code")
+        if code == measured:
+            raise InstituteSettingsValidationError(
+                f"{label} must not subtract the code it measures."
+            )
+        if code in subtract:
+            raise InstituteSettingsValidationError(
+                f"{label} subtracted codes must be unique."
+            )
+        subtract.append(code)
+
+    raw_result_code = value.get("result_code", fallback.get("result_code"))
+    result_code = (
+        _result_code(raw_result_code, f"{label} result code")
+        if raw_result_code is not None
+        else None
+    )
+    if result_code == measured or result_code in subtract:
+        raise InstituteSettingsValidationError(
+            f"{label} must not store its result in one of its input codes."
+        )
+    formula: dict[str, Any] = {"measured": measured, "subtract": subtract}
+    if result_code is not None or defaults is not None:
+        formula["result_code"] = result_code
+    return formula
+
+
 def _glue_weight_inputs(value: Any) -> dict[str, dict[str, Any]] | None:
     """Normalize which PDB result codes feed which derived glue weight.
 
@@ -709,25 +782,7 @@ def _glue_weight_inputs(value: Any) -> dict[str, dict[str, Any]] | None:
             raise InstituteSettingsValidationError("Every glue step must be an object.")
         if set(raw_step) - _GLUE_INPUT_FIELDS:
             raise InstituteSettingsValidationError("Glue step contains unsupported fields.")
-        measured = _result_code(raw_step.get("measured"), "Glue step measured code")
-        raw_subtract = raw_step.get("subtract", [])
-        if not isinstance(raw_subtract, list):
-            raise InstituteSettingsValidationError(
-                "Glue step subtract must be a list of result codes."
-            )
-        subtract: list[str] = []
-        for raw_code in raw_subtract:
-            code = _result_code(raw_code, "Glue step subtracted code")
-            if code == measured:
-                raise InstituteSettingsValidationError(
-                    "A glue step must not subtract the code it measures."
-                )
-            if code in subtract:
-                raise InstituteSettingsValidationError(
-                    "Glue step subtracted codes must be unique."
-                )
-            subtract.append(code)
-        step: dict[str, Any] = {"measured": measured, "subtract": subtract}
+        step = _glue_formula(raw_step, label="Glue step")
         raw_label = raw_step.get("label")
         if raw_label is not None:
             step["label"] = _clean_string(raw_label, label="Glue step label", max_length=60)
@@ -742,16 +797,43 @@ def _glue_weight_inputs(value: Any) -> dict[str, dict[str, Any]] | None:
                     "and underscores."
                 )
             step["test_type"] = test_type
-        raw_result_code = raw_step.get("result_code")
-        if raw_result_code is not None:
-            result_code = _result_code(raw_result_code, "Glue step result code")
-            if result_code == measured or result_code in subtract:
-                # The derived value would overwrite one of its own inputs on
-                # upload, and the next derivation would read its own output.
+        if "by_type_code" in raw_step:
+            raw_overrides = raw_step["by_type_code"]
+            if not isinstance(raw_overrides, dict):
                 raise InstituteSettingsValidationError(
-                    "A glue step must not store its result in one of its input codes."
+                    "Glue step by_type_code must be an object."
                 )
-            step["result_code"] = result_code
+            overrides: dict[str, dict[str, Any]] = {}
+            for raw_type_code, raw_override in raw_overrides.items():
+                type_code = _clean_string(
+                    raw_type_code,
+                    label="Glue input override module type",
+                    max_length=32,
+                ).upper()
+                if _COMPONENT_TYPE_RE.fullmatch(type_code) is None:
+                    raise InstituteSettingsValidationError(
+                        "Glue input override module types may contain uppercase "
+                        "letters, digits, and underscores."
+                    )
+                if type_code in overrides:
+                    raise InstituteSettingsValidationError(
+                        "Glue input override module types must be unique."
+                    )
+                if not isinstance(raw_override, dict):
+                    raise InstituteSettingsValidationError(
+                        "Every glue input override must be an object."
+                    )
+                if set(raw_override) - _GLUE_INPUT_OVERRIDE_FIELDS:
+                    raise InstituteSettingsValidationError(
+                        "Glue input overrides only support measured, subtract, "
+                        "and result_code."
+                    )
+                overrides[type_code] = _glue_formula(
+                    raw_override,
+                    defaults=step,
+                    label="Glue input override",
+                )
+            step["by_type_code"] = overrides
         normalised[key] = step
     if not normalised:
         raise InstituteSettingsValidationError(
@@ -775,6 +857,48 @@ def _glue_process_property(value: Any) -> str | None:
     if value is None:
         return None
     return _result_code(value, "glue_process_property")
+
+
+def _validate_glue_process_contract(
+    existing: dict[str, Any],
+    normalised: dict[str, Any],
+    settings_patch: dict[str, Any],
+) -> None:
+    """Require an explicit default to name an effective target process.
+
+    Settings updates are shallow patches, so changing either side of this
+    relationship must be checked against the other side after applying the
+    patch. Unrelated updates deliberately leave old profiles alone.
+    """
+
+    contract_keys = {
+        "glue_targets",
+        "glue_default_process",
+        "glue_process_default",
+    }
+    if contract_keys.isdisjoint(settings_patch):
+        return
+
+    if "glue_default_process" in normalised:
+        default_process = normalised["glue_default_process"]
+    elif "glue_default_process" in existing:
+        default_process = _glue_default_process(existing["glue_default_process"])
+    else:
+        default_process = _glue_default_process(existing.get("glue_process_default"))
+    if default_process is None:
+        return
+
+    raw_targets = normalised.get("glue_targets", existing.get("glue_targets"))
+    targets = _glue_targets(raw_targets)
+    processes = {
+        target["process"]
+        for target in targets or []
+        if isinstance(target, dict) and isinstance(target.get("process"), str)
+    }
+    if default_process not in processes:
+        raise InstituteSettingsValidationError(
+            "glue_default_process must match a process configured in glue_targets."
+        )
 
 
 def _reconcile_stage_model(normalised: dict[str, Any]) -> None:
@@ -870,6 +994,135 @@ def _assembly_tool_slots(value: Any) -> list[dict[str, Any]]:
     return normalised
 
 
+def _auto_sync_time_of_day(value: Any, label: str) -> str:
+    if not isinstance(value, str) or _HHMM_RE.fullmatch(value.strip()) is None:
+        raise InstituteSettingsValidationError(
+            f"{label} must be a time of day as HH:MM on a 24-hour clock, e.g. 07:00."
+        )
+    return value.strip()
+
+
+def _auto_sync_weekdays(value: Any) -> list[int] | None:
+    """Normalize the ISO weekdays an unattended sweep may run on.
+
+    ``None`` (or an absent key) means every day, which is exactly what
+    ``read_auto_sync_schedule`` does with an empty weekday tuple. An empty
+    list is rejected instead of being read that way: somebody who unticks
+    every day means "never", and storing that as "every day" would create
+    unattended PDB traffic in the one case where it was being prevented.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise InstituteSettingsValidationError(
+            "auto_sync weekdays must be a list of ISO weekday numbers, "
+            "1 = Monday to 7 = Sunday."
+        )
+    weekdays: list[int] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int) or not 1 <= item <= 7:
+            raise InstituteSettingsValidationError(
+                "auto_sync weekdays must be whole numbers from 1 (Monday) to 7 (Sunday)."
+            )
+        if item in weekdays:
+            raise InstituteSettingsValidationError(
+                "auto_sync weekdays must not repeat a day; name each of 1 (Monday) "
+                "to 7 (Sunday) at most once."
+            )
+        weekdays.append(item)
+    if not weekdays:
+        raise InstituteSettingsValidationError(
+            "auto_sync weekdays must name at least one day; use null to run every day."
+        )
+    return sorted(weekdays)
+
+
+def _auto_sync(value: Any) -> dict[str, Any] | None:
+    """Normalize the unattended sync schedule (``app.auto_sync``).
+
+    ``None`` clears the key back to the default, which is *off*: an institute
+    nobody configured never syncs on a timer, and neither does one whose block
+    says ``enabled: false``. The rest of the block is validated either way, so
+    a schedule can be prepared, switched off, and switched back on without
+    losing its window.
+
+    Two clocks, deliberately. ``window_start``/``window_end`` and ``weekdays``
+    are wall-clock in the **server's own local time** (docs/09): Windows ships
+    no IANA zone database, and for both real deployment shapes — the desktop
+    bundle on an operator's machine and one VM per institute — the server's
+    clock already is the institute's clock. ``interval_minutes`` is measured
+    against the last successful sync's ``finished_at``, which is stored in
+    UTC; the two must not be described as one clock, or the difference is a
+    silent two hours every Berlin summer.
+
+    A window may cross midnight, so ``22:00``-``06:00`` is an overnight window
+    rather than an empty set; the pair is deliberately **not** checked for
+    ``start <= end``. Only an identical pair is rejected, because the reader
+    treats it as no window at all and a stored ``07:00``-``07:00`` would
+    promise a daytime limit it does not deliver.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise InstituteSettingsValidationError(
+            "auto_sync must be an object; use null to restore the default (off)."
+        )
+    if set(value) - _AUTO_SYNC_FIELDS:
+        raise InstituteSettingsValidationError(
+            "auto_sync only supports enabled, interval_minutes, window_start, "
+            "window_end, and weekdays."
+        )
+
+    enabled = value.get("enabled")
+    if not isinstance(enabled, bool):
+        raise InstituteSettingsValidationError(
+            "auto_sync must state enabled as true or false."
+        )
+
+    interval = value.get("interval_minutes")
+    if (
+        isinstance(interval, bool)
+        or not isinstance(interval, int)
+        or not _MIN_AUTO_SYNC_INTERVAL_MINUTES
+        <= interval
+        <= _MAX_AUTO_SYNC_INTERVAL_MINUTES
+    ):
+        raise InstituteSettingsValidationError(
+            "auto_sync interval_minutes must be a whole number of minutes from "
+            f"{_MIN_AUTO_SYNC_INTERVAL_MINUTES} to {_MAX_AUTO_SYNC_INTERVAL_MINUTES}. "
+            "A smaller number is refused rather than sped up, and switching the "
+            "schedule off is enabled: false."
+        )
+
+    raw_start = value.get("window_start")
+    raw_end = value.get("window_end")
+    if (raw_start is None) != (raw_end is None):
+        raise InstituteSettingsValidationError(
+            "auto_sync window_start and window_end must be set together; "
+            "leave both empty to allow any time of day."
+        )
+    window_start = window_end = None
+    if raw_start is not None:
+        window_start = _auto_sync_time_of_day(raw_start, "auto_sync window_start")
+        window_end = _auto_sync_time_of_day(raw_end, "auto_sync window_end")
+        if window_start == window_end:
+            raise InstituteSettingsValidationError(
+                "auto_sync window_start and window_end must differ; leave both "
+                "empty to allow any time of day. A window may cross midnight, "
+                "so 22:00 to 06:00 is a valid overnight window."
+            )
+
+    return {
+        "enabled": enabled,
+        "interval_minutes": interval,
+        "window_start": window_start,
+        "window_end": window_end,
+        "weekdays": _auto_sync_weekdays(value.get("weekdays")),
+    }
+
+
 def normalize_institute_settings_update(
     existing_settings: Any,
     settings_patch: dict[str, Any],
@@ -941,11 +1194,14 @@ def normalize_institute_settings_update(
         normalised["glue_process_property"] = _glue_process_property(
             settings_patch["glue_process_property"]
         )
+    if "auto_sync" in settings_patch:
+        normalised["auto_sync"] = _auto_sync(settings_patch["auto_sync"])
     if "stage_order" in settings_patch:
         normalised["stage_order"] = _stage_order(settings_patch["stage_order"])
     if "stage_requirements" in settings_patch:
         normalised["stage_requirements"] = _stage_requirements(
             settings_patch["stage_requirements"]
         )
+    _validate_glue_process_contract(existing, normalised, settings_patch)
     _reconcile_stage_model(normalised)
     return normalised

@@ -63,15 +63,17 @@ der Seite bereits da — nur ihre Messungen fehlen.
 
 ### 2.1 Was existiert
 
-`backend/app/domain/glue.py` enthält die Rechnung **zeichengleich mit dem
-Blatt**: `(B2*4.2)+(C2*1.5)` als Ziel, `(B2*0.25)+(C2*0.1)` als Toleranz, die
-Gewichtsdifferenz mal tausend, das Urteil in drei Stufen. Und **null
-Aufrufer.** Die komplette TrueBlue-Zieltabelle steht dort, alle sieben Zeilen.
+`backend/app/domain/glue.py` begann mit der Rechnung **zeichengleich mit dem
+Blatt**, aber ohne Aufrufer. E2 hat daraus inzwischen die reine, aufgerufene
+Domain-Ableitung gemacht; Ziele, Formeln und Verfahren kommen zur Laufzeit
+ausschliesslich aus dem Institutsprofil. Die TrueBlue-Zahlen im Modul sind nur
+noch Referenzmaterial und werden nie als Fallback eines fremden oder leeren
+Profils aktiviert.
 
-### 2.2 Was fehlt
+### 2.2 Was E2 umgesetzt hat
 
-1. **Profildaten.** Es gibt kein `glue_targets_from_settings()` als Gegenstück
-   zu `stage_model_from_settings`. Nötig: `glue_targets`
+1. **Profildaten.** `glue_targets_from_settings()` ist das Gegenstück zu
+   `stage_model_from_settings`: `glue_targets`
    (Verfahren × Modultyp → {hybrids, powerboard} × {target, tolerance}),
    `glue_weight_inputs` (Formel als Result-Code-Mapping) und ein expliziter
    `glue_default_process` — heute trägt der `GLUE_WEIGHT`-Lauf das
@@ -89,7 +91,8 @@ Aufrufer.** Die komplette TrueBlue-Zieltabelle steht dort, alle sieben Zeilen.
    Zeile ausdrücklich beschriftet „only lower bound since 2023-10-24".
    Derselbe Hybridtyp bekommt auf zwei Reitern 43,5 bzw. 43,8. Ein Profil, das
    nur *einen* Satz Konstanten kennt, kann historische Läufe nicht korrekt
-   bewerten. **Klebe-Ziele brauchen ein Gültig-ab-Datum.**
+   bewerten. **Klebe-Ziele tragen deshalb ein Gültig-ab-Datum; undatierte Läufe
+   verwenden nur einen ausdrücklich undatierten Rückfall.**
 4. **POLARIS.** Nur ein Verfahren ist hinterlegt; TUDO fährt ausschließlich
    TrueBlue (die POLARIS-Spalte wird im lebenden Blatt von **keiner** Formel
    referenziert, und ihre R2-Zeile ist ganz leer). Das Profil muss beide
@@ -169,7 +172,7 @@ die Verdrahtung fehlt. Berührt [`docs/07`](../../07-jig-tool-quickselect.md).
 | Etappe | Inhalt | Warum zuerst |
 |---|---|---|
 | **E1** ✅ | `state`-Filter für gelöschte Läufe; Kind-Nachweise im Worksheet (umgesetzt 2026-08-27, siehe §1) | Beides verfälschte das Urteil über den Produktionsstand |
-| **E2** | `glue_targets`/`glue_weight_inputs`/`glue_default_process` als Profildaten + Adapter + abgeleitete Worksheet-Felder | Der eigentliche Auftrag; die Mathematik existiert bereits |
+| **E2** ✅ | `glue_targets`/`glue_weight_inputs`/`glue_default_process` als Profildaten + Adapter + abgeleitete Worksheet-Felder (umgesetzt 2026-08-27, siehe §9.4) | Der eigentliche Auftrag; die Mathematik ist serverseitig verdrahtet |
 | **E3** | Rohwert-Erfassung im Edit-Streifen mit Live-Urteil | Setzt E2 voraus |
 | **E4** | Lokale Nachbartabelle für Werte ohne PDB-Heimat | Architekturentscheidung, siehe §3 |
 | **E5** | Werkzeug-Nachweis am Testlauf verdrahten | Setzt eine Profil-Konfiguration voraus, die TUDO noch nicht hat |
@@ -345,12 +348,14 @@ Backend-Seite von E2 steht: `glue_targets_from_settings` /
 1. **Die Modultyp-Schlüssel von §9.1 sind Blattvokabular, keine PDB-Typcodes.**
    Der Spiegel führt `R5M1_HALFMODULE` (54 Läufe), `R2` (42) und
    `R5M0_HALFMODULE` (36). Ein Profil mit dem Schlüssel `R5M1` trifft an
-   echten TUDO-Modulen **keine einzige** Zeile. Der Seed-Default führt beide
-   Schreibweisen; geraten wird zur Laufzeit nichts.
+   echten TUDO-Modulen **keine einzige** Zeile. Darum muss das TUDO-Profil die
+   echten PDB-Codes ausdrücklich führen. Fehlende, `null`- oder fehlerhafte
+   Profildaten aktivieren keine globalen TUDO-Konstanten.
 2. **Die Codekette von §9.2 ist die falsche.** `GW_MODULE_H1H2` und
    `GW_GLUE_H1H2` sind in **allen 132** Läufen `null`. Gefüllt ist die
    Ein-Hybrid-Kette: `GW_MODULE_H1` (61), `GW_GLUE_H1` (60), `GW_MODULE_H1PB`
-   (77), `GW_PB` (30), `GW_GLUE_PB` (32). Der Seed-Default ist deshalb
+   (77), `GW_PB` (30), `GW_GLUE_PB` (32). Die am TUDO-Bestand belegte
+   Basisformel ist deshalb
    `GW_MODULE_H1 − GW_SENSOR − GW_HYBRID1 → GW_GLUE_H1` und
    `GW_MODULE_H1PB − GW_MODULE_H1 − GW_PB → GW_GLUE_PB`. **Der
    `result_code` aus §9.2 (`GW_GLUE_PB`) war richtig**, nur die Messkette
@@ -359,19 +364,26 @@ Backend-Seite von E2 steht: `glue_targets_from_settings` /
    Hybrid- und **13 von 18** Powerboard-Sätzen; alle 11 Abweichungen sind
    Läufe, deren gespeichertes Gewicht nicht zu den eigenen gespeicherten
    Waagenwerten passt (zwei Faktor-10-Tippfehler, eine Feldvertauschung,
-   acht kleinere Unstimmigkeiten) — nie die Rechnung.
+   acht kleinere Unstimmigkeiten) — nie die Rechnung. zFlow wählt abhängig von
+   der Modultopologie trotzdem ausdrücklich zwischen H1 und H1H2. Deshalb darf
+   jeder Schritt optionale, exakte `by_type_code`-Overrides für
+   `measured`/`subtract`/`result_code` tragen; ein nicht passender Typ nimmt die
+   Basisformel. Aus bloß gefüllten H1H2-Feldern wird nie eine Topologie geraten.
 3. **§9.1 braucht einen Ort für das Verfahren.** `process_source: "run"` setzt
    voraus, dass ein Lauf sein Verfahren nennt; §9 sagt nicht wo. Neu:
-   `glue_process_property` (Default `null`) und `glue_process_default` (Default
-   `null`, greift automatisch, wenn genau ein Verfahren konfiguriert ist).
+   `glue_process_property` (Default `null`) und der kanonische
+   `glue_default_process` (Default `null`). Der Default muss ausdrücklich einen
+   vorhandenen Regelsatz nennen; auch ein einziges konfiguriertes Verfahren
+   wird nicht automatisch gewählt. Der kurzzeitig verwendete Alias
+   `glue_process_default` wird nur zur Migration eingelesen.
    Am Echtbestand ist die einzige verfahrensnahe Property `GW_METHOD`, und
    ihre 132 Werte (`Stencil`, `stencil`, `stencils`, `stensil`) beschreiben die
-   **Auftragsart**, nicht den Kleber — deshalb kein Seed-Wert und deshalb
-   Großschreibungs-tolerantes Matching.
+   **Auftragsart**, nicht den Kleber — deshalb kein Default daraus und deshalb
+   nur Großschreibungs-tolerantes Matching gegen konfigurierte Prozessnamen.
    *Nebenbefund:* die PDB führt Kleber als Komponenten mit den Typcodes
    `TRUE_BLUE`, `POLARIS_EPOXY`, `POLARIS_HARDENER`, `LOCTITE_3525`. Wer das
    Verfahren später aus der Klebecharge zieht, sollte `process` so schreiben;
-   der Seed folgt vorerst §9.1 mit `TRUEBLUE`.
+   das TUDO-Profil folgt vorerst §9.1 mit `TRUEBLUE`.
 4. **§9.2 nennt den Testtyp nicht.** Ohne ihn liee sich nicht entscheiden,
    welche Worksheet-Zeile ein `derived` bekommt. Jeder Schritt trägt jetzt ein
    optionales `test_type` (Seed `GLUE_WEIGHT`) — das Beispiel aus §9.2 bleibt
@@ -386,6 +398,13 @@ Backend-Seite von E2 steht: `glue_targets_from_settings` /
 - **`reason`-Vorrang** ist die Reparaturreihenfolge: `no_run` >
   `missing_inputs` > `no_target`. Die Rechnung läuft trotzdem, wenn nur das
   Ziel fehlt.
+
+Ein undatierter Lauf darf ausschließlich einen ausdrücklich undatierten
+`valid_from: null`-Regelsatz verwenden; er wird nie nach einer späteren oder
+zukünftigen Generation beurteilt. Profildefinierte Glue-Testtypen bekommen
+auch ohne Lauf bereits eine Additional-Zeile mit `no_run`. Beim Ingest werden
+Institutsprofil, Pflichtfelder und Ableitung einmal gemeinsam aufgelöst; ein
+Konflikt zwischen Payload-Institut und expliziter Auswahl scheitert geschlossen.
 
 **Additiv gegenüber §9.3:** jeder Schritt trägt zusätzlich `result_code`
 (unter welchem PDB-Ergebnis der abgeleitete Wert hochgeladen wird).

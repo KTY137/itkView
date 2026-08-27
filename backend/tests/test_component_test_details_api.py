@@ -159,7 +159,9 @@ def test_attachments_are_listed_with_their_stored_state(
     response = as_operator.get(f"/api/components/{SN}/attachments")
     assert response.status_code == 200
 
-    entry = response.json()[0]
+    body = response.json()
+    entry = body["attachments"][0]
+    assert body["component_sn"] == SN
     assert entry["code"] == "att-1"
     assert entry["stored"] is True
     assert entry["is_image"] is True
@@ -169,7 +171,7 @@ def test_a_known_but_unmirrored_attachment_reports_not_stored(
     as_operator, attachments_dir, mirrored
 ):
     _store_attachment(as_operator, attachments_dir, stored=False)
-    entry = as_operator.get(f"/api/components/{SN}/attachments").json()[0]
+    entry = as_operator.get(f"/api/components/{SN}/attachments").json()["attachments"][0]
     # Known but not on disk: the UI can offer the sync rather than hide it.
     assert entry["stored"] is False
 

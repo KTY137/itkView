@@ -42,18 +42,18 @@ Beim Erfassen eines Bauschritts (z. B. Hybride kleben) haengen viele Felder vom
 Panels. Diese von Hand einzutippen ist fehleranfaellig und langsam. Sie
 korrelieren mit dem Modultyp und sollten **gefiltert vorgeschlagen** werden.
 
-Das Muster existiert schon: Klebe-Ziele haengen in
-[`backend/app/domain/glue.py`](../backend/app/domain/glue.py)
-(`DEFAULT_MODULE_GLUE_TARGETS`) am Modultyp, Pflichttests an der Stage
-(`app/domain/stages.py`). Jigs/Tools gehoeren genauso modelliert — als Daten,
-nicht als Code (harte Regel #4).
+Das Muster existiert schon: Klebe-Ziele haengen als `glue_targets` im
+Institutsprofil am Modultyp, Pflichttests an der Stage (`app/domain/stages.py`).
+Jigs/Tools gehoeren genauso modelliert — als Daten, nicht als Code (harte
+Regel #4).
 
 ## Datenmodell (additiv)
 
 `Tool` (Jig-/Werkzeug-Registry)
 - `id` PK
 - `kind`: `jig` | `pickup_tool` | `panel` | … (erweiterbar)
-- `code` (lokale/Instituts-Kennung), `rfid` (nullable)
+- `code` (lokale/Instituts-Kennung), `label` (optionaler Anzeigename, z. B.
+  „R5M0 Module jig #3 (orange)"), `rfid` (nullable)
 - `compatible_types`: Liste der Modultypen/R-Types, fuer die das Tool passt
   (z. B. `["R5M0", "R5M1"]`) — die eigentliche Korrelation, als **Config/Daten**.
 - `institute_id` FK (Registry ist institutsspezifisch)
@@ -74,9 +74,16 @@ Institut-Profil — statt fixer Felder im Wizard.
 
 ## API (umgesetzt)
 
-- `GET /api/tools?kind=&fits=<component_type>&status=` — gefilterte Liste fuer
-  den Quick-Select.
-- `GET /api/tools/by-rfid/{rfid}` — Scanner: RFID -> Tool aufloesen.
+- `GET /api/tools?kind=&fits=<component_type>&status=&institute=` — gefilterte
+  Liste fuer den Quick-Select.
+- `GET /api/tools/scan?code=&institute=` — der tatsaechlich genutzte
+  Scanner-Pfad: ein Wedge-Scanner liefert entweder das RFID-Tag oder den
+  Label-Code, der Handler matcht `rfid`/`code`/`label` case-insensitiv in
+  einer Abfrage. `AssemblyWizardScreen` und `ToolsScreen` rufen ausschliesslich
+  diesen Endpunkt (`api.ts::scanTool`).
+- `GET /api/tools/by-rfid/{rfid}` — reiner RFID-Lookup; im Code vorhanden,
+  aber von keinem Frontend-Pfad mehr aufgerufen (Vorlaeufer von `/scan`,
+  seit dessen Einfuehrung 2026-07-08 unbenutzt).
 - `POST /api/tools`, `PATCH /api/tools/{id}` (operator/admin) — alle
   strukturierten Felder pflegen, optionale Werte explizit leeren, Status setzen;
   normalisiert, institutsgebunden, mit eindeutigen Codes/RFIDs und Audit-Events.
@@ -85,9 +92,10 @@ Institut-Profil — statt fixer Felder im Wizard.
 - `GET /api/assembly/scan-component`, `POST /api/assembly/preview` und
   `POST /api/assembly/actions` bilden den kanonischen Wizard-Vertrag.
 
-Umgesetzt zusaetzlich: `POST /api/sync/tools/{institute}` aktualisiert die
-lokale Registry aus bereits gespiegelten PDB-`TOOLS`-Komponenten, ohne die PDB
-erneut anzufragen.
+Umgesetzt zusaetzlich: `POST /api/sync/tools/{institute_code}` aktualisiert die
+lokale Registry aus bereits gespiegelten PDB-`TOOLS`-Komponenten
+(`app/tool_sync.py::sync_tools_from_components`), ohne die PDB erneut
+anzufragen.
 
 ## Frontend (Assembly-Wizard)
 
@@ -95,8 +103,9 @@ erneut anzufragen.
   Tools vorgefiltert** (Quick-Select), statt Freitext.
 - Scanner-first: RFID eines Jigs scannen -> Tool wird direkt gesetzt, sofern
   `compatible_types` zum Modul passt (sonst Warnung).
-- Glue-Batch analog: aktive Batches per Quick-Select; Klebe-Zielwert kommt aus
-  `DEFAULT_MODULE_GLUE_TARGETS`/Profil und wird nur angezeigt/geprueft.
+- Glue-Batch analog: aktive Batches per Quick-Select; Klebe-Zielwert kommt
+  ausschliesslich aus `InstituteProfile.settings.glue_targets` und wird nur
+  angezeigt/geprueft.
 - Ergebnis geht als validierte Aktion in die **Outbox** (nichts direkt in die
   PDB).
 

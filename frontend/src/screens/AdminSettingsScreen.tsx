@@ -13,12 +13,27 @@ const RESULT_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/u;
 /** A derivation step key (plan §9.2/§9.3) — profile-defined, case as typed. */
 const GLUE_STEP_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/u;
 const GLUE_PROCESS_PATTERN = /^[A-Z][A-Z0-9_]{0,31}$/u;
+const GLUE_TYPE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,31}$/u;
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
 const GLUE_STEP_LIST_ID = "admin-glue-step-keys";
 /** A glue target/tolerance in mg; generous, but rules out a stray gram value. */
 const MAX_GLUE_TARGET_MG = 100_000;
 /** Guard against a pathological mirror; a real profile has a handful of types. */
 const MAX_SCHEMA_COMPONENT_TYPES = 8;
+
+/**
+ * The unattended sync schedule (`auto_sync`, backend/app/auto_sync.py). The
+ * floor mirrors MIN_INTERVAL_MINUTES there: the backend refuses anything
+ * below it instead of quietly speeding a profile up, so the editor has to
+ * refuse it too rather than send a number that would come back rejected.
+ */
+const AUTO_SYNC_MIN_INTERVAL_MINUTES = 15;
+const AUTO_SYNC_MAX_INTERVAL_MINUTES = 7 * 24 * 60;
+/** What an institute that never configured a schedule shows before it is on. */
+const AUTO_SYNC_DEFAULT_INTERVAL_MINUTES = 60;
+/** ISO weekdays, 1 = Monday through 7 = Sunday; all seven means every day. */
+const ISO_WEEKDAYS: readonly number[] = [1, 2, 3, 4, 5, 6, 7];
+const HHMM_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/u;
 
 // Mirror of the institute-agnostic seed model in
 // `backend/app/domain/stages.py` (DEFAULT_STAGE_ORDER /
@@ -113,6 +128,8 @@ type GlueInputRow = {
   subtract: TextRow[];
   /** Optional: without it the step is judged but never uploaded. */
   resultCode: string;
+  /** Exact component-type formula overrides; retained without a raw-JSON editor. */
+  byTypeCode: Record<string, GlueWeightInputOverride>;
 };
 
 /** One target/tolerance cell: module type × step, inside one rule set. */
@@ -174,6 +191,20 @@ type SettingsDraft = {
   hadGlueDefaultProcess: boolean;
   hadGlueProcessProperty: boolean;
   evidenceComponentTypes: TextRow[];
+  autoSyncEnabled: boolean;
+  autoSyncIntervalMinutes: string;
+  autoSyncWindowStart: string;
+  autoSyncWindowEnd: string;
+  /** ISO weekdays the window may open on; all seven means every day. */
+  autoSyncWeekdays: number[];
+  /** Stored block exists but the backend scheduler must read it as off. */
+  autoSyncMalformed: boolean;
+  /**
+   * Whether the loaded profile already carried `auto_sync`. An institute that
+   * never configured a schedule must not have one written by an unrelated
+   * save — not even a disabled one, which would record a decision nobody made.
+   */
+  hadAutoSync: boolean;
   escalationAfterMinutes: string;
   escalationChannel: string;
 };
@@ -205,8 +236,8 @@ export type AdminOperationalSettings = {
    * `measured − Σ subtract`, stored under `result_code`. Omitted entirely
    * while the institute has never configured one, so an unrelated save never
    * turns "not configured" into "explicitly none"; `null` when the admin
-   * empties a configured one, which is how the API restores the seed
-   * defaults — an empty object is rejected there on purpose.
+   * empties a configured one, which disables input-based derivation. An empty
+   * object is rejected there on purpose.
    */
   glue_weight_inputs?: Record<string, GlueWeightInputMapping> | null;
   /**
@@ -221,6 +252,13 @@ export type AdminOperationalSettings = {
   /** Optional PDB property/result code that identifies the process per run. */
   glue_process_property?: string | null;
   evidence_component_types: string[];
+  /**
+   * The unattended sync schedule. Omitted while the institute has never
+   * configured one, so an unrelated save can never switch on the only thing
+   * in itkFlow that contacts the PDB without a person asking for it; `null`
+   * clears a configured one back to off.
+   */
+  auto_sync?: AutoSyncSchedule | null;
   reminder_escalation: { after_minutes: number; channel: string } | null;
   /** Complete ordered stage list; written together with `stage_requirements`. */
   stage_order: string[];
@@ -235,6 +273,14 @@ export type GlueWeightInputMapping = {
   result_code?: string;
   label?: string;
   test_type?: string;
+  by_type_code?: Record<string, GlueWeightInputOverride>;
+};
+
+export type GlueWeightInputOverride = {
+  measured: string;
+  subtract: string[];
+  /** Absent inherits the base output code; null explicitly disables it. */
+  result_code?: string | null;
 };
 
 export type GlueTargetRuleSet = {
@@ -243,6 +289,20 @@ export type GlueTargetRuleSet = {
   /** null = always valid; the fallback when no dated rule set matches. */
   valid_from: string | null;
   module_types: Record<string, Record<string, { target_mg: number; tolerance_mg: number }>>;
+};
+
+/**
+ * The schedule an unattended refresh follows, exactly as the backend stores
+ * it. `window_start`/`window_end` are wall-clock times in the server's own
+ * local time and may cross midnight (22:00–06:00 is an overnight window);
+ * `weekdays` are ISO numbers, and `null` means every day.
+ */
+export type AutoSyncSchedule = {
+  enabled: boolean;
+  interval_minutes: number;
+  window_start: string | null;
+  window_end: string | null;
+  weekdays: number[] | null;
 };
 
 export type AdminSettingsUpdate = {
@@ -380,6 +440,7 @@ export type AdminSettingsLabels = {
   glueProcessResolutionHint: string;
   glueDefaultProcessLabel: string;
   glueDefaultProcessUnset: string;
+  glueDefaultProcessMissing: string;
   glueProcessPropertyLabel: string;
   glueProcessPropertyPlaceholder: string;
   addGlueRuleSet: string;
@@ -411,6 +472,31 @@ export type AdminSettingsLabels = {
   addEvidenceType: string;
   evidenceTypeLabel: (index: number) => string;
   evidenceTypePlaceholder: string;
+  autoSyncTitle: string;
+  autoSyncHint: string;
+  autoSyncIdentityHint: string;
+  autoSyncIdentityDetail: string;
+  autoSyncClockHint: string;
+  autoSyncEnabledLabel: string;
+  autoSyncEnabledNote: string;
+  autoSyncDisabledNote: string;
+  autoSyncIntervalLabel: string;
+  autoSyncIntervalHint: string;
+  autoSyncWindowStartLabel: string;
+  autoSyncWindowEndLabel: string;
+  autoSyncWindowAnyTime: string;
+  autoSyncWindowDaytime: (start: string, end: string) => string;
+  autoSyncWindowOvernight: (start: string, end: string) => string;
+  autoSyncWeekdaysLabel: string;
+  autoSyncWeekdaysHint: string;
+  autoSyncWeekdayName: (isoWeekday: number) => string;
+  autoSyncWeekdayShortName: (isoWeekday: number) => string;
+  autoSyncDirtyWarning: string;
+  autoSyncWindowPairRequired: string;
+  autoSyncWindowFormat: string;
+  autoSyncWindowIdentical: string;
+  autoSyncWeekdaysRequired: string;
+  autoSyncMalformedWarning: string;
   remove: string;
   reset: string;
   save: string;
@@ -614,6 +700,58 @@ function numberText(value: unknown): string {
   return typeof value === "number" || typeof value === "string" ? String(value) : "";
 }
 
+function glueInputOverrides(value: unknown): Record<string, GlueWeightInputOverride> {
+  const mapping = asObject(value);
+  const overrides = Object.create(null) as Record<string, GlueWeightInputOverride>;
+  if (mapping === null) return overrides;
+
+  for (const [rawTypeCode, rawOverride] of Object.entries(mapping)) {
+    const typeCode = rawTypeCode.trim().toUpperCase();
+    const override = asObject(rawOverride);
+    if (!GLUE_TYPE_CODE_PATTERN.test(typeCode) || override === null) continue;
+
+    const measured =
+      typeof override.measured === "string" ? override.measured.trim().toUpperCase() : "";
+    if (!RESULT_CODE_PATTERN.test(measured) || !Array.isArray(override.subtract)) continue;
+    const subtract = override.subtract.flatMap((rawCode) => {
+      if (typeof rawCode !== "string") return [];
+      const code = rawCode.trim().toUpperCase();
+      return RESULT_CODE_PATTERN.test(code) ? [code] : [];
+    });
+    if (subtract.length !== override.subtract.length) continue;
+
+    let resultCode: string | null | undefined;
+    if (Object.prototype.hasOwnProperty.call(override, "result_code")) {
+      if (override.result_code === null) {
+        resultCode = null;
+      } else if (typeof override.result_code === "string") {
+        const code = override.result_code.trim().toUpperCase();
+        if (!RESULT_CODE_PATTERN.test(code)) continue;
+        resultCode = code;
+      } else {
+        continue;
+      }
+    }
+    overrides[typeCode] = {
+      measured,
+      subtract,
+      ...(resultCode === undefined ? {} : { result_code: resultCode }),
+    };
+  }
+  return overrides;
+}
+
+function cloneGlueInputOverrides(
+  overrides: Record<string, GlueWeightInputOverride>,
+): Record<string, GlueWeightInputOverride> {
+  return Object.fromEntries(
+    Object.entries(overrides).map(([typeCode, override]) => [
+      typeCode,
+      { ...override, subtract: [...override.subtract] },
+    ]),
+  );
+}
+
 /** `glue_weight_inputs` (plan §9.2) → editor rows. Anything unreadable is
  * dropped rather than guessed: a half-understood formula is worse than none. */
 function glueInputRows(value: unknown): GlueInputRow[] {
@@ -634,6 +772,7 @@ function glueInputRows(value: unknown): GlueInputRow[] {
         measured: typeof step.measured === "string" ? step.measured : "",
         subtract: subtract.map((code) => ({ key: rowId("admin-glue-subtract"), value: code })),
         resultCode: typeof step.result_code === "string" ? step.result_code : "",
+        byTypeCode: glueInputOverrides(step.by_type_code),
       },
     ];
   });
@@ -746,6 +885,128 @@ function stageRowsFromSettings(settings: Record<string, unknown>): StageRow[] {
   }));
 }
 
+type AutoSyncDraft = Pick<
+  SettingsDraft,
+  | "autoSyncEnabled"
+  | "autoSyncIntervalMinutes"
+  | "autoSyncWindowStart"
+  | "autoSyncWindowEnd"
+  | "autoSyncWeekdays"
+  | "autoSyncMalformed"
+  | "hadAutoSync"
+>;
+
+/**
+ * Project the stored schedule the way `read_auto_sync_schedule`
+ * (backend/app/auto_sync.py) does, so the editor shows what the scheduler
+ * will actually do. That reader fails closed — anything it cannot act on
+ * reads as "off" rather than being repaired into a guess — and a profile
+ * without the key shows the default: off, every day allowed, nothing written
+ * back until somebody changes something here.
+ */
+function autoSyncFromSettings(settings: Record<string, unknown>): AutoSyncDraft {
+  const configured = Object.prototype.hasOwnProperty.call(settings, "auto_sync");
+  const rawBlock = settings.auto_sync;
+  const block = asObject(rawBlock);
+  const supportedFields = new Set([
+    "enabled",
+    "interval_minutes",
+    "window_start",
+    "window_end",
+    "weekdays",
+  ]);
+  const interval = block?.interval_minutes;
+  const windowStart = block?.window_start;
+  const windowEnd = block?.window_end;
+  const rawWeekdays = block?.weekdays;
+  const weekdayList =
+    rawWeekdays === null || rawWeekdays === undefined
+      ? [...ISO_WEEKDAYS]
+      : Array.isArray(rawWeekdays)
+        ? rawWeekdays
+        : [];
+  const weekdaysValid =
+    (rawWeekdays === null || rawWeekdays === undefined) ||
+    (Array.isArray(rawWeekdays) &&
+      rawWeekdays.length > 0 &&
+      rawWeekdays.every(
+        (day) =>
+          typeof day === "number" && Number.isInteger(day) && day >= 1 && day <= 7,
+      ) &&
+      new Set(rawWeekdays).size === rawWeekdays.length);
+  const windowValid =
+    (windowStart === null || windowStart === undefined) &&
+    (windowEnd === null || windowEnd === undefined)
+      ? true
+      : typeof windowStart === "string" &&
+        typeof windowEnd === "string" &&
+        HHMM_PATTERN.test(windowStart) &&
+        HHMM_PATTERN.test(windowEnd) &&
+        windowStart !== windowEnd;
+  const blockValid =
+    block !== null &&
+    Object.keys(block).every((key) => supportedFields.has(key)) &&
+    typeof block.enabled === "boolean" &&
+    typeof interval === "number" &&
+    Number.isInteger(interval) &&
+    interval >= AUTO_SYNC_MIN_INTERVAL_MINUTES &&
+    interval <= AUTO_SYNC_MAX_INTERVAL_MINUTES &&
+    weekdaysValid &&
+    windowValid;
+
+  if (!blockValid) {
+    return {
+      autoSyncEnabled: false,
+      autoSyncIntervalMinutes: String(AUTO_SYNC_DEFAULT_INTERVAL_MINUTES),
+      autoSyncWindowStart: "",
+      autoSyncWindowEnd: "",
+      autoSyncWeekdays: [...ISO_WEEKDAYS],
+      // A malformed stored value remains untouched by an unrelated save. It
+      // is visibly off and is replaced only when an admin edits this section.
+      hadAutoSync: false,
+      autoSyncMalformed: configured && rawBlock !== null,
+    };
+  }
+
+  return {
+    autoSyncEnabled: block.enabled === true,
+    autoSyncIntervalMinutes: String(interval),
+    autoSyncWindowStart: typeof windowStart === "string" ? windowStart : "",
+    autoSyncWindowEnd: typeof windowEnd === "string" ? windowEnd : "",
+    autoSyncWeekdays: [...weekdayList].sort((left, right) => left - right),
+    hadAutoSync: configured,
+    autoSyncMalformed: false,
+  };
+}
+
+/**
+ * Whether this institute has anything of its own to say about the schedule.
+ * An unrelated save must not write an `auto_sync` block into a profile that
+ * never had one: absence is how "never syncs unattended" is stored, and even
+ * a disabled block would record a decision nobody made.
+ */
+function autoSyncConfigured(draft: SettingsDraft): boolean {
+  return (
+    draft.hadAutoSync ||
+    draft.autoSyncEnabled ||
+    draft.autoSyncWindowStart !== "" ||
+    draft.autoSyncWindowEnd !== "" ||
+    draft.autoSyncIntervalMinutes.trim() !== String(AUTO_SYNC_DEFAULT_INTERVAL_MINUTES) ||
+    draft.autoSyncWeekdays.length !== ISO_WEEKDAYS.length
+  );
+}
+
+/** Everything that decides when unattended PDB traffic happens. */
+function comparableAutoSync(draft: SettingsDraft): unknown {
+  return {
+    enabled: draft.autoSyncEnabled,
+    intervalMinutes: draft.autoSyncIntervalMinutes,
+    windowStart: draft.autoSyncWindowStart,
+    windowEnd: draft.autoSyncWindowEnd,
+    weekdays: draft.autoSyncWeekdays,
+  };
+}
+
 function draftFromInstitute(institute: Institute): SettingsDraft {
   const settings = asObject(institute.settings) ?? {};
   const escalation = asObject(settings.reminder_escalation);
@@ -780,6 +1041,7 @@ function draftFromInstitute(institute: Institute): SettingsDraft {
       settings.evidence_component_types,
       "admin-evidence",
     ),
+    ...autoSyncFromSettings(settings),
     escalationAfterMinutes:
       typeof escalation?.after_minutes === "number"
         ? String(escalation.after_minutes)
@@ -809,6 +1071,13 @@ function emptyDraft(): SettingsDraft {
     hadGlueDefaultProcess: false,
     hadGlueProcessProperty: false,
     evidenceComponentTypes: [],
+    autoSyncEnabled: false,
+    autoSyncIntervalMinutes: String(AUTO_SYNC_DEFAULT_INTERVAL_MINUTES),
+    autoSyncWindowStart: "",
+    autoSyncWindowEnd: "",
+    autoSyncWeekdays: [...ISO_WEEKDAYS],
+    autoSyncMalformed: false,
+    hadAutoSync: false,
     escalationAfterMinutes: "",
     escalationChannel: "",
   };
@@ -828,12 +1097,14 @@ function cloneDraft(draft: SettingsDraft): SettingsDraft {
     glueInputs: draft.glueInputs.map((row) => ({
       ...row,
       subtract: row.subtract.map((item) => ({ ...item })),
+      byTypeCode: cloneGlueInputOverrides(row.byTypeCode),
     })),
     glueRuleSets: draft.glueRuleSets.map((row) => ({
       ...row,
       targets: row.targets.map((target) => ({ ...target })),
     })),
     evidenceComponentTypes: draft.evidenceComponentTypes.map((row) => ({ ...row })),
+    autoSyncWeekdays: [...draft.autoSyncWeekdays],
   };
 }
 
@@ -857,6 +1128,7 @@ function comparableGlueJudgement(draft: SettingsDraft): unknown {
       measured: row.measured,
       subtract: row.subtract.map((item) => item.value),
       resultCode: row.resultCode,
+      byTypeCode: cloneGlueInputOverrides(row.byTypeCode),
     })),
     ruleSets: draft.glueRuleSets.map((row) => ({
       process: row.process,
@@ -886,6 +1158,7 @@ function comparableDraft(draft: SettingsDraft): string {
     })),
     glueJudgement: comparableGlueJudgement(draft),
     evidenceComponentTypes: draft.evidenceComponentTypes.map((row) => row.value),
+    autoSync: comparableAutoSync(draft),
     escalationAfterMinutes: draft.escalationAfterMinutes,
     escalationChannel: draft.escalationChannel,
   });
@@ -1186,12 +1459,14 @@ function validateAndBuildUpdate(
     if (testType !== "" && !TEST_TYPE_PATTERN.test(testType)) {
       return { error: labels.required(labels.glueStepTestTypeLabel) };
     }
+    const byTypeCode = cloneGlueInputOverrides(row.byTypeCode);
     glueWeightInputs[stepKey] = {
       measured,
       subtract,
       ...(resultCode === "" ? {} : { result_code: resultCode }),
       ...(stepLabel === "" ? {} : { label: stepLabel }),
       ...(testType === "" ? {} : { test_type: testType }),
+      ...(Object.keys(byTypeCode).length === 0 ? {} : { by_type_code: byTypeCode }),
     };
   }
 
@@ -1278,6 +1553,12 @@ function validateAndBuildUpdate(
   if (glueDefaultProcess !== "" && !GLUE_PROCESS_PATTERN.test(glueDefaultProcess)) {
     return { error: labels.required(labels.glueDefaultProcessLabel) };
   }
+  if (
+    glueDefaultProcess !== "" &&
+    !glueTargets.some((ruleSet) => ruleSet.process === glueDefaultProcess)
+  ) {
+    return { error: labels.glueDefaultProcessMissing };
+  }
   const glueProcessProperty = draft.glueProcessProperty.trim().toUpperCase();
   if (glueProcessProperty !== "" && !RESULT_CODE_PATTERN.test(glueProcessProperty)) {
     return { error: labels.required(labels.glueProcessPropertyLabel) };
@@ -1337,6 +1618,59 @@ function validateAndBuildUpdate(
     evidenceComponentTypes.push(componentType);
   }
 
+  // The unattended schedule. Refused rather than corrected: the backend
+  // refuses the same input, and its reader would then read a rejected profile
+  // as "off" while this screen still showed a schedule that never fires.
+  let autoSync: AutoSyncSchedule | undefined;
+  if (autoSyncConfigured(draft)) {
+    const intervalMinutes = Number(draft.autoSyncIntervalMinutes.trim());
+    if (
+      draft.autoSyncIntervalMinutes.trim() === "" ||
+      !Number.isInteger(intervalMinutes) ||
+      intervalMinutes < AUTO_SYNC_MIN_INTERVAL_MINUTES ||
+      intervalMinutes > AUTO_SYNC_MAX_INTERVAL_MINUTES
+    ) {
+      return {
+        error: labels.integerRangeRequired(
+          labels.autoSyncIntervalLabel,
+          AUTO_SYNC_MIN_INTERVAL_MINUTES,
+          AUTO_SYNC_MAX_INTERVAL_MINUTES,
+        ),
+      };
+    }
+    const windowStart = draft.autoSyncWindowStart.trim();
+    const windowEnd = draft.autoSyncWindowEnd.trim();
+    if ((windowStart === "") !== (windowEnd === "")) {
+      return { error: labels.autoSyncWindowPairRequired };
+    }
+    if (
+      windowStart !== "" &&
+      (!HHMM_PATTERN.test(windowStart) || !HHMM_PATTERN.test(windowEnd))
+    ) {
+      return { error: labels.autoSyncWindowFormat };
+    }
+    // Deliberately no start-before-end check: 22:00 to 06:00 is an overnight
+    // window, which is the most considerate schedule there is. Only an
+    // identical pair is meaningless, and the backend rejects it too.
+    if (windowStart !== "" && windowStart === windowEnd) {
+      return { error: labels.autoSyncWindowIdentical };
+    }
+    if (draft.autoSyncWeekdays.length === 0) {
+      return { error: labels.autoSyncWeekdaysRequired };
+    }
+    autoSync = {
+      enabled: draft.autoSyncEnabled,
+      interval_minutes: intervalMinutes,
+      window_start: windowStart === "" ? null : windowStart,
+      window_end: windowEnd === "" ? null : windowEnd,
+      // All seven selected is "every day", which the profile states as null.
+      weekdays:
+        draft.autoSyncWeekdays.length === ISO_WEEKDAYS.length
+          ? null
+          : [...draft.autoSyncWeekdays].sort((left, right) => left - right),
+    };
+  }
+
   const escalationAfter = draft.escalationAfterMinutes.trim();
   const escalationChannel = draft.escalationChannel.trim();
   let reminderEscalation: { after_minutes: number; channel: string } | null = null;
@@ -1368,8 +1702,8 @@ function validateAndBuildUpdate(
         // judgement, or already had the key: emitting anything on an unrelated
         // save would change how every module's glue result is judged without
         // anybody asking. When the admin empties a configured block the value
-        // is `null` — the API reads that as "restore the seed defaults" and
-        // rejects an empty object or list outright.
+        // is `null`, which disables that profile-backed derivation or target
+        // block; an empty object or list is rejected outright.
         ...(draft.hadGlueInputs || draft.glueInputs.length > 0
           ? { glue_weight_inputs: draft.glueInputs.length === 0 ? null : glueWeightInputs }
           : {}),
@@ -1383,6 +1717,10 @@ function validateAndBuildUpdate(
           ? { glue_process_property: glueProcessProperty === "" ? null : glueProcessProperty }
           : {}),
         evidence_component_types: evidenceComponentTypes,
+        // Written only once this institute has said something about the
+        // schedule, or already had the key: an unrelated save must never be
+        // able to switch unattended PDB traffic on.
+        ...(autoSync === undefined ? {} : { auto_sync: autoSync }),
         reminder_escalation: reminderEscalation,
         stage_order: stageOrder,
         stage_requirements: stageRequirements,
@@ -1556,6 +1894,30 @@ export default function AdminSettingsScreen({
   const glueJudgementDirty =
     JSON.stringify(comparableGlueJudgement(draft)) !==
     JSON.stringify(comparableGlueJudgement(savedDraft));
+  const autoSyncDirty =
+    JSON.stringify(comparableAutoSync(draft)) !==
+    JSON.stringify(comparableAutoSync(savedDraft));
+  const autoSyncWindowNote = ((): string => {
+    const start = draft.autoSyncWindowStart.trim();
+    const end = draft.autoSyncWindowEnd.trim();
+    if (start === "" && end === "") return labels.autoSyncWindowAnyTime;
+    if (start === "" || end === "") return labels.autoSyncWindowPairRequired;
+    if (start === end) return labels.autoSyncWindowIdentical;
+    // Zero-padded HH:MM sorts chronologically, so a start after the end is
+    // precisely a window that runs over midnight.
+    return start < end
+      ? labels.autoSyncWindowDaytime(start, end)
+      : labels.autoSyncWindowOvernight(start, end);
+  })();
+
+  function toggleAutoSyncWeekday(isoWeekday: number) {
+    changeDraft((current) => ({
+      ...current,
+      autoSyncWeekdays: current.autoSyncWeekdays.includes(isoWeekday)
+        ? current.autoSyncWeekdays.filter((day) => day !== isoWeekday)
+        : [...current.autoSyncWeekdays, isoWeekday].sort((left, right) => left - right),
+    }));
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2680,6 +3042,7 @@ export default function AdminSettingsScreen({
                       measured: "",
                       subtract: [],
                       resultCode: "",
+                      byTypeCode: {},
                     },
                   ])
                 }
@@ -3323,6 +3686,135 @@ export default function AdminSettingsScreen({
                 ))}
               </div>
             )}
+          </section>
+
+          <section
+            className="panel admin-settings-section"
+            aria-labelledby="admin-auto-sync-title"
+          >
+            <div className="admin-settings-section-head">
+              <div>
+                <h2 className="section-title" id="admin-auto-sync-title">
+                  {labels.autoSyncTitle}
+                </h2>
+                <p className="muted admin-settings-copy">{labels.autoSyncHint}</p>
+                <p className="muted admin-settings-copy">{labels.autoSyncIdentityHint}</p>
+                <p className="muted admin-settings-copy">{labels.autoSyncIdentityDetail}</p>
+                <p className="muted admin-settings-copy">{labels.autoSyncClockHint}</p>
+              </div>
+            </div>
+            {autoSyncDirty && (
+              <div className="info-banner admin-settings-message" role="status">
+                <span>{labels.autoSyncDirtyWarning}</span>
+              </div>
+            )}
+            {draft.autoSyncMalformed && (
+              <div className="error-banner admin-settings-message" role="alert">
+                <span>{labels.autoSyncMalformedWarning}</span>
+              </div>
+            )}
+            <label className="admin-settings-toggle">
+              <input
+                type="checkbox"
+                checked={draft.autoSyncEnabled}
+                disabled={busy}
+                onChange={(event) =>
+                  changeDraft((current) => ({
+                    ...current,
+                    autoSyncEnabled: event.target.checked,
+                  }))
+                }
+              />
+              <span>{labels.autoSyncEnabledLabel}</span>
+            </label>
+            <p className="state-note admin-settings-empty">
+              {draft.autoSyncEnabled
+                ? labels.autoSyncEnabledNote
+                : labels.autoSyncDisabledNote}
+            </p>
+            <div className="admin-settings-grid">
+              <label className="admin-settings-field">
+                <span className="field-label">{labels.autoSyncIntervalLabel}</span>
+                <span className="admin-settings-input-unit">
+                  <input
+                    className="short-input mono"
+                    type="number"
+                    min={AUTO_SYNC_MIN_INTERVAL_MINUTES}
+                    max={AUTO_SYNC_MAX_INTERVAL_MINUTES}
+                    step={5}
+                    value={draft.autoSyncIntervalMinutes}
+                    disabled={busy}
+                    onChange={(event) =>
+                      changeDraft((current) => ({
+                        ...current,
+                        autoSyncIntervalMinutes: event.target.value,
+                      }))
+                    }
+                  />
+                  <span className="muted">{labels.minutesUnit}</span>
+                </span>
+              </label>
+              <p className="muted admin-settings-copy">{labels.autoSyncIntervalHint}</p>
+              <label className="admin-settings-field">
+                <span className="field-label">{labels.autoSyncWindowStartLabel}</span>
+                <input
+                  className="short-input mono"
+                  type="time"
+                  value={draft.autoSyncWindowStart}
+                  disabled={busy}
+                  onChange={(event) =>
+                    changeDraft((current) => ({
+                      ...current,
+                      autoSyncWindowStart: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label className="admin-settings-field">
+                <span className="field-label">{labels.autoSyncWindowEndLabel}</span>
+                <input
+                  className="short-input mono"
+                  type="time"
+                  value={draft.autoSyncWindowEnd}
+                  disabled={busy}
+                  onChange={(event) =>
+                    changeDraft((current) => ({
+                      ...current,
+                      autoSyncWindowEnd: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+            </div>
+            <p className="state-note admin-settings-empty">{autoSyncWindowNote}</p>
+            <div className="admin-settings-field admin-settings-field-wide">
+              <span className="field-label" id="admin-auto-sync-weekdays">
+                {labels.autoSyncWeekdaysLabel}
+              </span>
+              <div
+                className="admin-settings-weekdays"
+                role="group"
+                aria-labelledby="admin-auto-sync-weekdays"
+              >
+                {ISO_WEEKDAYS.map((isoWeekday) => {
+                  const selected = draft.autoSyncWeekdays.includes(isoWeekday);
+                  return (
+                    <button
+                      key={isoWeekday}
+                      type="button"
+                      className={`btn admin-settings-weekday${selected ? " primary" : ""}`}
+                      aria-pressed={selected}
+                      aria-label={labels.autoSyncWeekdayName(isoWeekday)}
+                      disabled={busy}
+                      onClick={() => toggleAutoSyncWeekday(isoWeekday)}
+                    >
+                      {labels.autoSyncWeekdayShortName(isoWeekday)}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="muted admin-settings-copy">{labels.autoSyncWeekdaysHint}</p>
+            </div>
           </section>
 
           {error !== null && (

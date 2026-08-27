@@ -6,8 +6,9 @@ enabled only by an institute profile. Nothing here is hardcoded per site.
 """
 
 import math
+import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
@@ -164,6 +165,15 @@ DEFAULT_MODULE_GLUE_TARGETS: dict[str, dict[str, GlueTarget]] = {
 
 
 @dataclass(frozen=True)
+class GlueStepFormula:
+    """A component-type-specific formula for one glue step."""
+
+    measured: str
+    subtract: tuple[str, ...]
+    result_code: str | None = None
+
+
+@dataclass(frozen=True)
 class GlueStepSpec:
     """One derived quantity: `measured` minus every code in `subtract`.
 
@@ -178,10 +188,24 @@ class GlueStepSpec:
     measured: str
     subtract: tuple[str, ...]
     result_code: str | None = None
+    by_type_code: Mapping[str, GlueStepFormula] = field(default_factory=dict)
 
     @property
     def input_codes(self) -> tuple[str, ...]:
         return (self.measured, *self.subtract)
+
+    def for_type_code(self, type_code: str | None) -> "GlueStepSpec":
+        """Resolve an exact configured type-code override, otherwise the base."""
+        formula = self.by_type_code.get(type_code) if type_code is not None else None
+        if formula is None:
+            return self
+        return replace(
+            self,
+            measured=formula.measured,
+            subtract=formula.subtract,
+            result_code=formula.result_code,
+            by_type_code={},
+        )
 
 
 @dataclass(frozen=True)
@@ -564,9 +588,33 @@ def _spec_from_entry(key: Any, entry: Any) -> GlueStepSpec | None:
     ):
         return None
     subtract = tuple(code.strip().upper() for code in raw_subtract)
+    measured = measured.strip().upper()
     test_type = entry.get("test_type")
     label = entry.get("label")
     result_code = entry.get("result_code")
+    result_code = (
+        result_code.strip().upper()
+        if isinstance(result_code, str) and result_code.strip()
+        else None
+    )
+    if (
+        measured in subtract
+        or len(set(subtract)) != len(subtract)
+        or result_code == measured
+        or result_code in subtract
+    ):
+        return None
+    if "by_type_code" in entry:
+        by_type_code = _type_code_formulas_from_entry(
+            entry["by_type_code"],
+            measured=measured,
+            subtract=subtract,
+            result_code=result_code,
+        )
+        if by_type_code is None:
+            return None
+    else:
+        by_type_code = {}
     key = key.strip()
     return GlueStepSpec(
         key=key,
@@ -580,14 +628,71 @@ def _spec_from_entry(key: Any, entry: Any) -> GlueStepSpec | None:
             if isinstance(test_type, str) and test_type.strip()
             else DEFAULT_GLUE_TEST_TYPE
         ),
-        measured=measured.strip().upper(),
+        measured=measured,
         subtract=subtract,
-        result_code=(
-            result_code.strip().upper()
-            if isinstance(result_code, str) and result_code.strip()
-            else None
-        ),
+        result_code=result_code,
+        by_type_code=by_type_code,
     )
+
+
+_FORMULA_OVERRIDE_FIELDS = frozenset({"measured", "subtract", "result_code"})
+_TYPE_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,31}\Z")
+
+
+def _type_code_formulas_from_entry(
+    value: Any,
+    *,
+    measured: str,
+    subtract: tuple[str, ...],
+    result_code: str | None,
+) -> dict[str, GlueStepFormula] | None:
+    if not isinstance(value, Mapping):
+        return None
+    formulas: dict[str, GlueStepFormula] = {}
+    for type_code, raw_formula in value.items():
+        if (
+            not isinstance(type_code, str)
+            or not type_code
+            or type_code != type_code.strip().upper()
+            or _TYPE_CODE_RE.fullmatch(type_code) is None
+            or not isinstance(raw_formula, Mapping)
+            or set(raw_formula) - _FORMULA_OVERRIDE_FIELDS
+        ):
+            return None
+        raw_measured = raw_formula.get("measured", measured)
+        raw_subtract = raw_formula.get("subtract", list(subtract))
+        raw_result_code = raw_formula.get("result_code", result_code)
+        if (
+            not isinstance(raw_measured, str)
+            or not raw_measured.strip()
+            or not isinstance(raw_subtract, list)
+            or any(not isinstance(code, str) or not code.strip() for code in raw_subtract)
+            or (
+                raw_result_code is not None
+                and (not isinstance(raw_result_code, str) or not raw_result_code.strip())
+            )
+        ):
+            return None
+        effective_measured = raw_measured.strip().upper()
+        effective_subtract = tuple(code.strip().upper() for code in raw_subtract)
+        effective_result_code = (
+            raw_result_code.strip().upper()
+            if isinstance(raw_result_code, str)
+            else None
+        )
+        if (
+            effective_measured in effective_subtract
+            or len(set(effective_subtract)) != len(effective_subtract)
+            or effective_result_code == effective_measured
+            or effective_result_code in effective_subtract
+        ):
+            return None
+        formulas[type_code] = GlueStepFormula(
+            measured=effective_measured,
+            subtract=effective_subtract,
+            result_code=effective_result_code,
+        )
+    return formulas
 
 
 def glue_process_from_settings(
@@ -723,7 +828,7 @@ def derive_run(
     `verdict="unknown"` with reason `no_run` rather than disappearing, because
     the target is still worth stating to whoever is about to glue.
     """
-    specs = model.specs_for(test_type)
+    specs = tuple(spec.for_type_code(type_code) for spec in model.specs_for(test_type))
     if not specs:
         return None
     process, source = process_for_run(model, _mapping(properties), _mapping(results))

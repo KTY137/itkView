@@ -125,6 +125,41 @@ im Frontend-i18n-Modul liegt.
    betroffene Stage). Der Screen dupliziert noch die Seed-Stage-Konstanten,
    weil kein Endpunkt das effektive (gemergte) Stage-Modell liefert — ein
    Read-Endpunkt dafuer ist der empfohlene naechste Schritt.
+   **Glue judgement (2026-08-27):** Ein eigener strukturierter Abschnitt
+   pflegt `glue_weight_inputs` und `glue_targets` ohne Raw-JSON: Formelschritte
+   mit Result-Codes sowie Regelsaetze aus Prozess, `valid_from`, Modultyp,
+   Ziel und Toleranz. Daneben stehen `Default glue process` als Auswahl aus den
+   konfigurierten Prozessen und die optionale `Run process property`. Ein leerer
+   Wert wird nur bei zuvor konfiguriertem Feld als `null` gespeichert; ein
+   unberuehrtes Institut bekommt keine implizite Glue-Konfiguration. Exakte
+   `by_type_code`-Formelvarianten sind vorerst kein eigener verschachtelter
+   Editor, muessen aber beim Laden, Dirty-Vergleich und jedem beliebigen Save
+   typisiert und verlustfrei erhalten bleiben.
+   **Scheduled sync (2026-08-27):** Eigener Abschnitt fuer `auto_sync` im
+   Institutsprofil (Enable-Checkbox, Intervall, optionales Zeitfenster,
+   sieben tastaturbedienbare Weekday-Toggles mit `aria-pressed`). Er ist die
+   einzige Stelle, an der itkFlow die PDB **von sich aus** kontaktiert, ohne
+   dass jemand in dem Moment danach fragt — der Outbox-Worker laeuft zwar
+   ebenfalls unbeaufsichtigt, fuehrt aber nur eine bereits freigegebene
+   Entscheidung aus. Deshalb steht die Erklaerung als Fliesstext neben dem
+   Schalter, nicht im Kleingedruckten: (a) unter wessen Identitaet gelesen
+   wird (die Person mit dem zuletzt erfolgreichen Component-Sync, sofern sie
+   dort weiterhin aktiver Operator/Admin ist; deaktivierte oder herabgestufte
+   Konten, fremder Institute-Scope, fehlende Codes sowie unbekannter, kaputter
+   oder `invalid` Status werden uebersprungen, `unreachable` nicht; qualifiziert
+   sich niemand, laeuft schlicht nichts), (b) dass Fenster
+   und Wochentage in der **lokalen Serverzeit** ausgewertet werden (Compose:
+   `TZ` aus `deploy/.env`, Default `Etc/UTC`), waehrend das Intervall in UTC ab
+   der neueren Grenze aus letztem Erfolg und letztem Scheduled-Versuch gemessen
+   wird, und (c) dass ein Fenster
+   ueber Mitternacht laufen darf. Die Live-Notiz unter den Zeitfeldern benennt
+   `22:00`–`06:00` ausdruecklich als `Overnight window`, damit niemand spaeter
+   eine `start < end`-Pruefung „repariert". Ein Institut ohne Konfiguration
+   bekommt durch ein unabhaengiges Speichern **keinen** `auto_sync`-Block —
+   auch keinen abgeschalteten. Validierung: `app/institute_settings.py`
+   (Untergrenze 15 min wird abgelehnt, nicht angehoben; Zeitfenster nur als
+   Paar; Wochentage 1–7 eindeutig und nicht leer; unbekannte Keys, u. a.
+   `timezone`, werden abgelehnt).
 8. **Assembly-Wizard:** Eigener, vom Board-CTA erreichbarer scanner-first
    Arbeitsbereich mit vier sichtbaren Schritten: Parent, Child, Resources,
    Review. Komponenten werden exakt per SN/lokalem Namen aufgeloest. Das
@@ -279,9 +314,10 @@ Korrekturen an genau diesem Worksheet
   `withdrawn_count`. Sind **alle** Laeufe eines Testtyps zurueckgezogen, steht
   die Zeile wieder auf `missing`. Sichtbar bleiben sie: `GET
   /api/components/{sn}/tests` listet sie samt `run_state` weiter (Vertrag in
-  docs/09). **Offen:** die Lauf-Ansicht kennzeichnet einen solchen Lauf noch
-  nicht als „withdrawn" — bis dahin kann `run_count` der Zeile kleiner sein
-  als die Zahl der aufgeklappten Laeufe.
+  docs/09). In der aufgeklappten Lauf-Ansicht ersetzt bei exakt
+  `state='deleted'` ein amberner Text-Chip `withdrawn in PDB` das alte Urteil;
+  die Messwerte bleiben zur Nachvollziehbarkeit sichtbar. Der noch lebende
+  Zwischenzustand `requestedToDelete` zeigt weiterhin `passed` oder `failed`.
 - **Neuer Block `Evidence on child components`** unter den Stage-Gruppen, eine
   read-only Tabelle je direktem Kind (Kopf: dekodierter Typ, Seriennummer,
   lokaler Name; Spalten `Test | Values | Result | Date`). Grund: nur 720 von
@@ -297,6 +333,34 @@ Korrekturen an genau diesem Worksheet
   wo die Seriennummer im Payload stimmt. Ein Kind ohne gespiegelte Laeufe
   bekommt trotzdem seine Gruppe („wir haben nachgesehen" ist etwas anderes als
   „wir haben nicht nachgesehen").
+
+**Klebegewichts-Urteil im Worksheet (2026-08-27):** Traegt eine Zeile eine
+serverseitige Ableitung (`WorksheetRow.derived`, Kind `glue_weight`, Vertrag
+in [Spec §9.3](superpowers/specs/2026-08-27-modulseite-als-arbeitsblatt.md)),
+zeigt die `Values`-Zelle das Urteil **vor** den rohen Waagenwerten: je
+Ableitungsschritt (`hybrids`, `powerboard` — zwei Klebungen bleiben zwei
+Chips, nie zu einem Bit zusammengefasst, weil das PDB-`passed`-Bit genau das
+tut) ein Wortchip `OK` / `Too little` / `Too much` (rot) oder — faellt keine
+Zahl heraus — der konkrete Grund `No target` / `Missing readings` /
+`Not measured` / `No verdict` als gedaempfter Chip; nie ein neutraler Chip,
+der wie ein bestandenes Ergebnis aussieht (die Haelfte der Powerboard-Urteile
+auf dem alten Blatt war genau das: Arithmetik ueber leeren Zellen). Daneben
+steht die Kompaktformel `gemessen / Ziel ± Toleranz mg` unveraendert wie vom
+Server geliefert; der Browser rechnet, rundet oder loest die Toleranz nie zu
+einer Spanne auf. Der geoeffnete Edit-Streifen zeigt dieselbe Ableitung
+ausfuehrlicher unterhalb der Rohwertfelder: das aufgeloeste Klebeverfahren mit
+Quelle (`recorded with the run` / `profile default` / `source unknown`) sowie
+je Schritt Messwert, Ziel und Toleranz als Definitionsliste. Diese Sektion
+erscheint nur, wenn die Zeile ueberhaupt eine Ableitung traegt (Dry-Run- oder
+letzter Lauf-Wert); kennt das Regelwerk zwar den Testtyp, aber keinen einzigen
+Schritt fuer den vorliegenden Modultyp, steht dort statt einer leeren Liste
+der Hinweistext „the profile configures no derivation step for this test
+type". Beide Ansichten formatieren ausschliesslich eine in
+`backend/app/domain/glue.py` und `backend/app/glue_service.py` berechnete
+Ableitung — Ziel, Toleranz und Formel kommen ausschliesslich aus dem
+Institutsprofil (`glue_targets`, `glue_weight_inputs`), es gibt keine zweite
+Formel im Frontend. Der PDB-Schreibpfad mischt `derived_results` noch nicht in
+das hochgeladene Dokument (offene Naht E3, siehe Spec §9.4).
 
 ### Shipment-Empfang und Reception-Tests
 
@@ -373,6 +437,24 @@ gar keiner Steuerung.
   Evidence-/Attachment-Mirror; `Sync complete` darf erst den vorgesehenen
   Offline-Umfang ehrlich benennen. Der Sync laeuft als Server-Job weiter, nicht
   als Lebensdauer des gerade montierten React-Screens.
+- **Rollierende Anzeige waehrend eines Evidence-Sweeps (2026-08-27):** Der
+  Sweep committet **jede Komponente einzeln**, die Daten stehen also laengst im
+  Spiegel, waehrend der Job noch laeuft. Bisher las die Oberflaeche erst beim
+  Status `succeeded` neu — man sah minutenlang alte Zeilen, dann fiel alles auf
+  einmal hinein. Der Controller (`componentSync.ts`) liefert dafuer `dataEpoch`:
+  ein Zaehler, der waehrend eines laufenden Jobs hochzaehlt, aber nur wenn der
+  Job **wirklich vorangekommen** ist (`current` gewachsen) und hoechstens
+  einmal je `PROGRESSIVE_REFRESH_MS` (8 s). Beide Bedingungen sind Absicht: ein
+  Job in der Retry-Leiter haelt seinen Heartbeat frisch, ohne voranzukommen —
+  dafuer den Spiegel neu zu lesen kostet einen Request und zeigt nichts. Die
+  Komponentenliste (inkl. Thumbnails) und eine **geoeffnete Detailseite**
+  (Preview, Pflichttest-Status, Stage-Vorschlag) haengen daran; letztere ist
+  der wichtigere Fall, weil dort sonst ein veralteter Pflichttest-Status stehen
+  bleibt. Am Terminalstatus zaehlt `dataEpoch` bewusst nicht weiter — die
+  bestehende `succeeded`-Behandlung deckt das ab, ein zusaetzlicher Schritt
+  waere nur ein doppelter Abruf. Ausdruecklich **nur** fuer den Evidence-Sweep:
+  der Component-Sync schreibt seinen ganzen Spiegel in einer abschliessenden
+  Transaktion und hat zwischendurch nichts zu zeigen.
 - **PDB-Umgebung ehrlich kennzeichnen:** Im inerten Default ist Remote-Sync als
   nicht verfuegbar erkennbar; bei explizit aktivierten Produktions-Reads lautet
   die Kennzeichnung entsprechend `Production reads` und verschweigt nie den

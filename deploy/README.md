@@ -8,6 +8,10 @@ cp .env.example .env      # set POSTGRES_PASSWORD and one stable encryption key
 docker compose up --build
 ```
 
+Also set `TZ` in `.env` to the institute deployment's local timezone (for
+example `Europe/Berlin`) before enabling a scheduled-sync window. Compose
+defaults to `Etc/UTC`; the backend image includes the timezone database.
+
 - Frontend: http://localhost:8080
 - Backend API + OpenAPI docs: http://localhost:8000/docs
 - Health: http://localhost:8000/health — reports the active `pdb_instance`

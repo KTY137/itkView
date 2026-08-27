@@ -155,6 +155,7 @@ function renderDetail(onNavigate?: (screen: ScreenId) => void) {
       onBack={vi.fn()}
       onOpen={vi.fn()}
       evidenceJobId={null}
+      evidenceEpoch={0}
       pinnedTestType={null}
       testIntentToken={0}
       onNavigate={onNavigate}
@@ -181,7 +182,11 @@ beforeEach(() => {
   vi.mocked(getComponentStaged).mockResolvedValue([]);
   vi.mocked(getStageSuggestion).mockResolvedValue(suggestionFixture);
   vi.mocked(getTestTypeSchemas).mockResolvedValue([schemaFixture]);
-  vi.mocked(getComponentAttachments).mockResolvedValue([]);
+  vi.mocked(getComponentAttachments).mockResolvedValue({
+    component_sn: "20USEM20000041",
+    attachments: [],
+    children: [],
+  });
   vi.mocked(getComponentTests).mockResolvedValue([]);
 });
 

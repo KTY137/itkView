@@ -72,8 +72,7 @@ gruen).** Was steht:
 - **Security-Härtung Login/Reads (2026-08-26):** `GET /api/audit`, `GET /api/outbox`
   und `GET /api/outbox/{id}` verlangen jetzt `require_user` (jede angemeldete
   Rolle genügt) — sie lieferten zuvor Akteurs-E-Mails bzw. Staged-Action-Payloads
-  anonym aus; der breitere Read-Rollout für alle übrigen Endpunkte bleibt
-  bewusst unverändert offen. `POST /api/auth/login` verifiziert bei unbekannter
+  anonym aus. `POST /api/auth/login` verifiziert bei unbekannter
   E-Mail zusätzlich gegen einen fest erzeugten Dummy-Passworthash (Antwort
   unverändert `401 Invalid email or password.`), damit die Login-Antwortzeit
   nicht verrät, ob ein Konto existiert. `PATCH /api/users/{id}` invalidiert bei
@@ -97,11 +96,36 @@ gruen).** Was steht:
   weist an, das Setup sofort nach dem ersten Start abzuschliessen und den
   Dienst vorher nicht ueber das vertrauenswuerdige Netz hinaus zu exponieren.
   Tests: `backend/tests/test_setup_bootstrap.py`.
+- **Korrektur (2026-08-27): „Reads bleiben offen" ist keine aktuelle Aussage
+  mehr.** Der Satz oben beschreibt den Stand vom 2026-08-24; seither haben
+  mehrere Feature-Commits (u. a. `fc9bd25`, `037cdd2`, `43563b7` — teils vor,
+  teils in derselben Nacht wie die Security-Härtung selbst) eigene
+  `require_user`-Gates auf weitere Lese-Endpunkte gelegt. Auch die
+  2026-08-26-Formulierung „der breitere Read-Rollout … bleibt bewusst
+  unverändert offen" war beim Commit schon ungenau. Ist-Zustand in
+  `backend/app/api.py`: neben `GET /api/audit` und `GET /api/outbox*` verlangen
+  auch `GET /api/components/{sn}/tests|images|images/{id}|attachments|attachments/{code}|preview`,
+  `GET /api/components/thumbnails`, `GET /api/sync/jobs/active|latest|{id}`,
+  `GET /api/assembly/scan-component`, `GET /api/account/pdb-connection`,
+  `GET /api/test-types`, `GET /api/reminders`, `GET /api/reminder-occurrences`
+  und `GET /api/notifications/channels` `require_user` — rund 20 GET-Routen.
+  Tatsächlich noch ohne Login erreichbar bleiben u. a. `GET /api/components`,
+  `GET /api/components/{sn}`, `GET /api/components/{sn}/stage-suggestion|staged`,
+  `GET /api/dashboard/summary`, `GET /api/stats/*`, `GET /api/tools*`,
+  `GET /api/glue-batches*`, `GET /api/shipments*`, `GET /api/ingest/files*` und
+  `GET /api/outbox/{id}/audit`. Die Rollenmatrix unten bleibt korrekt (jede
+  Rolle erfüllt `require_user`), nur die Aussage „ohne Login lesbar" gilt nur
+  noch für diese engere Liste — ein vollständiger Read-Rollout-Entscheid steht
+  weiter aus (offene Frage, siehe unten).
 
 **Offen:**
 
 - Kein Demo-User im Seed: echtes Login ist erst nach dem First-Run-Setup (oder
   `create_admin`) nutzbar (offline greift der Demo-Modus, kein Login-Zwang).
+- Welche der noch offenen GET-Routen (siehe Korrektur 2026-08-27) ebenfalls
+  hinter `require_user` gehoeren, ist bisher Endpunkt-fuer-Endpunkt gewachsen,
+  nicht einmal entschieden — ein bewusster Read-Rollout-Entscheid (alle,
+  keine, oder nur institutsinterne Daten) steht noch aus.
 - 4-Augen-Prinzip fuer Outbox-Approve und OIDC/CERN-SSO bleiben spaeter (siehe
   Offene Fragen).
 
