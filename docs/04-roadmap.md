@@ -1,8 +1,20 @@
 # Living Roadmap: itkFlow
 
-> Dieses Dokument ist der aktive Ausfuehrungsfahrplan. `docs/02-revamp-plan.md`
-> beschreibt die Produktvision und Architektur; diese Roadmap beschreibt, was
-> als Naechstes gebaut, stabilisiert und abgenommen werden soll.
+> Dieses Dokument ist der aktive Ausfuehrungsfahrplan.
+> [`02-revamp-plan.md`](02-revamp-plan.md) beschreibt die Produktvision und
+> Architektur; diese Roadmap beschreibt, was als Naechstes gebaut, stabilisiert
+> und abgenommen werden soll.
+>
+> - **Besitzt:** den Abschnitt „Aktueller Stand" (das laufende Protokoll jeder
+>   Verhaltensaenderung), die naechsten Arbeitspakete, den Restumfang je
+>   Fachdokument und die Meilensteine Phase 0–6.
+> - **Fuer wen:** jeden Agenten und jede Person vor groesserer Planung oder
+>   Implementierung — und jeden, der wissen will, was heute wirklich existiert.
+> - **Verwandt:** [`00-doc-map.md`](00-doc-map.md) (welches Fachdokument im
+>   selben Change nachgezogen wird), [`02-revamp-plan.md`](02-revamp-plan.md)
+>   (Vision statt Ausfuehrung), [`05-ui-design-reference.md`](05-ui-design-reference.md)
+>   (verbindlich fuer UI-Arbeit), [`superpowers/specs/`](superpowers/specs)
+>   (Zielvertraege einzelner Schnitte), [`README.md`](README.md) (Lesepfade).
 
 ## Agenten-Regel
 
@@ -13,13 +25,66 @@ entweder diese Roadmap aktualisieren oder im Abschluss klar notieren, welcher
 Roadmap-Punkt betroffen ist und warum keine Aktualisierung erfolgt ist.
 
 UI-Arbeit folgt zusaetzlich der verbindlichen Design-Referenz
-`docs/05-ui-design-reference.md` (+ Mockup `docs/itkflow-ui-mockup.html`), damit
-die Umsetzung nicht vom Design-Ziel abdriftet.
+[`05-ui-design-reference.md`](05-ui-design-reference.md) (+ Mockup
+[`itkflow-ui-mockup.html`](itkflow-ui-mockup.html)), damit die Umsetzung nicht
+vom Design-Ziel abdriftet.
 
-## Aktueller Stand (2026-08-26)
+## Aktueller Stand (2026-08-27)
 
+- **Zwei Falschaussagen der Modulseite behoben (2026-08-27, Etappe E1 aus
+  [`superpowers/specs/2026-08-27-modulseite-als-arbeitsblatt.md`](superpowers/specs/2026-08-27-modulseite-als-arbeitsblatt.md)
+  §1; beide gegen den echten TUDO-Spiegel gemessen).**
+  (1) **Zurueckgezogene Messungen zaehlten als gueltig.** Die PDB liefert einen
+  geloeschten Testlauf (`state='deleted'`) weiter aus, unser Spiegel hatte
+  keine Statusspalte — **102 von 14 759 Laeufen**, 13 % aller `GLUE_WEIGHT`
+  und 25 % aller `MODULE_BOW`, auf 45 Komponenten; der vom Owner bemerkte
+  „1,859er-Block" ist zu 14 von 15 genau das. Neu: `TestRunEvidence.run_state`
+  plus die einzige Auslegung in `app.test_run_evidence`
+  (`WITHDRAWN_RUN_STATE`/`is_withdrawn`/`live_runs_only`) — nur der terminale
+  Zustand `deleted` zieht zurueck, `NULL` und das PDB-eigene
+  `requestedToDelete` zaehlen weiter, damit der Fix nie Nachweise loescht,
+  ueber die er nichts weiss. Ausgeschlossen wird ueberall dort, wo ein Lauf
+  als Nachweis gelesen wird: `stage_service.satisfied_test_results` (und damit
+  jedes Stage-Gate), Worksheet-Zeile samt `latest`, Messwert-Statistik. Sind
+  alle Laeufe eines Testtyps zurueckgezogen, liest die Pflichtpruefung wieder
+  `missing`. Verschwinden duerfen sie nicht: `GET /api/components/{sn}/tests`
+  listet sie weiter und liefert `run_state`, die Zeile meldet
+  `withdrawn_count`. Bestandsdaten werden ohne Re-Sync korrigiert — der
+  Retrofit in `ensure_phase0_sqlite_schema` befuellt die Spalte per
+  `json_extract` aus den bereits gespiegelten Payloads (630-MB-Spiegel: 27 s
+  einmalig, danach 0,1 s je Start).
+  (2) **Die Modulseite sah 4,9 % ihrer eigenen Geschichte.** Von 14 759 Laeufen
+  haengen nur 720 an MODULE-Komponenten; der Rest liegt auf Sensoren,
+  Hybriden, Powerboards und — bei R5-Ringmodulen — auf den beiden
+  Halbmodulen. Die Worksheet-Payload traegt jetzt `worksheet.children`: eine
+  Gruppe je direktem Kind (Seriennummer + Typ + lokaler Name), streng getrennt
+  von den eigenen Zeilen und mit demselben Kompaktheitsvertrag (Skalare
+  inline, Arrays/Maps nur als Umfang). Abdeckung der Modulseiten damit
+  **4,7 % → 73,1 %** der lebenden Laeufe (687 eigene + 10 033 Kind-Laeufe);
+  39 der 265 Module hatten vorher gar keine eigene Evidenz. Kosten fest, nicht
+  pro Kind: eine Metadaten-Abfrage ohne Payload-Spalte, eine fuer die Payloads
+  der ausgewaehlten juengsten Laeufe, eine fuer die Attachment-Zaehler — noetig,
+  weil die Kind-Laeufe eines einzigen Moduls im Spiegel bis zu **31 MB** JSON
+  sind. Real gemessen: 57 ms je Modulseite, schwerstes Modul 0,36 s bei 47 kB
+  Antwort. **Bewusst nicht geaendert:** was ein Stage-Gate oeffnet. Ob der
+  bestandene Test eines Kindes die Anforderung des Elternteils erfuellt (zFlow
+  aggregiert ueber Halbmodule), ist eine offene Owner-Entscheidung; die
+  Evidenz wird gezeigt, nicht stillschweigend verrechnet. Offener Nachzug: die
+  aufgeklappte Lauf-Ansicht kennzeichnet einen zurueckgezogenen Lauf noch
+  nicht sichtbar als „withdrawn" (`run_state` liegt am Wire bereit).
+  Verifiziert: 838 Backend-Tests (PYTEST_EXIT=0), ruff clean, Frontend-`tsc`
+  sauber, 121 Vitest-Tests gruen. Details docs/09 und docs/05.
 - Monorepo steht mit `backend/`, `frontend/`, `agent/`, `deploy/`, CI- und
   Docker-Grundstruktur.
+- **Doku ist navigierbar (2026-08-26, reine Doku-Aenderung):** Neue
+  Einstiegsseite [`docs/README.md`](README.md) mit Lesepfaden („neu im
+  Projekt", UI, PDB-Integration, Produktionsablauf, aktueller Stand, Betrieb),
+  einem Index von ADRs/Specs/Recherche samt Aktualitaetsvermerk und dem
+  Doku-Disziplin-Abschnitt. Jedes numerierte Dokument traegt jetzt einen
+  Kopfblock (besitzt / fuer wen / verwandt), und Querverweise zwischen
+  Dokumenten sind relative Links statt Klartextpfade. Ownership bleibt
+  ausschliesslich in [`00-doc-map.md`](00-doc-map.md); Inhalte wurden nicht
+  umgeschrieben.
 - **Modul-Worksheet: Payload-Diaet + Bearbeitungssicherheit (2026-08-26):**
   Review-Nachzug zum Worksheet-Schnitt (Spec §H), vier Befunde behoben. (1)
   Die Preview traegt keine gespiegelten Laeufe mehr: `projected.tests[]`
@@ -87,6 +152,30 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
   und in die Stage-Move-Pruefung einfloss. Ein reiner Datenkorrektheits-Fix,
   keine Kosmetik — die Testsuite laeuft auf SQLite und kann eine Regression
   hier nicht auffangen; ein Postgres-Job in CI ist der offene Nachzug.
+- **Sync: schneller und ausfallrobust (2026-08-26):** Der Sweep wurde mit
+  fortschreitender Laufzeit unbrauchbar langsam und wirkte bei Verbindungs-
+  abbruechen eingefroren. Vier Ursachen, alle behoben. (1) Jeder PDB-Zugriff
+  lief strikt seriell (~1,3 s/Request; real 29 min fuer 262 Module) — die
+  Evidence-Fetches laufen jetzt begrenzt parallel
+  (`ITKFLOW_SYNC_FETCH_CONCURRENCY`, Default 4, `1` = altes Verhalten), mit
+  **eigenem itkdb-Client je Worker-Thread** (itkdb-Clients sind
+  `requests.Session`-Subklassen und nicht threadsicher); Ergebnisse werden in
+  Submit-Reihenfolge konsumiert, alle DB-Writes bleiben auf dem Job-Thread,
+  die Commit-Granularitaet pro Komponente bleibt erhalten. (2) Der „Freeze":
+  bei einem Ausfall durchlief in der Attachment-Phase **jede** verbleibende
+  Datei die volle Retry-Leiter (~3 min/Datei) — ein neuer Circuit-Breaker
+  (`ATTACHMENT_OUTAGE_BREAKER_THRESHOLD = 5` aufeinanderfolgende *transiente*
+  Fehlschlaege) laesst den Job stattdessen ehrlich transient scheitern, sodass
+  der vorhandene Ein-Schuss-Auto-Retry greift; permanente Einzelfehler (404,
+  HTML-Seite, zu gross) bleiben wie bisher Best-Effort pro Datei. (3) Ein
+  einziger Worker-Thread bediente Komponenten- **und** Evidence-Jobs: ein
+  langer Sweep blockierte jeden Komponenten-Sync, dessen wartende Zeile dann
+  nach 3 min faelschlich als verwaist geschlossen wurde — jetzt ein Worker je
+  Job-Art plus Heartbeat-Keeper fuer wartende `queued`-Jobs. (4) Die doppelte,
+  speicherfressende Attachment-Planung (gesamte Evidence-Tabelle inkl.
+  ~10-KB-Payloads in einer Identity-Map) ist durch **eine** Planung in
+  kurzlebigen Sessions ersetzt. Attachment-Downloads bleiben bewusst seriell
+  (Begruendung in docs/09). Details docs/09.
 - **Modul-Worksheet als Primaeransicht der Detailseite (2026-08-26):** Die
   Detailansicht rendert nicht mehr jeden Lauf voll (Kurven + komplettes
   Wertegitter) — bei >100 Laeufen eine unlesbare, ueberlappende Zahlenwand.
@@ -342,7 +431,7 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 
   Kein M-Punkt hebt `dummy_only`, Outbox/Audit oder persoenliche
   Credential-Bindung auf. Zielvertrag und Abnahmekriterien stehen in
-  `docs/superpowers/specs/2026-08-25-staged-first-module-page-design.md`.
+  [`superpowers/specs/2026-08-25-staged-first-module-page-design.md`](superpowers/specs/2026-08-25-staged-first-module-page-design.md).
 - **Admin Settings fuer operative Institutsprofile (2026-08-26):** Ein
   strukturierter, admin-only Settings-Screen verwaltet Stammdaten sowie
   Mattermost-/Webhook-Kanaele, Shipment-Empfangscheckliste,
@@ -598,17 +687,17 @@ die Umsetzung nicht vom Design-Ziel abdriftet.
 
 Details im jeweiligen Dokument:
 
-- **Nutzer, Rollen & Audit-Zuordnung** — `docs/06-users-roles-audit.md`.
+- **Nutzer, Rollen & Audit-Zuordnung** — [`06-users-roles-audit.md`](06-users-roles-audit.md).
   Lokale Accounts, Rollen, Attribution, Frontend, CSRF und persoenliche
   PDB-Verbindungen sind umgesetzt. Offen bleiben optionales OIDC/CERN-SSO,
   Demo-User-Policy und konfigurierbares 4-Augen-Prinzip.
 - **Jig-/Tool-Registry + typ-gefilterter Quick-Select** —
-  `docs/07-jig-tool-quickselect.md`. Registry, auditiertes CRUD/Statuspflege,
+  [`07-jig-tool-quickselect.md`](07-jig-tool-quickselect.md). Registry, auditiertes CRUD/Statuspflege,
   PDB-`TOOLS`-Mirror, Glue-Batch-Auswahl und direkte Einbindung in den
   scanner-first Assembly-Wizard sind umgesetzt (2026-08-26). Verbleibend ist
   nur die fachliche Bestaetigung exakter PDB-Property-Codes je Institut/Typ;
   sie werden danach per `assembly_property_keys` konfiguriert.
-- **Logistik, Glue und Reminder** — `docs/11-logistics-operations.md`.
+- **Logistik, Glue und Reminder** — [`11-logistics-operations.md`](11-logistics-operations.md).
   Backend-Modelle, API, Audit, Shipment-Read-Sync, Worker-Notifier und die
   drei Produktscreens (Glue Batches, Shipments, Reminders; 2026-08-26) stehen.
   Die profilgesteuerte Reception-Test-Verknuepfung samt Deep-Link, Done-Gate
@@ -618,7 +707,7 @@ Details im jeweiligen Dokument:
   Notification-Adapter/Eskalationen sowie das Phase-6-Row-/Query-Scoping.
   Shipment-Erstellung und GLUE-Registrierung in der PDB bleiben ausserhalb des
   aktuellen sicheren Schreibumfangs.
-- **Remote-Zugriff / Tunneling** — `docs/08-remote-access.md`. Zugriff von
+- **Remote-Zugriff / Tunneling** — [`08-remote-access.md`](08-remote-access.md). Zugriff von
   zuhause; Empfehlung Tailscale/WireGuard (spaeter Cloudflare Tunnel).
   **Abhaengigkeit:** erst nach dem Auth-Fundament scharf schalten.
 
@@ -765,7 +854,7 @@ im Assembly-Wizard samt Dry-run/Outbox/Worker-Revalidierung stehen ebenfalls.
 Die lokale Operations-Health-Ansicht samt Heartbeats und Deep-Links steht.
 Offen sind weitere Notification-Adapter/Eskalationen und das vollstaendige
 Mandanten-Scoping. Details in
-`docs/11-logistics-operations.md`.
+[`11-logistics-operations.md`](11-logistics-operations.md).
 
 **Done-Kriterien:**
 
@@ -843,5 +932,5 @@ v1.0 ist installierbar, dokumentiert und betreibbar.
 - Abgeschlossene Punkte werden nicht geloescht, sondern kurz als erledigt oder
   ersetzt markiert, sobald ein entsprechender Arbeitsabschnitt committet ist.
 - Neue Ideen gehoeren zuerst in den passenden Meilenstein oder in
-  `docs/02-revamp-plan.md`, falls sie die Produktvision statt die Ausfuehrung
-  betreffen.
+  [`02-revamp-plan.md`](02-revamp-plan.md), falls sie die Produktvision statt
+  die Ausfuehrung betreffen.

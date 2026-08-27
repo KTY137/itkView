@@ -204,7 +204,15 @@ def _upsert_row(
         )
         session.add(existing)
     existing.filename = filename
-    existing.content_type = content_type
+    # A PDB listing usually declares no content type at all. The real one is
+    # sniffed from the response when the file is downloaded, and `is_image`
+    # derives from it — so letting a later listing overwrite a type the
+    # download already established turns every mirrored image invisible. That
+    # is not hypothetical: a whole-site re-sweep once reused 3734 files and
+    # blanked 430 of 432 images this way, because the reuse path returns
+    # before the line that writes the sniffed type back.
+    if existing.downloaded_at is None or content_type is not None:
+        existing.content_type = content_type
     existing.title = title
     existing.test_type = test_type
     existing.test_run_ref = test_run_ref
@@ -688,6 +696,42 @@ def _beat(heartbeat: Callable[[], None] | None) -> None:
         heartbeat()
 
 
+# Consecutive transient-failure budget before a sweep concludes that the
+# network (not the individual files) is down. Each transient file failure has
+# already burned its complete retry ladder (attempts x read timeout plus
+# backoff, minutes per file), so five in a row is a strong outage signal —
+# while hundreds of pending files would otherwise crawl for hours at zero
+# progress (docs/09).
+ATTACHMENT_OUTAGE_BREAKER_THRESHOLD = 5
+
+
+class OutageCircuitBreaker:
+    """Detect a network outage from consecutive transient file failures.
+
+    Per-file *permanent* answers (a 404, an HTML page where a binary was
+    requested, an oversized body) are real verdicts about that file: they stay
+    best effort, reset the streak and never trip the breaker. Only
+    network-shaped failures — each of which already exhausted its own retry
+    ladder — count toward the threshold.
+    """
+
+    def __init__(self, threshold: int = ATTACHMENT_OUTAGE_BREAKER_THRESHOLD) -> None:
+        self.threshold = max(1, int(threshold))
+        self.consecutive_transient_failures = 0
+        self.tripped = False
+
+    def record_success(self) -> None:
+        self.consecutive_transient_failures = 0
+
+    def record_failure(self, *, transient: bool) -> None:
+        if not transient:
+            self.consecutive_transient_failures = 0
+            return
+        self.consecutive_transient_failures += 1
+        if self.consecutive_transient_failures >= self.threshold:
+            self.tripped = True
+
+
 @dataclass
 class _FetchOutcome:
     """One descriptor's result, carried from the fetch phase to the commit
@@ -699,6 +743,10 @@ class _FetchOutcome:
     relative_path: str | None = None
     temp_path: Path | None = None
     size: int = 0
+    # Whether a failed fetch died network-shaped (after its full retry
+    # ladder) rather than receiving a permanent per-file answer. Feeds the
+    # outage circuit breaker; meaningless for non-failed outcomes.
+    transient: bool = False
 
 
 def _plan_resolved(
@@ -733,6 +781,7 @@ def _fetch_all(
     max_bytes: int,
     max_attempts: int,
     heartbeat: Callable[[], None] | None,
+    breaker: OutageCircuitBreaker | None = None,
 ) -> list[_FetchOutcome]:
     """Phase 2 - fetch: network only, no ``Session`` in reach at all.
 
@@ -744,33 +793,58 @@ def _fetch_all(
     file beside their final target as soon as they arrive, so a whole sweep's
     worth of images never accumulates in memory waiting for the commit phase
     either (docs/09, Attachment-Phase).
+
+    ``breaker`` (if given) is fed every file outcome; once it trips, the
+    remaining descriptors are left unattempted for this call so the caller
+    can fail its whole sweep transiently instead of burning one full retry
+    ladder per file through an outage. Everything fetched so far still
+    commits.
     """
     outcomes: list[_FetchOutcome] = []
+
+    def note(outcome: _FetchOutcome) -> None:
+        outcomes.append(outcome)
+        if breaker is None:
+            return
+        if outcome.outcome == "failed":
+            breaker.record_failure(transient=outcome.transient)
+        else:
+            breaker.record_success()
+
     client: Any = None
     # Set once client construction has exhausted its own retry budget: every
     # remaining PDB descriptor would fail identically, so fail them fast this
     # sweep instead of hammering the gateway once per file. None of them is
-    # recorded as stored, so the next sweep retries them all.
+    # recorded as stored, so the next sweep retries them all. Whether that
+    # unavailability was network-shaped is remembered so the fast-failed
+    # files still count toward the outage breaker.
     client_unavailable = False
+    client_unavailable_transient = False
 
     for descriptor in descriptors:
+        if breaker is not None and breaker.tripped:
+            break
+
         key = (descriptor["source"], descriptor["code"])
 
         # Resolved either before this call (a previous sweep) or by an
         # earlier descriptor in this same call (two test runs can list the
         # same attachment code) — `force` re-fetches either way.
         if not force and resolved.get(key):
-            outcomes.append(_FetchOutcome(descriptor, "reused"))
+            note(_FetchOutcome(descriptor, "reused"))
             _beat(heartbeat)
             continue
 
         needs_pdb_client = descriptor["source"] != "share_link"
         if needs_pdb_client and client is None and client_unavailable:
-            outcomes.append(_FetchOutcome(descriptor, "failed"))
+            note(
+                _FetchOutcome(descriptor, "failed", transient=client_unavailable_transient)
+            )
             _beat(heartbeat)
             continue
 
         fetched: tuple[bytes, str | None] | None = None
+        transient_failure = False
         attempt = 0
         while True:
             attempt += 1
@@ -788,14 +862,16 @@ def _fetch_all(
                 break
             except _TransientDownloadFailure:
                 if attempt >= max_attempts:
+                    transient_failure = True
                     break
                 _beat(heartbeat)
                 sleep(DOWNLOAD_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
         if needs_pdb_client and client is None:
             client_unavailable = True
+            client_unavailable_transient = transient_failure
 
         if fetched is None:
-            outcomes.append(_FetchOutcome(descriptor, "failed"))
+            note(_FetchOutcome(descriptor, "failed", transient=transient_failure))
             _beat(heartbeat)
             continue
         data, reported_type = fetched
@@ -810,12 +886,13 @@ def _fetch_all(
         try:
             temp_path = _write_temp_bytes(root, relative_path, data)
         except (OSError, ValueError):
-            outcomes.append(_FetchOutcome(descriptor, "failed"))
+            # A local disk problem, not the network: never breaker-relevant.
+            note(_FetchOutcome(descriptor, "failed"))
             _beat(heartbeat)
             continue
 
         resolved[key] = True
-        outcomes.append(
+        note(
             _FetchOutcome(
                 descriptor,
                 "downloaded",
@@ -891,6 +968,8 @@ def download_attachments(
     *,
     force: bool = False,
     heartbeat: Callable[[], None] | None = None,
+    descriptors: list[dict[str, Any]] | None = None,
+    breaker: OutageCircuitBreaker | None = None,
 ) -> AttachmentSyncStats:
     """Mirror this component's attachment bytes to the local folder.
 
@@ -910,8 +989,15 @@ def download_attachments(
     permanent answers fail once. ``heartbeat`` (if given) is invoked after
     every processed file and before every retry backoff, so a durable job can
     prove it is alive while a slow or flaky download is in progress.
+
+    ``descriptors`` lets a sweep hand in the pending plan it already computed
+    (one ``pending_attachments`` read per component instead of two); left as
+    ``None``, the plan is read here. ``breaker`` (if given) turns several
+    consecutive transient file failures into a stopped phase — see
+    ``OutageCircuitBreaker`` — while everything fetched so far still commits.
     """
-    descriptors = pending_attachments(session, component_sn)
+    if descriptors is None:
+        descriptors = pending_attachments(session, component_sn)
     if not descriptors:
         return AttachmentSyncStats()
 
@@ -951,6 +1037,7 @@ def download_attachments(
         max_bytes=max_bytes,
         max_attempts=max_attempts,
         heartbeat=heartbeat,
+        breaker=breaker,
     )
 
     # Phase 3 - commit (short, network-free transaction).

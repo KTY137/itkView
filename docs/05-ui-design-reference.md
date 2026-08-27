@@ -6,6 +6,21 @@
 >
 > Mockup (eigenstaendig, offline lauffaehig, im Browser oeffnen):
 > [`docs/itkflow-ui-mockup.html`](itkflow-ui-mockup.html)
+>
+> - **Besitzt:** Design-Sprache und Tokens, alle Screens und Interaktionsmuster,
+>   die Darstellung von Pflicht-Tests, Staged-Preview und Modul-Worksheet sowie
+>   die globalen UI-Elemente.
+> - **Fuer wen:** alle, die UI bauen oder aendern — vor der ersten Zeile Code.
+> - **Verwandt:** [`adr/006-staged-first-ui-auto-mirror.md`](adr/006-staged-first-ui-auto-mirror.md)
+>   (warum die Detailseite der Arbeitsort ist),
+>   [`superpowers/specs/2026-08-25-staged-first-module-page-design.md`](superpowers/specs/2026-08-25-staged-first-module-page-design.md)
+>   (Zielvertrag, §H = Worksheet), [`10-itk-domain-reference.md`](10-itk-domain-reference.md)
+>   (Stage-Modell und Pflichttests hinter den Anzeigen),
+>   [`07-jig-tool-quickselect.md`](07-jig-tool-quickselect.md) (Tool-Slots),
+>   [`11-logistics-operations.md`](11-logistics-operations.md) (Glue-, Shipment-,
+>   Reminder- und Ops-Screens),
+>   [`12-attachments-and-images.md`](12-attachments-and-images.md) (Bilder und
+>   Galerie), [`README.md`](README.md) (Lesepfade).
 
 ## Warum diese Datei existiert
 
@@ -47,7 +62,10 @@ im Frontend-i18n-Modul liegt.
    Karten = Module mit lokalem Namen, Typ-Badge, SN und Status-Chips. Karte →
    Detailseite. „Geist"-Karte zum Anlegen (Sensor scannen).
 2. **Komponenten-Detail:** Stammdaten (Key/Value, Mono), Familienbaum
-   (Modul → Sensor/Hybrid/Powerboard), Pflicht-Tests je Stage, gespiegelte
+   (Modul → Sensor/Hybrid/Powerboard), Pflicht-Tests je Stage (Stage-Modell und
+   Pflichttest-Vokabular gehoeren [`10-itk-domain-reference.md`](10-itk-domain-reference.md)
+   §7 und [`../backend/app/domain/stages.py`](../backend/app/domain/stages.py)),
+   gespiegelte
    Testlaeufe/Attachments, Stage-Move-Vorschlag und die Karte `Add test result`.
    Offene Aenderungen werden als serverberechnete Ghost-Projektion gezeigt;
    die Detailseite berechnet keine Stage-Regeln selbst. Bildgalerie,
@@ -130,7 +148,8 @@ im Frontend-i18n-Modul liegt.
    und meldet den Grund direkt am Scan-Feld. Der Review-Schritt zeigt die
    vom SERVER aufgeloesten Tools je Slot (`AssemblyPreviewOut.tools`),
    nie den lokalen Auswahlzustand. Ohne Profil-Setting bleibt alles beim
-   bisherigen Ein-Tool-Verhalten. Details docs/07.
+   bisherigen Ein-Tool-Verhalten. Details
+   [`07-jig-tool-quickselect.md`](07-jig-tool-quickselect.md).
 9. **Operations Health:** Admin-only Cockpit aus ausschliesslich lokal
    gespeicherter Telemetrie. Textuell benannte Heartbeat-Zustaende fuer
    Outbox-Worker und Reminder-Scheduler stehen neben aktiven/letzten Sync-Jobs,
@@ -206,8 +225,8 @@ gespiegeltes Schema, oeffnet sich das Formular trotzdem mit leerer Auswahl.
 **Modul-Worksheet als Primaeransicht (2026-08-26):** Die Detailseite rendert
 Testlaeufe nicht mehr einzeln und voll ausgeklappt — bei >100 gespiegelten
 Laeufen war das eine unlesbare Wand aus ueberlappenden Zahlen. Primaeransicht
-ist jetzt das Spreadsheet-Modell (Spec `docs/superpowers/specs/`
-`2026-08-25-staged-first-module-page-design.md` §H): pro Stage-Gruppe **eine**
+ist jetzt das Spreadsheet-Modell ([Spec §H](superpowers/specs/2026-08-25-staged-first-module-page-design.md)):
+pro Stage-Gruppe **eine**
 kompakte Tabelle, Zeile = Testtyp, Spalten `Test | Values | Status | Date | ✎`.
 Die Preview traegt dafuer keine gespiegelten Laeufe mehr mit:
 `projected.tests[]` heisst jetzt `projected.ghost_tests[]` und enthaelt
@@ -249,7 +268,41 @@ ersten Oeffnen von „All mirrored runs".
   eingeklapptes, lazy geladenes `All mirrored runs` unter dem Worksheet
   gewandert; die Datei-Drop-Karte bleibt unveraendert.
 
+**Zurueckgezogene Laeufe und Kind-Evidenz (2026-08-27):** Zwei datengetriebene
+Korrekturen an genau diesem Worksheet
+([Plan §1](superpowers/specs/2026-08-27-modulseite-als-arbeitsblatt.md)).
+
+- **Zurueckgezogene Messungen zaehlen nicht mehr.** Die PDB liefert einen
+  geloeschten Testlauf (`state='deleted'`) weiter aus; im Spiegel sind das 102
+  von 14 759 Laeufen. Sie sind jetzt aus `latest`, `run_count` und dem
+  Pflichttest-Status ausgeschlossen; die Zeile meldet sie stattdessen als
+  `withdrawn_count`. Sind **alle** Laeufe eines Testtyps zurueckgezogen, steht
+  die Zeile wieder auf `missing`. Sichtbar bleiben sie: `GET
+  /api/components/{sn}/tests` listet sie samt `run_state` weiter (Vertrag in
+  docs/09). **Offen:** die Lauf-Ansicht kennzeichnet einen solchen Lauf noch
+  nicht als „withdrawn" — bis dahin kann `run_count` der Zeile kleiner sein
+  als die Zahl der aufgeklappten Laeufe.
+- **Neuer Block `Evidence on child components`** unter den Stage-Gruppen, eine
+  read-only Tabelle je direktem Kind (Kopf: dekodierter Typ, Seriennummer,
+  lokaler Name; Spalten `Test | Values | Result | Date`). Grund: nur 720 von
+  14 759 gespiegelten Laeufen haengen an MODULE-Komponenten, der Rest an
+  Sensoren, Hybriden, Powerboards — und bei R5-Ringmodulen an den beiden
+  Halbmodulen (docs/10 §7). Die `Values`-Zelle folgt exakt demselben
+  Kompaktheitsvertrag wie oben.
+  Bewusst **nicht** enthalten: eine `Status`-Spalte und der Edit-Stift. Ein
+  Pflichttest-Status ist eine Aussage ueber *diese* Komponente, und ob der
+  bestandene Test eines Kindes die Anforderung des Elternteils erfuellt, ist
+  eine offene Fachentscheidung (zFlow aggregiert ueber Halbmodule) — die
+  Anzeige beantwortet sie nicht. Erfassen gehoert auf die Seite des Kindes,
+  wo die Seriennummer im Payload stimmt. Ein Kind ohne gespiegelte Laeufe
+  bekommt trotzdem seine Gruppe („wir haben nachgesehen" ist etwas anderes als
+  „wir haben nicht nachgesehen").
+
 ### Shipment-Empfang und Reception-Tests
+
+Vertrag, Profilschluessel und Gate-Semantik dahinter:
+[`11-logistics-operations.md`](11-logistics-operations.md). Dieser Abschnitt
+beschreibt nur die Darstellung.
 
 Die Shipment-Tabelle zeigt neben dem Empfangsstatus eine eigene Spalte
 `Reception tests` mit textuell benannten Chips `Missing`, `Pending`, `Passed`
@@ -277,8 +330,8 @@ Server prueft den Status erneut.
 ### Ehrlichkeit im Staged-Fenster
 
 `Push to PDB` kettet nur die bestehende Outbox-Statusmaschine bis
-`submitted`; der Worker, die persoenliche Credential-Bindung, Audit und ADR
-003 bleiben die einzige Schreibgrenze. Bei `submittable=false` fehlt der
+`submitted`; der Worker, die persoenliche Credential-Bindung, Audit und
+[ADR 003](adr/003-pdb-dummy-write-scope.md) bleiben die einzige Schreibgrenze. Bei `submittable=false` fehlt der
 Push-Button. Stattdessen erklaert der Screen sichtbar: `Production writes are
 not enabled — stays staged (dummy-only scope)`. Farbe allein reicht fuer Ghost,
 Pending, Fehler oder Schreibschutz nie als Unterscheidungsmerkmal.
@@ -324,7 +377,8 @@ gar keiner Steuerung.
   nicht verfuegbar erkennbar; bei explizit aktivierten Produktions-Reads lautet
   die Kennzeichnung entsprechend `Production reads` und verschweigt nie den
   separaten DUMMY-Schreib-Scope. Die historische, nicht mehr existente
-  `itkpd-test`-Instanz ist kein Produktlabel mehr.
+  `itkpd-test`-Instanz ist kein Produktlabel mehr. Was welche Instanz technisch
+  darf, steht in [`09-pdb-production-strategy.md`](09-pdb-production-strategy.md).
 - **Assembly als eigener Wizard-Screen:** Der laengere Scan-/Resource-/Review-
   Flow bleibt als eigener Arbeitsbereich stabil und darf nicht durch ein
   versehentlich geschlossenes Modal verloren gehen. Kurze Test-Erfassungen

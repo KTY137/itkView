@@ -1249,3 +1249,182 @@ def test_a_stale_part_file_from_a_crashed_run_is_overwritten(
     row = session.scalar(select(TestRunAttachment))
     assert resolve_path(settings, row).read_bytes() == JPEG
     assert list(root.rglob("*.part")) == []
+
+
+# --- outage circuit breaker --------------------------------------------------
+#
+# During a full outage every remaining file still burns its complete
+# transient-retry ladder (attempts x read timeout + backoff, minutes per
+# file); with hundreds of pending files a sweep crawls for hours at zero
+# progress while looking alive. Several *consecutive* transient failures are
+# therefore read as "the network is down", not "these files are broken": the
+# caller stops the phase and fails transiently so the automatic retry can
+# resume once the outage is over. Permanent per-file answers stay best effort.
+
+
+def test_breaker_trips_after_consecutive_transient_failures():
+    breaker = attachment_store.OutageCircuitBreaker(threshold=3)
+    breaker.record_failure(transient=True)
+    breaker.record_failure(transient=True)
+    assert breaker.tripped is False
+    breaker.record_failure(transient=True)
+    assert breaker.tripped is True
+
+
+def test_permanent_failures_and_successes_reset_the_breaker():
+    breaker = attachment_store.OutageCircuitBreaker(threshold=2)
+    breaker.record_failure(transient=True)
+    breaker.record_failure(transient=False)  # a 404/HTML page is a real answer
+    breaker.record_failure(transient=True)
+    breaker.record_success()
+    breaker.record_failure(transient=True)
+    assert breaker.tripped is False
+
+
+def test_the_default_breaker_threshold_is_a_small_named_constant():
+    assert attachment_store.ATTACHMENT_OUTAGE_BREAKER_THRESHOLD == 5
+    assert (
+        attachment_store.OutageCircuitBreaker().threshold
+        == attachment_store.ATTACHMENT_OUTAGE_BREAKER_THRESHOLD
+    )
+
+
+def _add_many_attachments(session, count: int) -> None:
+    session.add(
+        TestRunEvidence(
+            component_sn="20USEM20000050",
+            test_type="VISUAL_INSPECTION",
+            passed=True,
+            source="pdb",
+            external_ref="RUN-9",
+            payload={
+                "attachments": [
+                    {
+                        "code": f"breaker-code-{index}",
+                        "filename": f"photo-{index}.jpg",
+                        "content_type": "image/jpeg",
+                        "title": None,
+                    }
+                    for index in range(count)
+                ]
+            },
+        )
+    )
+    session.commit()
+
+
+def test_a_tripped_breaker_stops_fetching_remaining_files(session, settings, no_sleep):
+    _add_many_attachments(session, 4)
+    client = _FlakyClient(failures=999)  # network-shaped forever
+    breaker = attachment_store.OutageCircuitBreaker(threshold=2)
+
+    stats = download_attachments(
+        session, _FakeGateway(client), settings, "20USEM20000050", breaker=breaker
+    )
+    session.commit()
+
+    assert breaker.tripped is True
+    # Only the files that tripped the breaker were attempted; the rest are
+    # left for the retried job instead of burning their own ladders too.
+    assert stats.failed == 2 and stats.total == 2
+    # Each attempted file exhausted its full ladder first (3 attempts x 2 routes).
+    assert client.calls == 12
+
+
+def test_permanent_file_failures_never_trip_the_breaker(session, settings, no_sleep):
+    _add_many_attachments(session, 4)
+    client = _FlakyClient(failures=999, make_error=lambda: _HttpStatusError(404))
+    breaker = attachment_store.OutageCircuitBreaker(threshold=2)
+
+    stats = download_attachments(
+        session, _FakeGateway(client), settings, "20USEM20000050", breaker=breaker
+    )
+    session.commit()
+
+    assert breaker.tripped is False
+    assert stats.failed == 4 and stats.total == 4
+
+
+def test_transient_client_unavailability_counts_toward_the_breaker(
+    session, settings, no_sleep
+):
+    """When the authenticated client cannot even be built during an outage,
+    the fast-failed remaining files are outage-shaped too: they must be able
+    to trip the breaker instead of counting as quiet per-file verdicts."""
+    _add_many_attachments(session, 4)
+
+    class _OutageGateway:
+        is_configured = True
+
+        def client(self):
+            raise TimeoutError("handshake operation timed out")
+
+    breaker = attachment_store.OutageCircuitBreaker(threshold=3)
+    stats = download_attachments(
+        session, _OutageGateway(), settings, "20USEM20000050", breaker=breaker
+    )
+    session.commit()
+
+    assert breaker.tripped is True
+    assert stats.failed == 3 and stats.total == 3
+
+
+def test_download_accepts_a_precomputed_descriptor_plan(session, settings, evidence):
+    """The sweep computes pending descriptors once and hands them in, instead
+    of loading every evidence payload a second time inside the download."""
+    descriptors = pending_attachments(session, "20USEM20000041")
+    stats = download_attachments(
+        session, _FakeGateway(), settings, "20USEM20000041", descriptors=descriptors
+    )
+    session.commit()
+
+    assert stats.downloaded == 1
+    row = session.scalar(select(TestRunAttachment))
+    assert resolve_path(settings, row) is not None
+
+
+def test_reuse_keeps_the_content_type_the_download_established(session, settings):
+    """A PDB listing usually declares no content type; the real one is sniffed
+    from the response. A later sweep that finds the file already on disk must
+    not blank it — `is_image` derives from it, so a whole-site re-sweep once
+    turned 430 of 432 mirrored images invisible while every byte on disk
+    stayed intact. Only the second sweep proves it; the first always looked
+    right.
+    """
+    session.add(
+        TestRunEvidence(
+            component_sn="20USEM20000041",
+            test_type="VISUAL_INSPECTION",
+            passed=True,
+            source="pdb",
+            external_ref="RUN-1",
+            payload={
+                "attachments": [
+                    # As the PDB really lists it: a name, no declared type.
+                    {"code": "abc123", "filename": "Untitled", "content_type": None}
+                ]
+            },
+        )
+    )
+    session.commit()
+
+    class _TypedClient(_FakeClient):
+        def get(self, action, json=None):
+            result = super().get(action, json)
+            result.content_type = "image/jpeg"
+            return result
+
+    gateway = _FakeGateway(_TypedClient())
+    first = download_attachments(session, gateway, settings, "20USEM20000041")
+    session.commit()
+    row = session.scalar(select(TestRunAttachment))
+    assert first.downloaded == 1
+    assert row.content_type == "image/jpeg" and row.is_image
+
+    second = download_attachments(session, gateway, settings, "20USEM20000041")
+    session.commit()
+    session.refresh(row)
+
+    assert second.reused == 1 and second.downloaded == 0
+    assert row.content_type == "image/jpeg", "the reuse path blanked the sniffed type"
+    assert row.is_image, "a mirrored image must stay visible after a re-sweep"
