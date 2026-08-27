@@ -724,6 +724,10 @@ const en = {
     verdictNoTarget: "No target",
     verdictMissingInputs: "Missing readings",
     verdictNoRun: "Not measured",
+    // A finite, complete set of readings that still cannot be right — a
+    // negative glue weight. Saying "too little" here would blame the
+    // operator for the data-entry error instead of naming it.
+    verdictImplausible: "Readings contradict each other",
     verdictUnknown: "No verdict",
     verdictUnknownReason: (reason: string) => `No verdict (${reason})`,
     derivedFigure: (measured: string, target: string | null, tolerance: string | null) => {

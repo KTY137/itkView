@@ -246,6 +246,22 @@ verdict therefore come from the institute profile, and itkFlow computes them
 supplies its inputs from the database. The formula exists once. No client ever
 recomputes it.
 
+**A result that cannot exist is not a verdict (2026-08-27).** When every
+reading is present and finite but the weight they produce is **negative**, the
+step reports `verdict: unknown` with reason `implausible_result` instead of a
+judgement. Glue never weighs less than nothing, so a negative value means the
+readings contradict each other — in practice two fields entered into each
+other's place. Calling that `too_little` would blame the operator for
+under-applying glue when the real fault is the data entry. This is physics, not
+a tunable threshold: only the lower bound is enforced in code, because any
+upper bound would be a judgement call and belongs in the profile.
+
+Measured on the TUDO mirror when the profile was first seeded: 48 of 50 live
+derived weights are plausible; two are not (−8696 mg on `20USE5L0000031`,
+−7771 mg on `20USE5L0000767`), and both had previously read `too_little` with
+full confidence. The spreadsheet this replaces makes the same mistake — its own
+`−9010` and `−9886` sit in the sheet looking like measurements.
+
 **Units.** The PDB stores every `GW_` result in **grams**; targets, tolerances
 and derived weights are stated in **milligrams**. The conversion happens only at
 the two edges of `glue_service`: derived values leave the API in milligrams, and

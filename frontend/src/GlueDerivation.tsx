@@ -115,6 +115,8 @@ function verdictLabel(step: WorksheetDerivedStep): string {
       return t.worksheet.verdictNoTarget;
     case "missing_inputs":
       return t.worksheet.verdictMissingInputs;
+    case "implausible_result":
+      return t.worksheet.verdictImplausible;
     case "no_run":
       return t.worksheet.verdictNoRun;
     case null:

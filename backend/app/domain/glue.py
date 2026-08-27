@@ -43,6 +43,14 @@ class GlueUnknownReason(str, Enum):
     NO_TARGET = "no_target"  # the profile has no target for this type/step
     MISSING_INPUTS = "missing_inputs"  # a scale reading the formula needs is absent
     NO_RUN = "no_run"  # nothing has been measured for this test type yet
+    # The readings are all present and finite, but the weight they produce
+    # cannot exist: glue never weighs less than nothing. Two live runs in
+    # the TUDO mirror do this (-8696 mg and -7771 mg) because the module
+    # weight and the glue weight were entered into each other's field. The
+    # arithmetic is faithful and the answer is still nonsense, so it must
+    # not be dressed up as a verdict: "too little" would tell an operator
+    # they under-applied glue when the truth is that the readings are wrong.
+    IMPLAUSIBLE = "implausible_result"  # the readings cannot both be right
 
 
 def parse_decimal(value: str) -> float:
@@ -425,6 +433,11 @@ def evaluate_glue_step(
         verdict, reason = GlueVerdict.UNKNOWN, GlueUnknownReason.MISSING_INPUTS
     elif target is None:
         verdict, reason = GlueVerdict.UNKNOWN, GlueUnknownReason.NO_TARGET
+    elif raw_measured_mg < 0:
+        # Physics, not a tunable threshold: a negative glue weight means the
+        # readings contradict each other, most often two fields swapped. Any
+        # upper bound would be a judgement call and belongs in the profile.
+        verdict, reason = GlueVerdict.UNKNOWN, GlueUnknownReason.IMPLAUSIBLE
     else:
         # Google Sheets compares the formula's unformatted value. Judge that
         # value too; rounding first turns 114.96 mg into the inclusive 115.0

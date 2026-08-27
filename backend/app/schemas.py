@@ -299,10 +299,10 @@ class DerivedStepOut(BaseModel):
 
     Milligrams throughout: the PDB's grams are converted once, server-side, in
     ``app.glue_service``. ``verdict="unknown"`` always carries a ``reason`` —
-    no target configured, an input missing, or nothing measured yet. The
-    alternative, a blank cell that looks like a result, is exactly how 8 of 13
-    powerboard verdicts on the sheet this replaces became arithmetic on empty
-    inputs.
+    no target configured, an input missing, nothing measured yet, or readings
+    that imply a physically impossible negative glue weight. The alternative,
+    a blank cell that looks like a result, is exactly how 8 of 13 powerboard
+    verdicts on the sheet this replaces became arithmetic on empty inputs.
     """
 
     key: str
@@ -311,7 +311,9 @@ class DerivedStepOut(BaseModel):
     target_mg: float | None
     tolerance_mg: float | None
     verdict: Literal["ok", "too_little", "too_much", "unknown"]
-    reason: Literal["no_target", "missing_inputs", "no_run"] | None
+    reason: Literal[
+        "no_target", "missing_inputs", "no_run", "implausible_result"
+    ] | None
     result_code: str | None
     inputs: list[DerivedInputOut]
 
