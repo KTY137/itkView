@@ -36,23 +36,29 @@ import type {
   WorksheetArraySummary,
   WorksheetChildGroup,
   WorksheetDerived,
-  WorksheetDerivedStep,
   WorksheetGroup,
   WorksheetLatestRun,
   WorksheetRow,
   WorksheetStagedRef,
 } from "./api";
+import { useDataEntryProfile } from "./dataEntryProfile";
+import { planFieldLayout } from "./fieldLayout";
+import { DerivedDetail, DerivedVerdicts } from "./GlueDerivation";
+import type { DerivedSource } from "./GlueDerivation";
 import ImageLightbox from "./ImageLightbox";
 import { t } from "./i18n";
 import { manualEntryPayload, useTestStaging } from "./testStaging";
-import TestForm, { requiredCodes } from "./TestForm";
+import TestForm, { measurementCollection, requiredCodes } from "./TestForm";
 import type { TestFormSubmitPayload } from "./TestForm";
+import { ToolFieldSection } from "./ToolFieldSelect";
 import { formatScalar, RunAttachments, RunConditions, RunCurves, RunScalars } from "./TestResults";
 import { describeComponent, outboxStatusChipClass, stageChipClass, stageLabel } from "./ui";
 
 export type ModuleWorksheetProps = {
   componentSn: string;
   componentType: string;
+  /** Exact PDB type code (for example R5M0_HALFMODULE), used for formula/tool fits. */
+  componentTypeCode?: string;
   instituteCode: string;
   worksheet: ComponentPreviewWorksheet;
   /** Mirrored schemas for the edit strip; null while loading. */
@@ -232,13 +238,20 @@ function prefilledDefinition(
     requiredCodes(definition, "properties"),
   );
   const results = prefillCollection(
-    definition.results,
+    measurementCollection(definition).collection ?? undefined,
     run.results ?? {},
     requiredCodes(definition, "results"),
     resultNames,
   );
   return {
-    definition: { ...definition, properties: properties.fields, results: results.fields },
+    definition: {
+      ...definition,
+      properties: properties.fields,
+      results: results.fields,
+      // Re-emitted under `results`; leaving the source key in place would let
+      // the un-prefilled original win back whenever `results` came out empty.
+      parameters: undefined,
+    },
     drops: [...properties.drops, ...results.drops],
   };
 }
@@ -287,198 +300,6 @@ function statusLabel(status: WorksheetRow["status"]): string {
     case "pending":
       return t.worksheet.statusPending;
   }
-}
-
-// ---- Server-derived judgement (plan §9.3) -----------------------------------
-//
-// The sheet this replaces turns a row of scale readings into a glue weight, a
-// target, a tolerance and a verdict. itkFlow keeps that judgement, but the
-// arithmetic lives in exactly one place — the backend adapter. Everything
-// below formats numbers that arrived in the payload; nothing here adds,
-// subtracts, scales or compares them. A second copy of the formula is how the
-// sheet and the reference implementation drifted apart in the first place.
-
-const VERDICT_CHIP_CLASS: Record<WorksheetDerivedStep["verdict"], string> = {
-  ok: "chip green",
-  too_little: "chip red",
-  too_much: "chip red",
-  // Never neutral: a missing input must not read like a passing result.
-  unknown: "chip amber",
-};
-
-/**
- * The verdict as a word. `unknown` resolves to its reason rather than to a
- * blank or a bare "unknown" — on the owner's sheet 8 of 13 powerboard
- * verdicts are arithmetic over empty cells, and they are indistinguishable
- * from real ones precisely because the gap has no name.
- */
-function verdictLabel(step: WorksheetDerivedStep): string {
-  switch (step.verdict) {
-    case "ok":
-      return t.worksheet.verdictOk;
-    case "too_little":
-      return t.worksheet.verdictTooLittle;
-    case "too_much":
-      return t.worksheet.verdictTooMuch;
-    case "unknown":
-      break;
-  }
-  switch (step.reason) {
-    case "no_target":
-      return t.worksheet.verdictNoTarget;
-    case "missing_inputs":
-      return t.worksheet.verdictMissingInputs;
-    case "no_run":
-      return t.worksheet.verdictNoRun;
-    case null:
-      return t.worksheet.verdictUnknown;
-    default:
-      // A reason this build does not know yet is still shown verbatim: an
-      // unnamed gap is exactly the failure mode this field exists to prevent.
-      return t.worksheet.verdictUnknownReason(step.reason);
-  }
-}
-
-/** Formatting only — `formatScalar` trims float noise, it does not round a
- * measured value into something else. */
-function derivedNumber(value: number | null): string {
-  return value === null ? t.common.none : formatScalar(value);
-}
-
-/**
- * The compact "measured against target" figure, e.g. `151.2 / 151 ± 22 mg`.
- *
- * The tolerance is shown as the server sent it and never resolved into a
- * band: printing `129 – 173` would mean the browser had done the subtraction,
- * and that is the duplicated formula this design refuses.
- */
-function derivedFigure(step: WorksheetDerivedStep): string {
-  return t.worksheet.derivedFigure(
-    derivedNumber(step.measured_mg),
-    step.target_mg === null ? null : derivedNumber(step.target_mg),
-    step.tolerance_mg === null ? null : derivedNumber(step.tolerance_mg),
-  );
-}
-
-/**
- * The judgement in the collapsed row: per derivation step one verdict word
- * and one figure. Two steps (hybrids, powerboard) stay two verdicts — they
- * are separate glueings with separate targets, and the PDB's single `passed`
- * bit collapsing them is one of the reasons this display exists.
- */
-function DerivedVerdicts({ derived }: { derived: WorksheetDerived }) {
-  if (derived.steps.length === 0) return null;
-  return (
-    <span className="ws-derived">
-      {derived.steps.map((step) => (
-        <span
-          className="ws-derived-step"
-          key={step.key}
-          title={t.worksheet.derivedStepTitle(step.label, verdictLabel(step))}
-        >
-          <span className={VERDICT_CHIP_CLASS[step.verdict]}>{verdictLabel(step)}</span>
-          <span className="ws-val-name">{step.label}</span>
-          <span className="mono">{derivedFigure(step)}</span>
-        </span>
-      ))}
-    </span>
-  );
-}
-
-/** Where the derivation shown in the edit strip came from. */
-type DerivedSource = "preview" | "latest_run";
-
-function derivedProcessSourceLabel(source: WorksheetDerived["process_source"]): string {
-  switch (source) {
-    case "run":
-      return t.worksheet.derivedProcessFromRun;
-    case "profile_default":
-      return t.worksheet.derivedProcessFromProfile;
-    case "unknown":
-      return t.worksheet.derivedProcessUnknownSource;
-  }
-}
-
-/**
- * The read-only derivation below the edit strip's raw fields.
- *
- * The scale readings above are ordinary schema fields; this panel is what the
- * server made of them. It shows the dry-run's own derivation once one exists
- * and otherwise the last recorded run's — and says which, because a stale
- * judgement presented as a live one is the exact failure the owner's sheet
- * has been showing for eighteen months.
- */
-function DerivedDetail({
-  derived,
-  source,
-}: {
-  derived: WorksheetDerived;
-  source: DerivedSource;
-}) {
-  return (
-    <div className="ws-derived-detail">
-      <div className="field-label">{t.worksheet.derivedTitle}</div>
-      <p className="muted ws-derived-note">
-        {source === "preview"
-          ? t.worksheet.derivedFromPreview
-          : t.worksheet.derivedFromLatestRun}
-      </p>
-      <p className="ws-derived-process">
-        <span className="ws-val-name">{t.worksheet.derivedProcessLabel}</span>{" "}
-        <span className="mono">
-          {derived.process ?? t.worksheet.derivedProcessUnresolved}
-        </span>{" "}
-        <span className="chip neutral">{derivedProcessSourceLabel(derived.process_source)}</span>
-      </p>
-      {derived.steps.length === 0 ? (
-        <p className="state-note">{t.worksheet.derivedNoSteps}</p>
-      ) : (
-        <ul className="ws-derived-steps">
-          {derived.steps.map((step) => (
-            <li key={step.key}>
-              <div className="ws-derived-step-head">
-                <span className={VERDICT_CHIP_CLASS[step.verdict]}>{verdictLabel(step)}</span>
-                <span className="ws-derived-step-label">{step.label}</span>
-              </div>
-              <dl className="ws-derived-figures">
-                <dt>{t.worksheet.derivedWeightLabel}</dt>
-                <dd className="mono">
-                  {step.measured_mg === null
-                    ? t.common.none
-                    : t.worksheet.derivedMg(derivedNumber(step.measured_mg))}
-                </dd>
-                <dt>{t.worksheet.derivedTargetLabel}</dt>
-                <dd className="mono">
-                  {step.target_mg === null
-                    ? t.common.none
-                    : t.worksheet.derivedMg(derivedNumber(step.target_mg))}
-                </dd>
-                <dt>{t.worksheet.derivedToleranceLabel}</dt>
-                <dd className="mono">
-                  {step.tolerance_mg === null
-                    ? t.common.none
-                    : t.worksheet.derivedToleranceMg(derivedNumber(step.tolerance_mg))}
-                </dd>
-                {step.inputs.length > 0 && (
-                  <>
-                    <dt>{t.worksheet.derivedInputsLabel}</dt>
-                    <dd className="ws-derived-inputs">
-                      {step.inputs.map((input) => (
-                        <span className="ws-val" key={input.code} title={input.code}>
-                          <span className="ws-val-name">{input.name}</span>{" "}
-                          <span className="mono">{formatScalar(input.value)}</span>
-                        </span>
-                      ))}
-                    </dd>
-                  </>
-                )}
-              </dl>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
 }
 
 function mergedStaged(
@@ -668,6 +489,7 @@ function RunDetailContent({
 export default function ModuleWorksheet({
   componentSn,
   componentType,
+  componentTypeCode,
   instituteCode,
   worksheet,
   schemas,
@@ -867,10 +689,47 @@ export default function ModuleWorksheet({
       matchedSchema === null ? null : prefilledDefinition(matchedSchema.schema, latestFullRun ?? null),
     [matchedSchema, latestFullRun],
   );
+  // Sheet layout + tool registry, fetched only while a strip is open.
+  const { layout, tools, loading: profileLoading, toolsError } = useDataEntryProfile({
+    instituteCode,
+    componentTypeCode,
+    enabled: editingKey !== null,
+  });
+  const plan = useMemo(
+    () =>
+      matchedSchema === null || prefilled === null || profileLoading
+        ? null
+        : planFieldLayout(
+            prefilled.definition,
+            matchedSchema.test_code,
+            layout,
+            componentTypeCode,
+          ),
+    [matchedSchema, prefilled, layout, profileLoading, componentTypeCode],
+  );
   const effectiveSchema = useMemo<TestTypeSchema | null>(() => {
-    if (matchedSchema === null || prefilled === null) return null;
-    return { ...matchedSchema, schema: prefilled.definition };
-  }, [matchedSchema, prefilled]);
+    if (matchedSchema === null || plan === null) return null;
+    return { ...matchedSchema, schema: plan.definition };
+  }, [matchedSchema, plan]);
+
+  // A tool field's previous value comes from the same prefill pass as every
+  // other field — the strip must reopen showing the jig that was actually
+  // used, including a value the registry does not know (see ToolFieldSelect).
+  const [toolValues, setToolValues] = useState<Record<string, string>>({});
+  const [missingToolCodes, setMissingToolCodes] = useState<ReadonlySet<string>>(new Set());
+  const prefilledToolValues = useMemo(() => {
+    const values: Record<string, string> = {};
+    for (const field of plan?.toolFields ?? []) {
+      if (typeof field.defaultValue === "string" || typeof field.defaultValue === "number") {
+        values[field.code] = String(field.defaultValue);
+      }
+    }
+    return values;
+  }, [plan]);
+  useEffect(() => {
+    setToolValues(prefilledToolValues);
+    setMissingToolCodes(new Set());
+  }, [editingKey, prefilledToolValues]);
   const prefillDrops = prefilled?.drops ?? [];
   const requiredPrefillDrops = prefillDrops.filter((drop) => drop.required);
   const optionalPrefillDrops = prefillDrops.filter((drop) => !drop.required);
@@ -892,15 +751,39 @@ export default function ModuleWorksheet({
     input.focus();
   }, [focusToken, editingKey, canRenderTestForm]);
 
+  /** See `AddTestResult.withToolValues` — same contract, same reason. */
+  function withToolValues(payload: TestFormSubmitPayload): TestFormSubmitPayload | null {
+    const toolFields = plan?.toolFields ?? [];
+    if (toolFields.length === 0) return payload;
+    const missing = new Set<string>();
+    const merged: TestFormSubmitPayload = {
+      ...payload,
+      properties: { ...payload.properties },
+      results: { ...payload.results },
+    };
+    for (const field of toolFields) {
+      const value = (toolValues[field.code] ?? "").trim();
+      if (value === "") {
+        if (field.required) missing.add(field.code);
+        continue;
+      }
+      merged[field.section][field.code] = value;
+    }
+    setMissingToolCodes(missing);
+    return missing.size === 0 ? merged : null;
+  }
+
   async function handleEditSubmit(payload: TestFormSubmitPayload) {
     const testType = editingTestType;
     const key = editingKey;
     if (testType === null || key === null) return;
+    const merged = withToolValues(payload);
+    if (merged === null) return;
     // Same manual-entry pipeline as the Add-test-result form (spec §C/§H2):
     // the parser pin marks the payload as operator-entered canonical JSON.
     const created = await stagingIngestPayload(
-      t.worksheet.manualFilename(payload.testType),
-      manualEntryPayload(payload),
+      t.worksheet.manualFilename(merged.testType),
+      manualEntryPayload(merged),
       { componentSn, testType, parser: "manual-entry" },
     );
     if (created === null) return;
@@ -1085,8 +968,10 @@ export default function ModuleWorksheet({
                               aria-busy={stagingBusy !== null}
                             >
                               <div className="field-label">{t.worksheet.editFor(row.test_type)}</div>
-                              {schemas === null ? (
-                                <p className="state-note">{t.worksheet.schemasLoading}</p>
+                              {schemas === null || profileLoading ? (
+                                <p className="state-note">
+                                  {schemas === null ? t.worksheet.schemasLoading : t.common.loading}
+                                </p>
                               ) : effectiveSchema === null ? (
                                 <p className="state-note">{t.worksheet.noSchema(row.test_type)}</p>
                               ) : needsRunsForEdit && runs === null ? (
@@ -1125,6 +1010,31 @@ export default function ModuleWorksheet({
                                         )}
                                       </span>
                                     </div>
+                                  )}
+                                  {plan !== null && (
+                                    <ToolFieldSection
+                                      fields={plan.toolFields}
+                                      tools={tools}
+                                      componentTypeCode={componentTypeCode}
+                                      values={toolValues}
+                                      onChange={(code, value) => {
+                                        setToolValues((current) => ({
+                                          ...current,
+                                          [code]: value,
+                                        }));
+                                        setMissingToolCodes((current) => {
+                                          if (!current.has(code)) return current;
+                                          const next = new Set(current);
+                                          next.delete(code);
+                                          return next;
+                                        });
+                                      }}
+                                      invalidCodes={missingToolCodes}
+                                      labels={t.worksheet.toolField}
+                                      title={t.worksheet.toolSectionTitle}
+                                      toolsError={toolsError}
+                                      disabled={stagingBusy !== null}
+                                    />
                                   )}
                                   <TestForm
                                     key={key}

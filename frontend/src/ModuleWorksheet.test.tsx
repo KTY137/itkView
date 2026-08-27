@@ -7,15 +7,19 @@ import type {
   ComponentPreviewWorksheet,
   IngestFile,
   IngestPreview,
+  Institute,
   OutboxAction,
   TestRunDetail,
   TestTypeSchema,
+  Tool,
   WorksheetDerivedStep,
 } from "./api";
 import {
   ApiError,
   getComponentTests,
   getIngestPreview,
+  getInstitutes,
+  getTools,
   postIngestFile,
   postIngestOutboxProposal,
 } from "./api";
@@ -28,6 +32,9 @@ vi.mock("./api", async (importOriginal) => ({
   getIngestPreview: vi.fn(),
   postIngestFile: vi.fn(),
   postIngestOutboxProposal: vi.fn(),
+  // Read by the edit strip's data-entry layout (field order + tool registry).
+  getInstitutes: vi.fn(),
+  getTools: vi.fn(),
 }));
 
 // TestResults.tsx is owned by a parallel agent; mock its renderers so this
@@ -304,6 +311,8 @@ describe("ModuleWorksheet", () => {
     vi.mocked(postIngestFile).mockResolvedValue(ingestFile);
     vi.mocked(getIngestPreview).mockResolvedValue(dryRun);
     vi.mocked(postIngestOutboxProposal).mockResolvedValue(action);
+    vi.mocked(getInstitutes).mockResolvedValue([]);
+    vi.mocked(getTools).mockResolvedValue([]);
   });
 
   it("compacts the values cell: three scalars inline, the rest as +n, arrays as a point-count chip", () => {
@@ -477,7 +486,7 @@ describe("ModuleWorksheet", () => {
 
     // Waits for the mirrored run (run_count > 0) and prefills the schema field.
     const gwInput = await screen.findByLabelText(/GW1/);
-    expect(gwInput).toHaveValue(0.1664);
+    expect(gwInput).toHaveValue("0.1664");
 
     // Run number and measurement date are required by the form contract.
     fireEvent.change(screen.getByLabelText(/Run number/), {
@@ -527,11 +536,11 @@ describe("ModuleWorksheet", () => {
       await user.click(screen.getByRole("button", { name: "Record MODULE_METROLOGY" }));
 
       // The round-trippable scalar still prefills.
-      expect(await screen.findByLabelText("SCALAR_X")).toHaveValue(5);
+      expect(await screen.findByLabelText("SCALAR_X")).toHaveValue("5");
       // The dict-valued field is never silently filled — the raw map would
       // otherwise reach TestForm's single-line control as "[object Object]".
       const glueField = screen.getByLabelText("HYBRID_GLUE_THICKNESS");
-      expect(glueField).toHaveValue(null);
+      expect(glueField).toHaveValue("");
       // Explicit, non-dismissable notice naming the dropped field.
       expect(
         screen.getByText(t.worksheet.prefillDropped("Hybrid glue thickness [um]")),
@@ -545,11 +554,11 @@ describe("ModuleWorksheet", () => {
 
       await user.click(screen.getByRole("button", { name: "Record GLUE_WEIGHT" }));
 
-      expect(await screen.findByLabelText(/GW1/)).toHaveValue(0.1664);
+      expect(await screen.findByLabelText(/GW1/)).toHaveValue("0.1664");
       // Never joined into "1\n2\n3" (which would itself fail float validation)
       // nor into any other string — the field is simply left blank.
       const currentField = screen.getByLabelText("Current");
-      expect(currentField).toHaveValue(null);
+      expect(currentField).toHaveValue("");
       expect(
         screen.getByText(t.worksheet.prefillDropped("Current")),
       ).toBeInTheDocument();
@@ -794,6 +803,8 @@ describe("ModuleWorksheet derived glue judgement", () => {
     vi.mocked(postIngestFile).mockResolvedValue(ingestFile);
     vi.mocked(getIngestPreview).mockResolvedValue(dryRun);
     vi.mocked(postIngestOutboxProposal).mockResolvedValue(action);
+    vi.mocked(getInstitutes).mockResolvedValue([]);
+    vi.mocked(getTools).mockResolvedValue([]);
   });
 
   it("shows the verdict as a word in the collapsed row, with the measured-versus-target figure", () => {
@@ -951,5 +962,236 @@ describe("ModuleWorksheet derived glue judgement", () => {
     // The stale judgement from the last run is gone, and so is its label.
     expect(screen.queryByText(t.worksheet.derivedFromLatestRun)).not.toBeInTheDocument();
     expect(screen.queryByText(t.worksheet.derivedMg("151.2"))).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * The edit strip, reshaped to the production sheet.
+ *
+ * Two things the old strip got wrong for a real definition. (1) It ordered
+ * fields the way the PDB happens to list them — for GLUE_WEIGHT that is every
+ * derived glue weight interleaved with the readings it comes from, with every
+ * `order` set to 1, so there was nothing to sort by. (2) It prefilled
+ * `definition.results`, and no mirrored MODULE definition has that key: the
+ * measurements are under `parameters`, so the strip re-opened blank over a
+ * recorded run without saying so.
+ */
+describe("ModuleWorksheet edit strip layout", () => {
+  const layoutSettings = {
+    glue_weight_inputs: {
+      hybrids: {
+        label: "Gluing hybrids",
+        test_type: "GLUE_WEIGHT",
+        measured: "GW_MODULE_H1",
+        subtract: ["GW_SENSOR", "GW_HYBRID1"],
+        result_code: "GW_GLUE_H1",
+      },
+    },
+    test_tool_fields: {
+      // GLUE_WEIGHT deliberately has no entry: GW_METHOD is the application
+      // method, not a tool slot. MODULE_BOW.JIG is a real PDB tool property.
+      MODULE_BOW: [{ code: "JIG", kinds: ["jig"] }],
+    },
+  };
+
+  const institute: Institute = {
+    id: 3,
+    code: "EXAMPLE",
+    name: "Example Institute",
+    local_name_prefix: "EX",
+    settings: layoutSettings,
+    created_at: "2026-08-01T00:00:00Z",
+  };
+
+  const assemblyJig: Tool = {
+    id: 21,
+    kind: "jig",
+    code: "20USERT0605010",
+    label: "Module assembly jig 5010",
+    rfid: null,
+    compatible_types: [],
+    institute_id: 3,
+    status: "active",
+    created_at: "2026-08-01T00:00:00Z",
+  };
+
+  /** The definition as the mirror holds it: measurements under `parameters`. */
+  const mirroredGlueSchema: TestTypeSchema = {
+    ...glueSchema,
+    schema: {
+      code: "GLUE_WEIGHT",
+      properties: [],
+      parameters: [
+        { code: "GW_GLUE_H1", name: "Glue under hybrid 1", dataType: "float" },
+        { code: "GW_MODULE_H1", name: "Module after hybrid", dataType: "float" },
+        { code: "GW_SENSOR", name: "Sensor weight", dataType: "float" },
+        { code: "GW_HYBRID1", name: "Hybrid 1 weight", dataType: "float" },
+      ],
+    },
+  };
+
+  const glueRun: TestRunDetail = {
+    ...mirroredRun,
+    results: {
+      GW_SENSOR: 7.0162,
+      GW_HYBRID1: 2.233,
+      GW_MODULE_H1: 9.3819,
+      GW_GLUE_H1: 0.133,
+    },
+    properties: {},
+  };
+
+  const moduleBowWorksheet: ComponentPreviewWorksheet = {
+    groups: [
+      {
+        stage: "TESTED",
+        reached: true,
+        rows: [
+          {
+            test_type: "MODULE_BOW",
+            status: "passed",
+            latest: {
+              external_ref: "run-bow-1",
+              measured_at: "2026-08-20T10:00:00Z",
+              run_number: "3",
+              passed: true,
+              scalars: [{ code: "BOW", name: "Module bow", value: 42.1 }],
+              arrays: [],
+              attachment_count: 0,
+            },
+            staged: [],
+            run_count: 1,
+          },
+        ],
+      },
+    ],
+  };
+
+  const mirroredBowSchema: TestTypeSchema = {
+    id: 8,
+    component_type: "MODULE",
+    test_code: "MODULE_BOW",
+    name: "Module bow",
+    synced_at: "2026-08-26T00:00:00Z",
+    schema: {
+      code: "MODULE_BOW",
+      properties: [{ code: "JIG", name: "Module assembly jig", dataType: "string" }],
+      parameters: [{ code: "BOW", name: "Module bow", dataType: "float" }],
+    },
+  };
+
+  const moduleBowRun: TestRunDetail = {
+    ...mirroredRun,
+    test_type: "MODULE_BOW",
+    external_ref: "run-bow-1",
+    results: { BOW: 42.1 },
+    properties: { JIG: "20USERT0605010" },
+  };
+
+  const renderBowWorksheet = () =>
+    renderWorksheet({
+      worksheet: moduleBowWorksheet,
+      schemas: [mirroredBowSchema],
+      editIntent: { testType: "MODULE_BOW", token: 1 },
+    });
+
+  beforeEach(() => {
+    vi.mocked(getComponentTests).mockResolvedValue([glueRun]);
+    vi.mocked(postIngestFile).mockResolvedValue(ingestFile);
+    vi.mocked(getIngestPreview).mockResolvedValue(dryRun);
+    vi.mocked(postIngestOutboxProposal).mockResolvedValue(action);
+    vi.mocked(getInstitutes).mockResolvedValue([institute]);
+    vi.mocked(getTools).mockResolvedValue([assemblyJig]);
+  });
+
+  it("runs the fields in the sheet's order and keeps the derived result read-only", async () => {
+    const { container } = renderWorksheet({
+      schemas: [mirroredGlueSchema],
+      editIntent: { testType: "GLUE_WEIGHT", token: 1 },
+    });
+
+    await screen.findByLabelText(/Sensor weight/u);
+    const order = Array.from(container.querySelectorAll<HTMLInputElement>("input[name]"))
+      .map((input) => input.name)
+      .filter((name) => name.startsWith("results."));
+    // Sheet rows 10 / 17 / 21 are raw readings. Formula row 24 is rendered by
+    // DerivedDetail, never as the definition's editable GW_GLUE_H1 field.
+    expect(order).toEqual([
+      "results.GW_SENSOR",
+      "results.GW_HYBRID1",
+      "results.GW_MODULE_H1",
+    ]);
+    expect(screen.queryByLabelText(/Glue under hybrid 1/u)).not.toBeInTheDocument();
+    // The glue profile has no fake tool slot for GW_METHOD.
+    expect(screen.queryByText("Tooling")).not.toBeInTheDocument();
+  });
+
+  it("prefills from a parameters-only definition instead of opening blank over a recorded run", async () => {
+    renderWorksheet({
+      schemas: [mirroredGlueSchema],
+      editIntent: { testType: "GLUE_WEIGHT", token: 1 },
+    });
+
+    expect(await screen.findByLabelText(/Sensor weight/u)).toHaveValue("7.0162");
+    expect(screen.getByLabelText(/Module after hybrid/u)).toHaveValue("9.3819");
+  });
+
+  it("prefills a tool field as a selected registry entry, not as free text", async () => {
+    vi.mocked(getComponentTests).mockResolvedValue([moduleBowRun]);
+    renderBowWorksheet();
+
+    const select = (await screen.findByLabelText("Module assembly jig")) as HTMLSelectElement;
+    expect(select.tagName).toBe("SELECT");
+    // The registry and the previous run arrive in separate responses; the
+    // selection is only correct once both have.
+    await waitFor(() => expect(select.value).toBe("20USERT0605010"));
+    expect(
+      within(select).getByRole("option", { name: "Module assembly jig 5010 · 20USERT0605010" }),
+    ).toBeInTheDocument();
+    // Still scannable: adding the dropdown must not remove the faster path.
+    expect(
+      screen.getByLabelText("Scan a tool for Module assembly jig"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a stored value the registry does not know rather than silently blanking it", async () => {
+    // Real mirrored data: the same jig recorded as free text across runs.
+    vi.mocked(getComponentTests).mockResolvedValue([
+      { ...moduleBowRun, properties: { JIG: "Module Assembly Jig" } },
+    ]);
+    renderBowWorksheet();
+
+    const select = (await screen.findByLabelText("Module assembly jig")) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("Module Assembly Jig"));
+    expect(
+      within(select).getByRole("option", {
+        name: "Module Assembly Jig — not in the tool registry",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("stages the chosen tool under the schema's own code", async () => {
+    const user = userEvent.setup();
+    vi.mocked(getComponentTests).mockResolvedValue([moduleBowRun]);
+    renderBowWorksheet();
+
+    await screen.findByLabelText(/Module bow/u);
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("Module assembly jig") as HTMLSelectElement).value,
+      ).toBe("20USERT0605010"),
+    );
+    fireEvent.change(screen.getByLabelText(/Run number/u), { target: { value: "7" } });
+    fireEvent.change(screen.getByLabelText(/Measurement date/u), {
+      target: { value: "2026-08-26T10:00" },
+    });
+    await user.click(screen.getByRole("button", { name: "Stage test result" }));
+
+    await waitFor(() => expect(postIngestFile).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(postIngestFile).mock.calls[0]?.[0]?.payload as Record<
+      string,
+      unknown
+    >;
+    expect((payload.properties as Record<string, unknown>).JIG).toBe("20USERT0605010");
   });
 });

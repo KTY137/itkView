@@ -188,6 +188,8 @@ def make_pdb_submitter(
                 ingest.payload,
                 component_sn=ingest.component_sn,
                 institute_code=institute_code,
+                derived_results=action.payload.get("derived_results"),
+                derived_result_codes=action.payload.get("derived_result_codes"),
             )
         except UploadPayloadError as exc:
             return SubmitOutcome.rejected(f"Upload payload is not PDB-ready: {exc}")

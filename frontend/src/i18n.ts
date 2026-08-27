@@ -31,6 +31,26 @@ const testFormLabels = {
     `${field} uses the unsupported PDB data type ${dataType || "unknown"} and is read-only.`,
 };
 
+/**
+ * Shared between `addTest.toolField` and `worksheet.toolField`: both panels
+ * render the same tool picker, so a jig reads the same wherever it is chosen.
+ * Band headings are NOT here — those are institute profile data (the step's
+ * own label) and are printed verbatim, exactly like `assembly_tool_slots`
+ * labels in the wizard.
+ */
+const toolFieldLabels = {
+  choose: "Choose a tool",
+  unknownValue: (value: string) => `${value} — not in the tool registry`,
+  scanLabel: (field: string) => `Scan a tool for ${field}`,
+  scanPlaceholder: "Scan tool barcode or RFID",
+  scan: "Scan",
+  scanNoMatch: (value: string) =>
+    `No tool offered for this field matches ${value || "that scan"}.`,
+  noCandidates: "No registered tool fits this component type and field yet.",
+  registryError: (error: string) => `Could not load the tool registry: ${error}`,
+  required: "Choose a tool for this field.",
+};
+
 const en = {
   nav: {
     board: "Assembly board",
@@ -586,6 +606,10 @@ const en = {
     stagedToast: (actionId: number) => `Test upload staged as action #${actionId}.`,
     stageFailed: (error: string) => `Could not stage the upload: ${error}`,
     reset: "Start over",
+    // Tooling is its own band, above the readings, because that is where the
+    // sheet puts it and because it is chosen rather than measured.
+    toolSectionTitle: "Tooling",
+    toolField: toolFieldLabels,
     testForm: {
       ...testFormLabels,
       submit: "Inspect result",
@@ -712,6 +736,8 @@ const en = {
     derivedTitle: "Derived by the server",
     derivedFromPreview:
       "Computed by the server from the values checked just now — read-only.",
+    derivedFromStaged:
+      "Stored with this staged upload and revalidated by the worker before submission — read-only.",
     derivedFromLatestRun:
       "From the last recorded run — read-only. itkFlow never recomputes glue weight, target or tolerance in the browser; the judgement for the values above is derived on the server when this entry is checked.",
     derivedProcessLabel: "Glue process",
@@ -727,6 +753,8 @@ const en = {
     derivedToleranceMg: (value: string) => `± ${value} mg`,
     derivedInput: (name: string, value: string) => `${name} ${value}`,
     derivedNoSteps: "The profile configures no derivation step for this test type.",
+    toolSectionTitle: "Tooling",
+    toolField: toolFieldLabels,
     testForm: {
       ...testFormLabels,
       submit: "Stage test result",

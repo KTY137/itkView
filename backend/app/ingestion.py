@@ -10,6 +10,7 @@ Issues are blocking (the file cannot become an outbox proposal until they are
 resolved); warnings are informational and never block.
 """
 
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -73,7 +74,11 @@ def _summarize_result(name: str, value: Any) -> ResultSummary:
     if isinstance(value, bool):
         return ResultSummary(name=name, kind="bool", value="true" if value else "false")
     if isinstance(value, (int, float)):
-        return ResultSummary(name=name, kind="number", value=f"{value:.6g}")
+        try:
+            rendered = f"{value:.6g}"
+        except (OverflowError, ValueError):
+            rendered = "out of range"
+        return ResultSummary(name=name, kind="number", value=rendered)
     if isinstance(value, str):
         short = value if len(value) <= 40 else value[:37] + "..."
         return ResultSummary(name=name, kind="string", value=short)
@@ -131,7 +136,10 @@ def _sniff_pdb_test_run(payload: dict) -> bool:
 
 
 def _parse_pdb_test_run(payload: dict, parser_name: str = "pdb-test-run-v1") -> ParsedTestRun:
-    parsed = ParsedTestRun(parser=parser_name, test_type=payload["testType"].strip())
+    # PDB test types are canonical upper-case codes. Normalize once at the
+    # parser boundary so sniffing, profile lookup, controlled output removal
+    # and the final upload can never disagree only by casing.
+    parsed = ParsedTestRun(parser=parser_name, test_type=payload["testType"].strip().upper())
 
     identifier = payload.get("component") or payload.get("serialNumber")
     if isinstance(identifier, str) and identifier.strip():
@@ -190,7 +198,10 @@ def _parse_pdb_test_run(payload: dict, parser_name: str = "pdb-test-run-v1") -> 
 
 
 def _sniff_glue_weight(payload: dict) -> bool:
-    return _sniff_pdb_test_run(payload) and payload["testType"].strip() == "GLUE_WEIGHT"
+    return (
+        _sniff_pdb_test_run(payload)
+        and payload["testType"].strip().upper() == "GLUE_WEIGHT"
+    )
 
 
 def _parse_glue_weight(payload: dict) -> ParsedTestRun:
@@ -208,6 +219,13 @@ def _parse_glue_weight(payload: dict) -> ParsedTestRun:
                 parsed.warnings.append(f"Result '{name}' is empty")
             elif isinstance(value, bool) or not isinstance(value, (int, float)):
                 parsed.issues.append(f"Result '{name}' must be a number")
+            else:
+                try:
+                    finite = math.isfinite(value)
+                except OverflowError:
+                    finite = False
+                if not finite:
+                    parsed.issues.append(f"Result '{name}' must be a finite number")
     return parsed
 
 

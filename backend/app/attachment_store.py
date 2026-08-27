@@ -17,13 +17,23 @@ timeout, HTTP 5xx) is retried with exponential backoff up to the shared
 ``sync_page_max_attempts`` budget; a *permanent* answer (4xx, an HTML error
 page, an oversized body) fails immediately. Either way a failed attachment is
 never recorded as stored, so the next sweep simply tries it again.
+
+One remote answers with an *archive* rather than a file: a CERNBox folder
+share serves no bytes over WebDAV (501) and only answers on a download route
+that packs the requested entry into a tar. Such a response is never written to
+disk as an archive and never extracted as a tree — exactly one member is
+selected, read in memory and handed to the storage path above. Every rule that
+selection obeys is written down at ``_archive_member`` and its neighbours.
 """
 
 from __future__ import annotations
 
+import gzip
 import logging
 import os
 import re
+import tarfile
+import zlib
 from collections.abc import Callable, Mapping
 from contextlib import closing
 from dataclasses import dataclass
@@ -32,7 +42,7 @@ from pathlib import Path
 from time import sleep
 from typing import Any, Literal
 from urllib.error import HTTPError
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from sqlalchemy import func, select
@@ -76,6 +86,28 @@ _EXTENSION_BY_CONTENT_TYPE = {
 # they are inert data formats and keeping them lets a person open the file with
 # the tool they already use. Nothing executable is on this list.
 _TRUSTED_DATA_SUFFIXES = frozenset({".dat", ".log", ".xml", ".root", ".tsv", ".md"})
+
+# The inverse of `_EXTENSION_BY_CONTENT_TYPE`, written out rather than derived
+# so the two ambiguous pairs (`image/jpeg` vs `image/jpg`, `.tif` vs `.tiff`)
+# resolve to one deliberate answer instead of to whichever entry happened to be
+# last. A test asserts that every extension the mirror is willing to write
+# appears here, so the two tables cannot drift apart.
+_CONTENT_TYPE_BY_EXTENSION = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+    ".json": "application/json",
+    ".zip": "application/zip",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+}
 
 _SAFE_CODE = re.compile(r"[^A-Za-z0-9_-]")
 _SAFE_SN = re.compile(r"[^A-Za-z0-9_-]")
@@ -559,6 +591,386 @@ def _response_content_type(response: Any) -> str | None:
     return value.split(";", 1)[0].strip() if isinstance(value, str) and value else None
 
 
+# --- archives served in place of a file -------------------------------------
+#
+# A *folder* share does not serve bytes over WebDAV. Measured live and
+# anonymously against the owner's own share links on 2026-08-27:
+#
+#   /files/link/public/<token>/<name>          200 text/html (the web app)
+#   /remote.php/dav/public-files/<token>[/...] 501 Not Implemented
+#   /s/<token>/download?files=<name>           200 application/octet-stream,
+#                                              chunked, and a POSIX **ustar**
+#                                              archive - not a zip
+#   /s/<token>/download?path=/&files=<name>    500 Internal Server Error
+#   /s/<token>/download                        200, the *whole* share as one
+#                                              archive (minutes, never used)
+#
+# So the bytes exist, but only inside an archive, and unpacking one is the
+# single most dangerous thing this module does: the archive comes from a
+# remote host, its member names are attacker-influenceable, and the result is
+# written to an operator's disk. The rules below are therefore absolute.
+#
+#   * `extractall` is never called and no member is ever written under its own
+#     name. Exactly one member is selected and read **into memory**; the bytes
+#     then take the ordinary storage path, whose file name is derived from the
+#     PDB attachment code and an extension allowlist.
+#   * Only regular files are eligible. Directories, symlinks, hardlinks,
+#     devices, fifos and GNU sparse entries are refused by type, before their
+#     name is even looked at.
+#   * Names are refused on `..`, a leading `/`, a backslash, a colon (drive
+#     letters, NTFS streams), NUL and control characters.
+#   * Sizes are checked twice: the declared size decides whether a member is
+#     read at all, and the bytes actually read must match it exactly.
+#   * The archive as a whole is capped in compressed bytes off the wire, in
+#     decompressed tar bytes (including headers and GNU/PAX metadata), in
+#     declared member bytes, and in member count.
+#
+# Extraction *filters* (`tarfile.data_filter`, Python 3.12 / 3.10.12+) are not
+# relied upon: they sanitise a tree being written to disk, and this code never
+# writes a tree. The runtime here is 3.10.11, where they do not exist at all.
+# The equivalent checks are implemented directly above and each has a test.
+
+# Enough to cover the ustar magic at offset 257 of the first header block.
+_ARCHIVE_SNIFF_BYTES = 512
+_USTAR_MAGIC_OFFSET = 257
+_USTAR_MAGIC = b"ustar"
+_GZIP_MAGIC = b"\x1f\x8b"
+
+# A share folder holds a handful of files. Thousands of members is not a
+# folder share, it is either a mistake or an attempt to make this loop the
+# expensive part of a sweep.
+ARCHIVE_MEMBER_LIMIT = 2048
+
+# How much bigger than one attachment an archive is allowed to be. The
+# operator configures `attachment_max_bytes` for a *file*; an archive
+# legitimately carries several (the owner's largest measured share folder
+# declares 79 MB around an 8.8 MB picture), so the budget is a multiple of the
+# same setting rather than a second knob that could be forgotten. Deliberately
+# derived: lowering the attachment limit lowers this one too.
+ARCHIVE_SIZE_BUDGET_FACTOR = 4
+
+# Leading bytes that identify a stored format better than any remote-supplied
+# name can. Sniffing wins over the member's extension for exactly that reason.
+_CONTENT_TYPE_BY_MAGIC = (
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"BM", "image/bmp"),
+    (b"II*\x00", "image/tiff"),
+    (b"MM\x00*", "image/tiff"),
+    (b"%PDF-", "application/pdf"),
+)
+
+
+class _ArchiveRefused(ValueError):
+    """Marker: the archive broke one of the limits above and is not usable.
+
+    A refusal, never a retry: the same archive would break the same limit
+    again. Carries a short static reason only — never a member name, never a
+    URL.
+    """
+
+
+class _CappedStream:
+    """A readable byte stream with a hard ceiling and a small pushback buffer.
+
+    Two jobs. The ceiling is what stops a remote host from streaming for as
+    long as it likes into a sweep that has no idea how much it has taken; the
+    pushback buffer is what lets the first bytes be sniffed for an archive
+    signature without consuming them, so the ordinary "read the file" path
+    stays byte-for-byte what it was.
+
+    Reads are passed straight through, one call at a time, exactly like the
+    plain ``response.read(n)`` this replaced. Nothing here ever buffers more
+    than the sniff window. The same wrapper also sits *after* gzip
+    decompression: tar readers consume GNU longname and PAX records before
+    yielding a member, so declared member sizes alone cannot bound that
+    attacker-controlled metadata.
+    """
+
+    def __init__(
+        self,
+        response: Any,
+        limit: int,
+        *,
+        refusal_reason: str = "the archive exceeded its byte budget",
+    ) -> None:
+        self._response = response
+        self._limit = max(1, int(limit))
+        self._refusal_reason = refusal_reason
+        self._buffer = b""
+        self.consumed = 0
+
+    def _pull(self, size: int) -> bytes:
+        if size <= 0:
+            return b""
+        if self.consumed >= self._limit:
+            raise _ArchiveRefused(self._refusal_reason)
+        chunk = self._response.read(min(size, self._limit - self.consumed + 1))
+        if not isinstance(chunk, (bytes, bytearray)):
+            return b""
+        chunk = bytes(chunk)
+        self.consumed += len(chunk)
+        if self.consumed > self._limit:
+            raise _ArchiveRefused(self._refusal_reason)
+        return chunk
+
+    def peek(self, size: int) -> bytes:
+        """Buffer and return up to ``size`` leading bytes without consuming."""
+        while len(self._buffer) < size:
+            chunk = self._pull(size - len(self._buffer))
+            if not chunk:
+                break
+            self._buffer += chunk
+        return self._buffer[:size]
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = self._limit - self.consumed + len(self._buffer)
+        if not self._buffer:
+            return self._pull(size)
+        taken = self._buffer[:size]
+        self._buffer = self._buffer[len(taken) :]
+        if len(taken) >= size:
+            return taken
+        return taken + self._pull(size - len(taken))
+
+
+def _archive_stream_mode(head: bytes) -> str | None:
+    """Whether these leading bytes open an archive, and how to read it.
+
+    Only two transports are accepted: an uncompressed POSIX tar and a
+    gzip-compressed one, because those are what a share host actually serves
+    and gzip is in the standard library. bzip2 and xz are refused by omission
+    — nothing has ever been observed serving them here, and they are the two
+    formats with the most extreme decompression ratios.
+
+    A gzip stream is only accepted once the ustar magic has been found in its
+    *decompressed* prefix. That keeps a gzip-compressed ordinary file (which
+    would otherwise be mistaken for an archive and lost) on the normal path.
+    """
+    if head[_USTAR_MAGIC_OFFSET : _USTAR_MAGIC_OFFSET + len(_USTAR_MAGIC)] == _USTAR_MAGIC:
+        return "r|"
+    if head[: len(_GZIP_MAGIC)] != _GZIP_MAGIC:
+        return None
+    try:
+        prefix = zlib.decompressobj(wbits=31).decompress(
+            head, _USTAR_MAGIC_OFFSET + len(_USTAR_MAGIC)
+        )
+    except zlib.error:
+        return None
+    if prefix[_USTAR_MAGIC_OFFSET : _USTAR_MAGIC_OFFSET + len(_USTAR_MAGIC)] == _USTAR_MAGIC:
+        return "r|gz"
+    return None
+
+
+def safe_archive_member_name(info: Any) -> str | None:
+    """Normalise one archive member's name, or refuse it.
+
+    Refuses everything that is not a plain regular file and every name that
+    could address something other than a plain relative path: `..` anywhere,
+    a leading `/`, a backslash (Windows separator), a colon (drive letter or
+    NTFS stream), NUL and any other control character. `./` prefixes are
+    normalised away because GNU tar writes them routinely.
+
+    Public because the guard is worth testing on its own — every rule here is
+    one that a single missing line would silently remove.
+    """
+    if getattr(info, "type", None) not in (tarfile.REGTYPE, tarfile.AREGTYPE):
+        return None
+    name = getattr(info, "name", None)
+    if not isinstance(name, str) or not name:
+        return None
+    if name.startswith("/") or "\\" in name or ":" in name:
+        return None
+    if any(character < " " or character == "\x7f" for character in name):
+        return None
+    parts: list[str] = []
+    for segment in name.split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            return None
+        parts.append(segment)
+    if not parts:
+        return None
+    return "/".join(parts)
+
+
+def _member_is_in_scope(name: str, wanted: str) -> bool:
+    """Whether a member lies at, or inside, the path the descriptor asked for.
+
+    This is the guard against substitution. The descriptor names one entry of
+    the share; anything the host puts *outside* that entry is not the file
+    that was asked for, however plausible it looks. Measured: requesting the
+    whole share instead of one entry really does answer with a different tree
+    (rooted at the share token), and that tree must select nothing.
+    """
+    if not wanted:
+        return True
+    return name == wanted or name.startswith(wanted + "/")
+
+
+def _member_rank(name: str, wanted: str) -> int:
+    """Preference order among members that are all legitimate candidates.
+
+    Lower wins; ties are broken by the member path, so the choice is a pure
+    function of the archive and never of the order a host happens to stream
+    it in. Being explicit here is the whole point: a folder share can hold
+    several files, and a wrong file stored under the right attachment code
+    would look correct forever.
+
+      0  the entry the descriptor named, exactly
+      1  an image format the mirror can store and a browser can paint
+      2  any other format the mirror is willing to write an extension for
+      3  everything else (stored without an extension, so nothing can open it)
+    """
+    if wanted and name == wanted:
+        return 0
+    suffix = Path(name).suffix.lower()
+    content_type = _CONTENT_TYPE_BY_EXTENSION.get(suffix)
+    if content_type and content_type.startswith("image/"):
+        return 1
+    if content_type or suffix in _TRUSTED_DATA_SUFFIXES:
+        return 2
+    return 3
+
+
+def _sniffed_content_type(data: bytes) -> str | None:
+    """The stored format according to the bytes themselves.
+
+    Preferred over the member's extension, because the extension is part of
+    the name the remote host chose and the bytes are the thing being stored.
+    """
+    for magic, content_type in _CONTENT_TYPE_BY_MAGIC:
+        if data.startswith(magic):
+            return content_type
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _member_content_type(name: str, data: bytes) -> str | None:
+    return _sniffed_content_type(data) or _CONTENT_TYPE_BY_EXTENSION.get(
+        Path(name).suffix.lower()
+    )
+
+
+def _archive_member(
+    stream: _CappedStream, *, mode: str, wanted: str, max_bytes: int, budget: int
+) -> tuple[str, bytes] | None:
+    """Select and read **one** member of a streamed archive. Never extracts.
+
+    Single forward pass: the archive is read straight off the socket and is
+    never materialised, so memory is bounded by one member, not by the
+    archive. The best candidate seen so far is kept in memory and dropped
+    *before* a strictly better one is read, which keeps the peak at one
+    member even when several qualify.
+
+    Returns the chosen member's normalised path and its bytes, or ``None``
+    when nothing in the archive is the file that was asked for. Raises
+    ``_ArchiveRefused`` when the archive itself breaks a limit.
+    """
+    # `tarfile`'s built-in `r|gz` stream accounts only for compressed reads on
+    # our outer wrapper. Decompress explicitly and put a second cap before the
+    # tar parser so headers, padding, GNU longnames and PAX records all consume
+    # the same total archive budget as ordinary member bytes.
+    gzip_reader: gzip.GzipFile | None = None
+    archive_stream: Any = stream
+    archive_mode = mode
+    if mode == "r|gz":
+        gzip_reader = gzip.GzipFile(fileobj=stream, mode="rb")
+        archive_stream = _CappedStream(
+            gzip_reader,
+            budget,
+            refusal_reason="the decompressed archive exceeded its byte budget",
+        )
+        archive_mode = "r|"
+
+    archive: tarfile.TarFile | None = None
+    try:
+        try:
+            archive = tarfile.open(fileobj=archive_stream, mode=archive_mode)
+        except (tarfile.TarError, gzip.BadGzipFile, EOFError, zlib.error):
+            return None
+        try:
+            return _walk_archive(archive, wanted=wanted, max_bytes=max_bytes, budget=budget)
+        except (tarfile.TarError, gzip.BadGzipFile, EOFError, zlib.error):
+            # Truncated or malformed. Never a partial store, and never a generic
+            # exception either: this is a verdict about the archive, so it is
+            # logged and counted as one rather than guessed at by the network
+            # error classifier.
+            raise _ArchiveRefused("the archive could not be read to its end") from None
+    finally:
+        if archive is not None:
+            archive.close()
+        if gzip_reader is not None:
+            gzip_reader.close()
+
+
+def _walk_archive(
+    archive: Any, *, wanted: str, max_bytes: int, budget: int
+) -> tuple[str, bytes] | None:
+    """The single forward pass of ``_archive_member``. See its docstring."""
+    best_key: tuple[int, str] | None = None
+    best_name = ""
+    best_bytes: bytes | None = None
+    eligible = 0
+    members = 0
+    declared_total = 0
+
+    for info in archive:
+        members += 1
+        if members > ARCHIVE_MEMBER_LIMIT:
+            raise _ArchiveRefused("the archive declares too many members")
+        size = getattr(info, "size", 0)
+        size = int(size) if isinstance(size, int) else 0
+        if size < 0:
+            raise _ArchiveRefused("an archive member declares a negative size")
+        declared_total += size
+        if declared_total > budget:
+            raise _ArchiveRefused("the archive members declare more bytes than allowed")
+
+        name = safe_archive_member_name(info)
+        if name is None or not _member_is_in_scope(name, wanted):
+            continue
+        # The declared size decides whether the member is read at all, so
+        # an oversized one costs nothing but its header.
+        if size > max_bytes:
+            continue
+        eligible += 1
+
+        key = (_member_rank(name, wanted), name)
+        if best_key is not None and key >= best_key:
+            continue
+        handle = archive.extractfile(info)
+        if handle is None:
+            continue
+        # Release the weaker candidate before reading the better one.
+        best_key, best_name, best_bytes = None, "", None
+        data = handle.read(max_bytes + 1)
+        if len(data) != size:
+            # Defence in depth, and honest about it: the streaming reader used
+            # here raises on a short member before this line can see one, so
+            # this catches only a reader that would tolerate the short read.
+            # What no tar reader can catch is a header that *overstates* a
+            # real file's length — the surplus is simply the archive's own
+            # padding, which is why the extracted bytes still go through the
+            # HTML guard, the size limit and content sniffing below.
+            raise _ArchiveRefused("an archive member did not deliver its declared size")
+        best_key, best_name, best_bytes = key, name, data
+
+    if best_bytes is None:
+        return None
+    if not wanted and eligible != 1:
+        # Nothing in the URL says which entry is meant, so only an archive
+        # holding exactly one candidate is unambiguous. Guessing here is how a
+        # wrong file ends up under a right code.
+        return None
+    return best_name, best_bytes
+
+
 # Web *file-browser* routes of an ownCloud/Reva deployment (CERNBox, DESY
 # syncandshare, Nextcloud). These address a signed-in session's own storage,
 # not a public share: there is no share token to turn into a download route,
@@ -576,6 +988,35 @@ _PUBLIC_SHARE_WEB_ROUTE = ("files", "link", "public")
 def _dav_public_url(base: tuple[str, str], token: str, rest: list[str]) -> str:
     """The WebDAV route that serves a public share's bytes."""
     return urlunsplit((*base, "/".join(["/remote.php/dav/public-files", token, *rest]), "", ""))
+
+
+def _archive_public_url(base: tuple[str, str], token: str, rest: list[str]) -> str:
+    """The route that answers for a *folder* share, with an archive.
+
+    `?files=<entry>` is the only form measured to work: `?path=/&files=<entry>`
+    answers 500, and `?path=/<entry>` answers with the whole share instead of
+    the entry. The entry is url-decoded first so `urlencode` cannot encode an
+    already-encoded name twice.
+    """
+    query = urlencode({"files": unquote("/".join(rest))})
+    return urlunsplit((*base, f"/s/{token}/download", query, ""))
+
+
+def _share_member_path(url: str) -> str:
+    """The path *inside* a share that a URL names, decoded; "" when it names none.
+
+    This is what an archive member is matched against, so it is the decoded
+    form rather than the wire form.
+    """
+    parsed = urlsplit(url)
+    routed = [
+        segment
+        for segment in parsed.path.rstrip("/").split("/")
+        if segment and segment != "index.php"
+    ]
+    if tuple(routed[:3]) == _PUBLIC_SHARE_WEB_ROUTE and len(routed) >= 4:
+        return unquote("/".join(routed[4:]))
+    return ""
 
 
 def _share_link_candidates(url: str) -> list[str]:
@@ -600,10 +1041,16 @@ def _share_link_candidates(url: str) -> list[str]:
     were correctly refused, so their bytes were never stored. It maps onto the
     same DAV route, path and all.
 
-    For that folder form ``/s/<token>/download`` is deliberately *not* offered
-    as a fallback: on a folder share it answers with the whole folder as a zip,
-    which would then be stored under this attachment's code. A wrong file that
-    looks stored is worse than a missing one.
+    For that folder form the DAV route answers ``501 Not Implemented`` — a
+    statement about capability that no credential changes — so a third
+    candidate follows it: ``/s/<token>/download?files=<entry>``. That one
+    answers, but with a **tar archive** rather than the file (measured live,
+    ustar magic at byte 257; the "zip" this comment once claimed was wrong).
+    The archive is unpacked in memory and exactly the named entry is stored;
+    see ``_archive_member``. A bare ``/s/<token>/download`` is never generated
+    for a folder share: it answers with the *whole* share, and storing an
+    arbitrary part of that under one attachment's code is exactly the failure
+    a missing file is preferable to.
 
     The pattern is recognised by URL *shape* (a ``/s/<token>`` or
     ``/files/link/public/<token>`` path), not by host name: this is a
@@ -622,7 +1069,9 @@ def _share_link_candidates(url: str) -> list[str]:
     if tuple(routed[:3]) == _PUBLIC_SHARE_WEB_ROUTE and len(routed) >= 4:
         token, rest = routed[3], routed[4:]
         candidates = [_dav_public_url(base, token, rest)]
-        if not rest:
+        if rest:
+            candidates.append(_archive_public_url(base, token, rest))
+        else:
             candidates.append(urlunsplit((*base, f"/s/{token}/download", "", "")))
         candidates.append(url)
         return candidates
@@ -654,6 +1103,8 @@ def _fetch_share_link(
             descriptor.get("code"),
         )
         return None
+    wanted = _share_member_path(url)
+    archive_budget = max_bytes * ARCHIVE_SIZE_BUDGET_FACTOR
     transient_seen = False
     html_seen = False
     for candidate in candidates:
@@ -664,8 +1115,55 @@ def _fetch_share_link(
                 final_url = getattr(response, "geturl", lambda u=candidate: u)()
                 if not isinstance(final_url, str) or not _safe_http_url(final_url):
                     continue
-                data = response.read(max_bytes + 1)
-                content_type = _response_content_type(response)
+                stream = _CappedStream(response, archive_budget)
+                mode = _archive_stream_mode(stream.peek(_ARCHIVE_SNIFF_BYTES))
+                if mode is None:
+                    data = stream.read(max_bytes + 1)
+                    content_type = _response_content_type(response)
+                else:
+                    # A folder share answers with an archive. Take the one
+                    # member the descriptor asked for and nothing else — and
+                    # send it through exactly the same guards below, because
+                    # an archive is a new transport, not a new trust level.
+                    selected = _archive_member(
+                        stream,
+                        mode=mode,
+                        wanted=wanted,
+                        max_bytes=max_bytes,
+                        budget=archive_budget,
+                    )
+                    if selected is None:
+                        log.warning(
+                            "Share-link attachment %s answered with an archive holding no "
+                            "unambiguous match for the entry it names. Nothing was stored.",
+                            descriptor.get("code"),
+                        )
+                        continue
+                    member_name, data = selected
+                    content_type = _member_content_type(member_name, data)
+                    # Size and type, never the member's name: it is chosen by
+                    # a remote host and can carry somebody's name (CLAUDE.md,
+                    # hard rule 3 — no personal data in logs). Which member
+                    # was picked stays reconstructible from the selection
+                    # rule, which is a pure function of the archive's content
+                    # and written down in docs/12 §2.3a.
+                    log.info(
+                        "Share-link attachment %s was unpacked from an archive; "
+                        "stored one selected member (%d bytes, %s).",
+                        descriptor.get("code"),
+                        len(data),
+                        content_type or "unknown type",
+                    )
+        except _ArchiveRefused as refusal:
+            # A limit was broken, not a network hiccup: the same archive would
+            # break it again, so this candidate is finished for this sweep.
+            log.warning(
+                "Share-link attachment %s answered with an archive that was refused: %s. "
+                "Nothing was stored.",
+                descriptor.get("code"),
+                refusal,
+            )
+            continue
         except Exception as exc:
             # Every candidate is best effort. Do not stringify network
             # failures: redirect/error objects can contain the complete URL.
@@ -869,10 +1367,44 @@ class OutageCircuitBreaker:
     only the PDB route going dark means the sweep itself cannot proceed.
     """
 
+    #: How many final per-file verdicts are remembered for one sweep. Bounded
+    #: because the memo lives as long as the sweep and a mirror can hold tens
+    #: of thousands of attachments; the oldest entry is dropped first.
+    PERMANENT_MISS_MEMO_LIMIT = 4096
+
     def __init__(self, threshold: int = ATTACHMENT_OUTAGE_BREAKER_THRESHOLD) -> None:
         self.threshold = max(1, int(threshold))
         self._streaks: dict[str, int] = {}
         self.tripped_routes: set[str] = set()
+        # Insertion-ordered, values unused: a set with a bounded eviction
+        # order. Holds keys only — never bytes, never a URL.
+        self._permanent_misses: dict[tuple[str, str], None] = {}
+
+    def note_permanent_miss(self, key: tuple[str, str]) -> None:
+        """Remember that this exact attachment got a *final* answer.
+
+        One share folder backs 87 descriptors on 76 components in the owner's
+        mirror, and the download runs once per component. A success needs no
+        memo — the mirrored file is found on disk and reused — but a permanent
+        refusal has nothing on disk to be found, so without this the same
+        multi-megabyte archive is fetched and discarded once per referring
+        component. Only *final* answers are remembered; a transient failure
+        must stay retryable.
+
+        Deliberately in memory and deliberately only for this sweep. A
+        persisted "permanently failed" flag was considered and rejected: it
+        would freeze exactly the descriptors that the next code change fixes,
+        which is how the 20 folder-share rows repaired here would have been
+        frozen instead (docs/12 §2.3).
+        """
+        if key in self._permanent_misses:
+            return
+        if len(self._permanent_misses) >= self.PERMANENT_MISS_MEMO_LIMIT:
+            self._permanent_misses.pop(next(iter(self._permanent_misses)), None)
+        self._permanent_misses[key] = None
+
+    def has_permanent_miss(self, key: tuple[str, str]) -> bool:
+        return key in self._permanent_misses
 
     def record_success(self, route: str = PDB_ROUTE) -> None:
         self._streaks[route] = 0
@@ -1009,6 +1541,15 @@ def _fetch_all(
                 outcomes.append(_FetchOutcome(descriptor, "failed", transient=True))
                 _beat(heartbeat)
                 continue
+            # This exact attachment already got a final answer earlier in the
+            # sweep, from another component that lists the same file. Asking
+            # again cannot answer differently and, for a folder share, costs
+            # a whole archive. Deliberately not fed back into the breaker:
+            # it is a remembered verdict, not a new observation.
+            if breaker.has_permanent_miss(key):
+                outcomes.append(_FetchOutcome(descriptor, "failed"))
+                _beat(heartbeat)
+                continue
 
         # Resolved either before this call (a previous sweep) or by an
         # earlier descriptor in this same call (two test runs can list the
@@ -1054,6 +1595,8 @@ def _fetch_all(
             client_unavailable_transient = transient_failure
 
         if fetched is None:
+            if breaker is not None and not transient_failure:
+                breaker.note_permanent_miss(key)
             note(_FetchOutcome(descriptor, "failed", transient=transient_failure))
             _beat(heartbeat)
             continue

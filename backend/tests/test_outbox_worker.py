@@ -13,7 +13,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import ensure_phase0_sqlite_schema, make_engine
-from app.models import AuditEvent, Component, OutboxAction
+from app.models import AuditEvent, Component, IngestFile, OutboxAction
 from app.outbox import OutboxStatus
 from app.outbox_worker import (
     PdbSubmitUnavailable,
@@ -284,6 +284,97 @@ def test_worker_blocks_on_revalidation_without_submitting(client, session_factor
     assert "Dry-run validation failed" in action.error
 
 
+def test_worker_rejects_derived_results_not_produced_by_the_server(
+    client, session_factory
+):
+    action_id = seed_upload_action(client, session_factory)
+    with session_factory() as session:
+        action = session.get(OutboxAction, action_id)
+        action.payload = {
+            **action.payload,
+            "derived_results": {"INJECTED_RESULT": 12.5},
+        }
+        session.commit()
+
+    with session_factory() as session:
+        stats = process_due_actions(session, never_called)
+
+    assert stats.revalidation_failed == 1
+    action = load_action(session_factory, action_id)
+    assert action.status == OutboxStatus.FAILED.value
+    assert "no longer match the server formula" in action.error
+
+
+def test_worker_rejects_derived_result_codes_not_owned_by_the_server(
+    client, session_factory
+):
+    action_id = seed_upload_action(client, session_factory)
+    with session_factory() as session:
+        action = session.get(OutboxAction, action_id)
+        action.payload = {
+            **action.payload,
+            "derived_result_codes": ["INJECTED_RESULT"],
+        }
+        session.commit()
+
+    with session_factory() as session:
+        stats = process_due_actions(session, never_called)
+
+    assert stats.revalidation_failed == 1
+    action = load_action(session_factory, action_id)
+    assert action.status == OutboxStatus.FAILED.value
+    assert "result codes no longer match the server formula" in action.error
+
+
+def test_worker_rejects_upload_metadata_that_no_longer_matches_the_ingest(
+    client, session_factory
+):
+    action_id = seed_upload_action(client, session_factory)
+    with session_factory() as session:
+        action = session.get(OutboxAction, action_id)
+        action.payload = {**action.payload, "component_sn": "20USE5M0000999"}
+        session.commit()
+
+    with session_factory() as session:
+        stats = process_due_actions(session, never_called)
+
+    assert stats.revalidation_failed == 1
+    action = load_action(session_factory, action_id)
+    assert "metadata no longer matches" in action.error
+
+
+def test_worker_rejects_an_upload_action_not_bound_to_its_ingest(client, session_factory):
+    action_id = seed_upload_action(client, session_factory)
+    with session_factory() as session:
+        action = session.get(OutboxAction, action_id)
+        ingest = session.get(IngestFile, action.payload["ingest_file_id"])
+        ingest.outbox_action_id = None
+        session.commit()
+
+    with session_factory() as session:
+        stats = process_due_actions(session, never_called)
+
+    assert stats.revalidation_failed == 1
+    action = load_action(session_factory, action_id)
+    assert "not the proposal bound to this ingest file" in action.error
+
+
+def test_worker_rejects_an_ingest_payload_changed_after_review(client, session_factory):
+    action_id = seed_upload_action(client, session_factory)
+    with session_factory() as session:
+        action = session.get(OutboxAction, action_id)
+        ingest = session.get(IngestFile, action.payload["ingest_file_id"])
+        ingest.payload = {**ingest.payload, "results": {"BOW": 99.0}}
+        session.commit()
+
+    with session_factory() as session:
+        stats = process_due_actions(session, never_called)
+
+    assert stats.revalidation_failed == 1
+    action = load_action(session_factory, action_id)
+    assert "recorded evidence hash and size" in action.error
+
+
 def test_worker_confirms_already_written_action_without_submitting(client, session_factory):
     # A submitted action carrying an external_ref means the write already
     # happened (crash-after-write); it must be confirmed, never re-sent.
@@ -545,7 +636,11 @@ def test_real_submitter_upload_uses_normalized_payload(session_factory, client, 
             status=OutboxStatus.APPROVED.value,
             created_by="tests",
             user_id=approver.id,
-            payload={"ingest_file_id": ingest.id},
+            payload={
+                "ingest_file_id": ingest.id,
+                "derived_results": {"DERIVED_BOW": 0.0125},
+                "derived_result_codes": ["DERIVED_BOW"],
+            },
         )
         session.add(action)
         session.flush()
@@ -588,7 +683,7 @@ def test_real_submitter_upload_uses_normalized_payload(session_factory, client, 
     assert posts[0][0] == "uploadTestRunResults"
     assert posts[0][1]["component"] == "20UPGM19999999"
     assert posts[0][1]["testType"] == "MODULE_METROLOGY"
-    assert posts[0][1]["results"] == {"BOW": 12.5}
+    assert posts[0][1]["results"] == {"BOW": 12.5, "DERIVED_BOW": 0.0125}
 
 
 # --------------------------------------------------------------------------

@@ -1060,6 +1060,7 @@ export function ComponentDetailPanel({
     <ModuleWorksheet
       componentSn={detail.sn}
       componentType={detail.component_type}
+      componentTypeCode={detail.type_code}
       instituteCode={detail.institute_code}
       worksheet={preview.worksheet}
       schemas={worksheetSchemas}
@@ -1239,6 +1240,7 @@ export function ComponentDetailPanel({
               <AddTestResult
                 componentSn={detail.sn}
                 componentType={detail.component_type}
+                componentTypeCode={detail.type_code}
                 instituteCode={detail.institute_code}
                 labels={t.addTest}
                 schemas={testSchemas}

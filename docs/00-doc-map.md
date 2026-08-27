@@ -77,6 +77,7 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 | `backend/app/institute_settings.py`, Admin-Settings-UI und operative Institutsprofilwerte | [`11`](11-logistics-operations.md), [`05`](05-ui-design-reference.md), [`04`](04-roadmap.md) |
 | `frontend/src/stagedPreview.ts`, `stagedActions.ts`, Detail-/Staged-/Ingest-UI | [`05`](05-ui-design-reference.md), [`adr/006`](adr/006-staged-first-ui-auto-mirror.md) |
 | `frontend/src/ModuleWorksheet.tsx`, `testStaging.ts`, Worksheet-Payload in `preview.py` | [`05`](05-ui-design-reference.md), [`spec H`](superpowers/specs/2026-08-25-staged-first-module-page-design.md), [`adr/006`](adr/006-staged-first-ui-auto-mirror.md) |
+| `frontend/src/fieldLayout.ts`, `dataEntryProfile.ts`, `ToolFieldSelect.tsx` (Feldreihenfolge, Baender, Tool-Dropdowns) | [`05`](05-ui-design-reference.md), [`07`](07-jig-tool-quickselect.md) |
 | `frontend/src/**` (UI) | [`05`](05-ui-design-reference.md) |
 | `deploy/`, Docker, CI | [`02`](02-revamp-plan.md) (Deployment), [README](../deploy/README.md) |
 

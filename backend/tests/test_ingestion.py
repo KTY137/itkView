@@ -1,3 +1,4 @@
+import pytest
 from authutil import create_institute_profile
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -69,6 +70,28 @@ def test_parse_payload_glue_weight_checks_numeric_results():
     assert parsed.passed is False  # a failed test is still a valid upload
     assert "Result 'GW_MODULE_H1H2' is empty" in parsed.warnings
     assert "Result 'GW_T1' must be a number" in parsed.issues
+
+
+def test_parse_payload_canonicalizes_lowercase_glue_weight_test_type():
+    parsed = parse_payload(
+        pdb_payload(testType="glue_weight", results={"GW_SENSOR": 6.1849})
+    )
+
+    assert parsed.parser == "glue-weight-v1"
+    assert parsed.test_type == "GLUE_WEIGHT"
+    assert parsed.issues == []
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [float("nan"), float("inf"), pytest.param(10**10000, id="huge-int")],
+)
+def test_parse_payload_glue_weight_rejects_non_finite_results(invalid):
+    parsed = parse_payload(
+        pdb_payload(testType="GLUE_WEIGHT", passed=False, results={"GW_SENSOR": invalid})
+    )
+
+    assert "Result 'GW_SENSOR' must be a finite number" in parsed.issues
 
 
 def test_glue_derivation_uses_the_uploaded_measurement_time_for_dated_rules():

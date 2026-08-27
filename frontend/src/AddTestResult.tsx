@@ -6,11 +6,16 @@ import type {
   OutboxAction,
   TestTypeSchema,
 } from "./api";
+import { useDataEntryProfile } from "./dataEntryProfile";
+import { planFieldLayout } from "./fieldLayout";
+import { DerivedDetail } from "./GlueDerivation";
 import TestForm from "./TestForm";
 import type {
   TestFormLabels,
   TestFormSubmitPayload,
 } from "./TestForm";
+import { ToolFieldSection } from "./ToolFieldSelect";
+import type { ToolFieldLabels } from "./ToolFieldSelect";
 import {
   fetchDryRun,
   ingestTestPayload,
@@ -77,12 +82,17 @@ export type AddTestResultLabels = {
   staged: (actionId: number) => string;
   stageFailed: (error: string) => string;
   reset: string;
+  /** Heading over the fields that hold a tool rather than a measurement. */
+  toolSectionTitle: string;
+  toolField: ToolFieldLabels;
   testForm: TestFormLabels;
 };
 
 export type AddTestResultProps = {
   componentSn: string;
   componentType: string;
+  /** Exact PDB type code (for example R5M0_HALFMODULE), used for formula/tool fits. */
+  componentTypeCode?: string;
   labels: AddTestResultLabels;
   schemas: readonly TestTypeSchema[];
   schemasLoading?: boolean;
@@ -134,6 +144,7 @@ function errorMessage(error: unknown): string {
 export default function AddTestResult({
   componentSn,
   componentType,
+  componentTypeCode,
   labels,
   schemas,
   schemasLoading = false,
@@ -187,6 +198,7 @@ export default function AddTestResult({
   const contextIdentity = [
     componentSn,
     componentType,
+    componentTypeCode ?? "",
     instituteCode ?? "",
     normalizedPinnedTestType ?? "",
     String(intentToken),
@@ -211,6 +223,41 @@ export default function AddTestResult({
     selectedSchemaId === null
       ? null
       : (selectableSchemas.find((schema) => schema.id === selectedSchemaId) ?? null);
+
+  // Sheet layout: field order, band grouping and which fields hold a tool.
+  // Fetched only once a form is actually open — an operator who only uploads
+  // instrument files never pays for it.
+  const { layout, tools, loading: profileLoading, toolsError } = useDataEntryProfile({
+    instituteCode,
+    componentTypeCode,
+    enabled: formOpen && selectedSchema !== null,
+  });
+  const plan = useMemo(
+    () =>
+      selectedSchema === null || profileLoading
+        ? null
+        : planFieldLayout(
+            selectedSchema.schema,
+            selectedSchema.test_code,
+            layout,
+            componentTypeCode,
+          ),
+    [selectedSchema, layout, profileLoading, componentTypeCode],
+  );
+  const laidOutSchema = useMemo(
+    () =>
+      selectedSchema === null || plan === null
+        ? null
+        : { ...selectedSchema, schema: plan.definition },
+    [selectedSchema, plan],
+  );
+  const [toolValues, setToolValues] = useState<Record<string, string>>({});
+  const [missingToolCodes, setMissingToolCodes] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    setToolValues({});
+    setMissingToolCodes(new Set());
+  }, [selectedSchemaId]);
+
   const interactionDisabled = disabled || busy !== null || syncBusy;
   const schemaInteractionDisabled =
     interactionDisabled || schemasLoading || schemasSyncing;
@@ -392,10 +439,46 @@ export default function AddTestResult({
     if (file !== undefined) void handleFile(file);
   }
 
+  /**
+   * Fold the chosen tools back into the payload the form produced.
+   *
+   * A tool field never reaches `TestForm` (it is removed from the definition
+   * the form renders), so its value has to be merged here — under the same
+   * section and code the PDB definition declared it in, so the staged payload
+   * is indistinguishable from one typed into the old free-text field.
+   *
+   * Returns `null` when a required tool field is empty: `TestForm` cannot
+   * enforce a field it never saw, so the requirement is enforced at the one
+   * place that knows about it, rather than silently staging a run missing a
+   * value the schema calls required.
+   */
+  function withToolValues(payload: TestFormSubmitPayload): TestFormSubmitPayload | null {
+    const toolFields = plan?.toolFields ?? [];
+    if (toolFields.length === 0) return payload;
+    const missing = new Set<string>();
+    const merged: TestFormSubmitPayload = {
+      ...payload,
+      properties: { ...payload.properties },
+      results: { ...payload.results },
+    };
+    for (const field of toolFields) {
+      const value = (toolValues[field.code] ?? "").trim();
+      if (value === "") {
+        if (field.required) missing.add(field.code);
+        continue;
+      }
+      merged[field.section][field.code] = value;
+    }
+    setMissingToolCodes(missing);
+    return missing.size === 0 ? merged : null;
+  }
+
   async function handleManualSubmit(payload: TestFormSubmitPayload) {
+    const merged = withToolValues(payload);
+    if (merged === null) return;
     await ingestPayload(
-      labels.manualFilename(payload.testType),
-      manualEntryPayload(payload),
+      labels.manualFilename(merged.testType),
+      manualEntryPayload(merged),
       "manual-entry",
     );
   }
@@ -591,10 +674,34 @@ export default function AddTestResult({
               ))}
             </select>
           </label>
-          {selectedSchema !== null && (
+          {plan !== null && (
+            // Tooling first, as on the sheet: what the module was built in is
+            // decided before the scale is read, and it is chosen, not typed.
+            <ToolFieldSection
+              fields={plan.toolFields}
+              tools={tools}
+              componentTypeCode={componentTypeCode}
+              values={toolValues}
+              onChange={(code, value) => {
+                setToolValues((current) => ({ ...current, [code]: value }));
+                setMissingToolCodes((current) => {
+                  if (!current.has(code)) return current;
+                  const next = new Set(current);
+                  next.delete(code);
+                  return next;
+                });
+              }}
+              invalidCodes={missingToolCodes}
+              labels={labels.toolField}
+              title={labels.toolSectionTitle}
+              toolsError={toolsError}
+              disabled={schemaInteractionDisabled}
+            />
+          )}
+          {laidOutSchema !== null && (
             <TestForm
               component={componentSn}
-              schema={selectedSchema}
+              schema={laidOutSchema}
               labels={labels.testForm}
               disabled={schemaInteractionDisabled}
               onSubmit={handleManualSubmit}
@@ -722,6 +829,10 @@ export default function AddTestResult({
                     </tbody>
                   </table>
                 </div>
+              )}
+
+              {preview.derived != null && (
+                <DerivedDetail derived={preview.derived} source="preview" />
               )}
 
               <div className="phase4-action-bar phase4-actions-end">

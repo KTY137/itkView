@@ -19,7 +19,9 @@ Safety properties:
   transient failure — distinct from a PDB *rejection* of the data.
 """
 
-from collections.abc import Callable
+import hashlib
+import json
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -27,8 +29,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.assembly import ASSEMBLY_ACTION_KIND, revalidate_assembly_action
-from app.ingestion import parse_payload
-from app.models import AuditEvent, Component, IngestFile, OutboxAction
+from app.glue_service import derivation_payload, derived_result_codes, derived_result_grams
+from app.ingestion import derive_glue_results, parse_payload
+from app.models import AuditEvent, Component, IngestFile, InstituteProfile, OutboxAction
 from app.outbox import OutboxStatus, assert_transition
 from app.pdb_upload import UploadPayloadError, build_upload_test_run_payload
 from app.stage_service import evaluate_for_component
@@ -153,25 +156,126 @@ def revalidate_upload(session: Session, action: OutboxAction) -> list[str]:
     ingest = session.get(IngestFile, ingest_id) if ingest_id is not None else None
     if ingest is None:
         return ["The ingest file backing this action no longer exists."]
+    if ingest.outbox_action_id != action.id:
+        return [
+            "The upload action is not the proposal bound to this ingest file; "
+            "create it from the ingest preview."
+        ]
 
     parsed = parse_payload(ingest.payload)
     issues = list(parsed.issues)
-    # The component must still resolve in the mirror (by SN, else local name).
-    component = None
-    if parsed.component_sn is not None:
-        component = session.scalar(select(Component).where(Component.sn == parsed.component_sn))
-    elif parsed.local_name is not None:
-        component = session.scalar(
-            select(Component).where(Component.local_name == parsed.local_name)
+    canonical_payload = json.dumps(
+        ingest.payload, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    if (
+        hashlib.sha256(canonical_payload).hexdigest() != ingest.sha256
+        or len(canonical_payload) != ingest.size_bytes
+    ):
+        issues.append(
+            "The ingest payload no longer matches its recorded evidence hash and size; "
+            "ingest it again."
+        )
+    # Submission uses the target pinned on the ingest row. Re-resolving an
+    # editable/non-unique local name here could validate a different component
+    # than the submitter eventually writes to.
+    component = (
+        session.scalar(select(Component).where(Component.sn == ingest.component_sn))
+        if ingest.component_sn is not None
+        else None
+    )
+    if ingest.component_sn is None:
+        issues.append("The ingest file no longer has a pinned component serial number.")
+    if (
+        ingest.component_sn is not None
+        and parsed.component_sn is not None
+        and parsed.component_sn != ingest.component_sn
+    ):
+        issues.append(
+            f"Payload component '{parsed.component_sn}' does not match pinned component "
+            f"'{ingest.component_sn}'."
+        )
+    if ingest.test_type is None or parsed.test_type != ingest.test_type.upper():
+        embedded = parsed.test_type if parsed.test_type is not None else "missing"
+        issues.append(
+            f"Payload test type '{embedded}' does not match pinned test type "
+            f"'{ingest.test_type or 'missing'}'."
+        )
+
+    expected_metadata = {
+        "filename": ingest.filename,
+        "sha256": ingest.sha256,
+        "component_sn": ingest.component_sn,
+        "test_type": ingest.test_type,
+        "parser": ingest.parser,
+        "run_number": parsed.run_number,
+        "passed": parsed.passed,
+        "measured_at": parsed.measured_at,
+        "dry_run_required": True,
+    }
+    if any(action.payload.get(key) != value for key, value in expected_metadata.items()):
+        issues.append(
+            "The staged upload metadata no longer matches its ingest file; restage it."
         )
     if component is None:
         issues.append("Component is no longer in the local mirror; re-sync before submitting.")
     elif not issues:
+        profile = session.get(InstituteProfile, action.institute_id)
+        if profile is None:
+            issues.append("The institute profile backing this action no longer exists.")
+            return issues
+        if component.institute_code != profile.code:
+            issues.append(
+                "The action institute no longer matches the component institute; restage it."
+            )
+            return issues
+
+        derivation = derive_glue_results(
+            ingest.payload,
+            profile.settings,
+            parsed.test_type or ingest.test_type,
+            component.type_code,
+            measured_at=parsed.measured_at,
+        )
+        expected_derived = derived_result_grams(derivation)
+        expected_derived_codes = derived_result_codes(derivation)
+        expected_derivation = derivation_payload(derivation)
+        staged_derived = action.payload.get("derived_results")
+        if staged_derived is None:
+            staged_derived = {}
+        if not isinstance(staged_derived, Mapping):
+            issues.append("Derived results must be an object.")
+            return issues
+        if dict(staged_derived) != expected_derived:
+            issues.append(
+                "The staged derived results no longer match the server formula; "
+                "restage the upload."
+            )
+            return issues
+        staged_derived_codes = action.payload.get("derived_result_codes")
+        if staged_derived_codes is None:
+            staged_derived_codes = []
+        if not isinstance(staged_derived_codes, list):
+            issues.append("Derived result codes must be a list.")
+            return issues
+        if staged_derived_codes != expected_derived_codes:
+            issues.append(
+                "The staged derived result codes no longer match the server formula; "
+                "restage the upload."
+            )
+            return issues
+        if action.payload.get("derived") != expected_derivation:
+            issues.append(
+                "The staged derivation no longer matches the server formula or targets; "
+                "restage the upload."
+            )
+            return issues
         try:
             build_upload_test_run_payload(
                 ingest.payload,
                 component_sn=component.sn,
                 institute_code=component.institute_code,
+                derived_results=staged_derived,
+                derived_result_codes=staged_derived_codes,
             )
         except UploadPayloadError as exc:
             issues.append(str(exc))

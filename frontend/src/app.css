@@ -3581,3 +3581,48 @@ g:hover > .curve-line {
   min-height: 40px;
   justify-content: center;
 }
+
+/* Tool fields in a generated test form.
+
+   The production sheet keeps tooling in its own block inside each gluing
+   band, above the scale readings, and every one of those cells is a
+   data-validation dropdown. Same shape here: one band per configured
+   derivation step, a native select (keyboard operable, no custom widget) and
+   the scan box beside it, because an operator holding the tool is faster with
+   a barcode than with any list. Targets stay large enough for a gloved hand
+   on a cleanroom touchscreen. */
+.tool-field-section {
+  gap: 12px;
+}
+.tool-field-band {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tool-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  grid-column: span 2;
+}
+.tool-field > .phase4-field > .select-input {
+  min-height: 40px;
+}
+.tool-field-scan .search-input,
+.tool-field-scan .btn {
+  min-height: 40px;
+}
+.tool-field-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.tool-field-hint.serious-text {
+  color: var(--serious);
+}
+/* Never colour alone: the required-field message below the control carries
+   the same information in words. */
+.tool-field-invalid > .phase4-field > .select-input {
+  border-color: var(--crit);
+}

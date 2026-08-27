@@ -14,6 +14,8 @@ What is *not* tested here is any institute name, module type or result code
 appearing in the derivation logic — every one of them arrives as profile data.
 """
 
+import hashlib
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -27,6 +29,7 @@ from app.domain.glue import (
     GlueUnknownReason,
     GlueVerdict,
     derive_run,
+    evaluate_glue_weight,
     glue_model_from_settings,
     glue_targets_from_settings,
     glue_weight_from_readings_mg,
@@ -36,6 +39,7 @@ from app.domain.glue import (
 from app.glue_service import (
     derivation_payload,
     derive_for_component,
+    derived_result_codes,
     derived_result_grams,
 )
 from app.institute_settings import (
@@ -43,6 +47,8 @@ from app.institute_settings import (
     normalize_institute_settings_update,
 )
 from app.models import Component, IngestFile, InstituteProfile, TestRunEvidence
+from app.outbox_worker import revalidate_upload
+from app.pdb_upload import build_upload_test_run_payload
 from app.preview import build_component_preview
 
 TEST_TYPE = "GLUE_WEIGHT"
@@ -73,33 +79,46 @@ GLUE_WEIGHT_INPUT_SETTINGS = {
         "subtract": ["GW_MODULE_H1", "GW_PB"],
         "result_code": "GW_GLUE_PB",
     },
+    "total": {
+        "label": "Hybrids + powerboard",
+        "test_type": TEST_TYPE,
+        "measured": "GW_MODULE_H1PB",
+        "subtract": ["GW_SENSOR", "GW_HYBRID1", "GW_PB"],
+        "result_code": "GW_GLUE_H1PB",
+    },
 }
 
 SHEET_MODULE_TARGETS = {
     "R0": {
         "hybrids": {"target_mg": 230, "tolerance_mg": 35},
         "powerboard": {"target_mg": 84, "tolerance_mg": 13},
+        "total": {"target_mg": 314, "tolerance_mg": 48},
     },
     "R1": {
         "hybrids": {"target_mg": 311, "tolerance_mg": 46},
         "powerboard": {"target_mg": 84, "tolerance_mg": 13},
+        "total": {"target_mg": 395, "tolerance_mg": 59},
     },
     "R2": {
         "hybrids": {"target_mg": 164, "tolerance_mg": 25},
         "powerboard": {"target_mg": 70, "tolerance_mg": 11},
+        "total": {"target_mg": 234, "tolerance_mg": 36},
     },
     "R3M0": {
         "hybrids": {"target_mg": 198, "tolerance_mg": 30},
         "powerboard": {"target_mg": 157, "tolerance_mg": 23},
+        "total": {"target_mg": 355, "tolerance_mg": 53},
     },
     "R3M1": {"hybrids": {"target_mg": 231, "tolerance_mg": 35}},
     "R5M0": {
         "hybrids": {"target_mg": 135, "tolerance_mg": 20},
         "powerboard": {"target_mg": 103, "tolerance_mg": 16},
+        "total": {"target_mg": 238, "tolerance_mg": 36},
     },
     "R5M0_HALFMODULE": {
         "hybrids": {"target_mg": 135, "tolerance_mg": 20},
         "powerboard": {"target_mg": 103, "tolerance_mg": 16},
+        "total": {"target_mg": 238, "tolerance_mg": 36},
     },
     "R5M1": {"hybrids": {"target_mg": 151, "tolerance_mg": 22}},
     "R5M1_HALFMODULE": {
@@ -134,14 +153,36 @@ TYPE_SPECIFIC_GLUE_SETTINGS = {
                 }
             },
         },
+        "powerboard": {
+            **GLUE_WEIGHT_INPUT_SETTINGS["powerboard"],
+            "by_type_code": {
+                "R2": {
+                    "measured": "GW_MODULE_H1H2PB",
+                    "subtract": ["GW_MODULE_H1H2", "GW_PB"],
+                    "result_code": "GW_GLUE_PB",
+                }
+            },
+        },
+        "total": {
+            **GLUE_WEIGHT_INPUT_SETTINGS["total"],
+            "by_type_code": {
+                "R2": {
+                    "measured": "GW_MODULE_H1H2PB",
+                    "subtract": ["GW_SENSOR", "GW_HYBRID1", "GW_HYBRID2", "GW_PB"],
+                    "result_code": "GW_GLUE_H1H2PB",
+                }
+            },
+        },
     },
 }
 
 H1H2_READINGS = {
     "GW_MODULE_H1H2": 12.1185,
+    "GW_MODULE_H1H2PB": 15.2185,
     "GW_SENSOR": 9.7522,
     "GW_HYBRID1": 2.0,
     "GW_HYBRID2": 0.2330,
+    "GW_PB": 3.0,
 }
 
 
@@ -222,13 +263,11 @@ def test_a_half_module_has_no_powerboard_step_at_all():
 def test_totals_are_never_transcribed_from_the_sheet():
     """The sheet's R2 row states a total tolerance of 22 where 25 + 11 = 36.
 
-    Nothing in the profile carries a total, so the bug cannot travel; a caller
-    that wants one adds the parts, which is what this asserts.
+    The profile carries the recomputed sum, never the mistyped sheet cell.
     """
     steps = _steps(_derive(SHEET_GLUE_SETTINGS, type_code="R2"))
-    total = sum(step.target.tolerance_mg for step in steps.values())
-    assert total == 36
-    assert total != 22
+    assert steps["total"].target == GlueTarget(234, 36)
+    assert steps["total"].target.tolerance_mg != 22
 
 
 # --- a profile override ----------------------------------------------------
@@ -305,6 +344,20 @@ def test_exact_type_code_selects_the_configured_formula_override():
     ]
     assert step.measured_mg == pytest.approx(133.3)
     assert step.result_code == "GW_GLUE_H1H2"
+
+
+def test_two_hybrid_override_uploads_individual_and_combined_glue_results():
+    derivation = _derive(
+        TYPE_SPECIFIC_GLUE_SETTINGS,
+        type_code="R2",
+        results=H1H2_READINGS,
+    )
+
+    assert derived_result_grams(derivation) == {
+        "GW_GLUE_H1H2": pytest.approx(0.1333),
+        "GW_GLUE_PB": pytest.approx(0.1),
+        "GW_GLUE_H1H2PB": pytest.approx(0.2333),
+    }
 
 
 @pytest.mark.parametrize("type_code", ["R5M1_HALFMODULE", "r2", None])
@@ -408,6 +461,7 @@ def test_reference_input_seeds_remain_available_without_being_runtime_defaults()
     assert [spec.key for spec in DEFAULT_GLUE_WEIGHT_INPUTS] == [
         "hybrids",
         "powerboard",
+        "total",
     ]
 
 
@@ -658,6 +712,83 @@ def test_the_pure_formula_converts_grams_to_milligrams_once():
     assert glue_weight_from_readings_mg(0.5, ()) == pytest.approx(500.0)
 
 
+@pytest.mark.parametrize(
+    ("module_weight", "verdict"),
+    [
+        (2.11496, GlueVerdict.TOO_LITTLE),
+        (2.15504, GlueVerdict.TOO_MUCH),
+    ],
+)
+def test_verdict_uses_the_unrounded_sheet_value_at_tolerance_boundaries(
+    module_weight, verdict
+):
+    readings = {**READINGS, "GW_SENSOR": 1.0, "GW_HYBRID1": 1.0}
+    readings["GW_MODULE_H1"] = module_weight
+
+    hybrids = _steps(
+        _derive(SHEET_GLUE_SETTINGS, type_code="R5M0_HALFMODULE", results=readings)
+    )["hybrids"]
+
+    assert hybrids.measured_mg in (115.0, 155.0)
+    assert hybrids.verdict is verdict
+
+
+def test_algebraically_equivalent_powerboard_chain_stays_on_inclusive_boundary():
+    # R2 powerboard lower bound is 70 - 11 = 59 mg. The live sheet's expanded
+    # formula and the backend's cancelled formula have different float
+    # subtraction order, but both describe this exact decimal scale result.
+    readings = {
+        **READINGS,
+        "GW_MODULE_H1": 10.8343,
+        "GW_PB": 3.0526,
+        "GW_MODULE_H1PB": 13.9459,
+    }
+
+    powerboard = _steps(
+        _derive(SHEET_GLUE_SETTINGS, type_code="R2", results=readings)
+    )["powerboard"]
+
+    assert powerboard.measured_mg == 59.0
+    assert powerboard.verdict is GlueVerdict.OK
+
+
+def test_decimal_profile_target_keeps_its_inclusive_boundary():
+    assert evaluate_glue_weight(100.1, GlueTarget(100.4, 0.3)) is GlueVerdict.OK
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [float("nan"), float("inf"), pytest.param(10**10000, id="huge-int")],
+)
+def test_non_finite_or_unrepresentable_scale_readings_are_missing_inputs(invalid):
+    readings = {**READINGS, "GW_MODULE_H1": invalid}
+
+    hybrids = _steps(
+        _derive(SHEET_GLUE_SETTINGS, type_code="R5M0_HALFMODULE", results=readings)
+    )["hybrids"]
+
+    assert hybrids.measured_mg is None
+    assert hybrids.verdict is GlueVerdict.UNKNOWN
+    assert hybrids.reason is GlueUnknownReason.MISSING_INPUTS
+
+
+def test_finite_scale_readings_whose_arithmetic_overflows_are_missing_inputs():
+    readings = {
+        **READINGS,
+        "GW_MODULE_H1": 1e308,
+        "GW_SENSOR": -1e308,
+        "GW_HYBRID1": 0.0,
+    }
+
+    hybrids = _steps(
+        _derive(SHEET_GLUE_SETTINGS, type_code="R5M0_HALFMODULE", results=readings)
+    )["hybrids"]
+
+    assert hybrids.measured_mg is None
+    assert hybrids.verdict is GlueVerdict.UNKNOWN
+    assert hybrids.reason is GlueUnknownReason.MISSING_INPUTS
+
+
 def test_derived_values_are_milligrams_and_uploads_are_grams():
     """The PDB declares every GW_ code in grams; targets are stated in mg.
 
@@ -672,7 +803,13 @@ def test_derived_values_are_milligrams_and_uploads_are_grams():
     assert derived_result_grams(derivation) == {
         "GW_GLUE_H1": pytest.approx(0.1327),
         "GW_GLUE_PB": pytest.approx(0.0961),
+        "GW_GLUE_H1PB": pytest.approx(0.2288),
     }
+    assert derived_result_codes(derivation) == [
+        "GW_GLUE_H1",
+        "GW_GLUE_PB",
+        "GW_GLUE_H1PB",
+    ]
 
 
 def test_an_unmeasurable_step_contributes_no_uploaded_value():
@@ -903,6 +1040,18 @@ def test_null_disables_glue_derivation_without_a_runtime_fallback():
                 "hybrids": {"measured": "GW_A", "subtract": ["GW_B"], "result_code": "GW_B"}
             }
         },
+        # A result from one step must not overwrite a raw input consumed by a
+        # different step in the same test run.
+        {
+            "glue_weight_inputs": {
+                "hybrids": {"measured": "GW_A", "result_code": "GW_PB"},
+                "powerboard": {
+                    "measured": "GW_AFTER_PB",
+                    "subtract": ["GW_A", "GW_PB"],
+                    "result_code": "GW_GLUE_PB",
+                },
+            }
+        },
         {
             "glue_weight_inputs": {
                 "hybrids": {"measured": "GW_A", "by_type_code": []}
@@ -962,6 +1111,26 @@ def test_null_disables_glue_derivation_without_a_runtime_fallback():
                 }
             }
         },
+        {
+            "glue_weight_inputs": {
+                "first": {"measured": "GW_A", "result_code": "GW_SAME"},
+                "second": {"measured": "GW_B", "result_code": "GW_SAME"},
+            }
+        },
+        {
+            "glue_weight_inputs": {
+                "first": {
+                    "measured": "GW_A",
+                    "result_code": "GW_FIRST",
+                    "by_type_code": {"R2": {"result_code": "GW_SAME"}},
+                },
+                "second": {
+                    "measured": "GW_B",
+                    "result_code": "GW_SECOND",
+                    "by_type_code": {"R2": {"result_code": "GW_SAME"}},
+                },
+            }
+        },
         {"glue_weight_inputs": {"hybrids": {"measured": "GW_A", "test_type": "lower case"}}},
         {"glue_default_process": "true blue"},
         {"glue_process_default": "true blue"},
@@ -971,6 +1140,32 @@ def test_null_disables_glue_derivation_without_a_runtime_fallback():
 def test_invalid_glue_settings_are_rejected(patch):
     with pytest.raises(InstituteSettingsValidationError):
         normalize_institute_settings_update({}, patch)
+
+
+def test_legacy_duplicate_result_codes_disable_derivation_instead_of_overwriting():
+    settings = {
+        "glue_weight_inputs": {
+            "first": {"measured": "GW_A", "result_code": "GW_SAME"},
+            "second": {"measured": "GW_B", "result_code": "GW_SAME"},
+        }
+    }
+
+    assert glue_weight_inputs_from_settings(settings) == ()
+
+
+def test_legacy_output_input_collision_disables_derivation_instead_of_overwriting():
+    settings = {
+        "glue_weight_inputs": {
+            "hybrids": {"measured": "GW_A", "result_code": "GW_PB"},
+            "powerboard": {
+                "measured": "GW_AFTER_PB",
+                "subtract": ["GW_A", "GW_PB"],
+                "result_code": "GW_GLUE_PB",
+            },
+        }
+    }
+
+    assert glue_weight_inputs_from_settings(settings) == ()
 
 
 def test_glue_settings_survive_the_admin_endpoint(as_admin, session_factory, tudo):
@@ -1218,11 +1413,14 @@ def _ingest(
     }
     if institution is not None:
         payload["institution"] = institution
+    canonical_payload = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     with session_factory() as session:
         ingest = IngestFile(
             filename="glue.json",
-            sha256="b" * 64,
-            size_bytes=len(str(payload)),
+            sha256=hashlib.sha256(canonical_payload).hexdigest(),
+            size_bytes=len(canonical_payload),
             status="received",
             component_sn=sn,
             test_type=TEST_TYPE,
@@ -1297,15 +1495,97 @@ def test_a_staged_upload_carries_the_computed_values_in_grams(
     assert resp.status_code == 201, resp.text
     with session_factory() as session:
         ingest = session.get(IngestFile, file_id)
-        action_payload = ingest.outbox_action.payload
+        action = ingest.outbox_action
+        action_payload = action.payload
+        assert revalidate_upload(session, action) == []
     assert action_payload["derived_results"] == {
         "GW_GLUE_H1": pytest.approx(0.1327),
         "GW_GLUE_PB": pytest.approx(0.0961),
+        "GW_GLUE_H1PB": pytest.approx(0.2288),
     }
+    assert action_payload["derived_result_codes"] == [
+        "GW_GLUE_H1",
+        "GW_GLUE_PB",
+        "GW_GLUE_H1PB",
+    ]
+    assert action_payload["derived"]["steps"][0]["verdict"] == "ok"
     # The received file itself is untouched, so its sha256 keeps meaning what
     # it says: the derived values ride on the write intent, not on the evidence.
     with session_factory() as session:
         assert "GW_GLUE_H1" not in session.get(IngestFile, file_id).payload["results"]
+
+
+def test_target_change_after_review_requires_the_glue_upload_to_be_restaged(
+    as_operator, session_factory, configured_tudo
+):
+    _mirror_module(session_factory, type_code="R5M0_HALFMODULE")
+    file_id = _ingest(session_factory, READINGS)
+    response = as_operator.post(f"/api/ingest/files/{file_id}/propose-outbox", json={})
+    assert response.status_code == 201, response.text
+
+    with session_factory() as session:
+        profile = session.scalar(
+            select(InstituteProfile).where(InstituteProfile.code == "TUDO")
+        )
+        assert profile is not None
+        changed_targets = {
+            **SHEET_MODULE_TARGETS,
+            "R5M0_HALFMODULE": {
+                **SHEET_MODULE_TARGETS["R5M0_HALFMODULE"],
+                "hybrids": {"target_mg": 200, "tolerance_mg": 1},
+            },
+        }
+        profile.settings = {
+            **profile.settings,
+            "glue_targets": [
+                {
+                    **SHEET_GLUE_SETTINGS["glue_targets"][0],
+                    "module_types": changed_targets,
+                }
+            ],
+        }
+        session.commit()
+
+    with session_factory() as session:
+        ingest = session.get(IngestFile, file_id)
+        issues = revalidate_upload(session, ingest.outbox_action)
+
+    assert issues == [
+        "The staged derivation no longer matches the server formula or targets; "
+        "restage the upload."
+    ]
+
+
+def test_a_missing_input_cannot_let_a_raw_formula_result_survive_the_upload(
+    as_operator, session_factory, configured_tudo
+):
+    _mirror_module(session_factory, type_code="R5M0_HALFMODULE")
+    raw_readings = {**READINGS, "GW_SENSOR": None, "GW_GLUE_H1": 9.999}
+    file_id = _ingest(session_factory, raw_readings)
+    response = as_operator.post(f"/api/ingest/files/{file_id}/propose-outbox", json={})
+    assert response.status_code == 201, response.text
+
+    with session_factory() as session:
+        ingest = session.get(IngestFile, file_id)
+        action = ingest.outbox_action
+        assert action.payload["derived_results"] == {"GW_GLUE_PB": pytest.approx(0.0961)}
+        assert action.payload["derived_result_codes"] == [
+            "GW_GLUE_H1",
+            "GW_GLUE_PB",
+            "GW_GLUE_H1PB",
+        ]
+        assert revalidate_upload(session, action) == []
+        upload = build_upload_test_run_payload(
+            ingest.payload,
+            component_sn=SN,
+            institute_code="TUDO",
+            derived_results=action.payload["derived_results"],
+            derived_result_codes=action.payload["derived_result_codes"],
+        )
+
+    assert "GW_GLUE_H1" not in upload["results"]
+    assert upload["results"]["GW_GLUE_PB"] == pytest.approx(0.0961)
+    assert raw_readings["GW_GLUE_H1"] == 9.999
 
 
 def test_the_dry_run_derives_nothing_for_an_unconfigured_test_type(
@@ -1402,6 +1682,7 @@ def test_unmirrored_preview_and_proposal_share_the_selected_profile(
     assert proposal.json()["payload"]["derived_results"] == {
         "ALT_GLUE": pytest.approx(0.4)
     }
+    assert proposal.json()["payload"]["derived_result_codes"] == ["ALT_GLUE"]
 
 
 def test_unmirrored_proposal_validates_with_the_selected_profile(

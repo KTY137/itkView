@@ -52,6 +52,9 @@ _ASSEMBLY_TOOL_SLOT_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}\Z")
 # JIG_HYBRID_ALIGNMENT.
 _ASSEMBLY_PROPERTY_KEY_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
 _ASSEMBLY_TOOL_SLOT_FIELDS = frozenset({"key", "label", "kinds", "multiple", "property_key"})
+# A tool-bearing field of a test type: the PDB code plus the registry kinds
+# it accepts. Nothing else — a label would only duplicate the definition's.
+_TEST_TOOL_FIELD_FIELDS = frozenset({"code", "kinds", "step"})
 # A PDB result code, e.g. GW_MODULE_H1PB. Which codes exist is schema data;
 # only their shape is validated here.
 _RESULT_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
@@ -840,7 +843,52 @@ def _glue_weight_inputs(value: Any) -> dict[str, dict[str, Any]] | None:
             "glue_weight_inputs must contain at least one step; "
             "use null to disable it."
         )
+    _validate_unique_glue_result_codes(normalised)
     return normalised
+
+
+def _validate_unique_glue_result_codes(steps: dict[str, dict[str, Any]]) -> None:
+    """Reject ambiguous outputs and every cross-step output/input collision.
+
+    The upload map is keyed by result code, so a duplicate would otherwise be
+    silent last-write-wins. Check the base formulas and every exact type-code
+    context mentioned by an override; steps belonging to different test types
+    are separate runs and may legitimately reuse a code.
+    """
+    type_codes: set[str | None] = {None}
+    for step in steps.values():
+        type_codes.update(step.get("by_type_code", {}))
+
+    for type_code in type_codes:
+        outputs_by_test: dict[str, set[str]] = {}
+        inputs_by_test: dict[str, set[str]] = {}
+        for step in steps.values():
+            formula = step
+            if type_code is not None:
+                formula = step.get("by_type_code", {}).get(type_code, step)
+            test_type = step.get("test_type", "GLUE_WEIGHT")
+            inputs_by_test.setdefault(test_type, set()).update(
+                [formula["measured"], *formula.get("subtract", [])]
+            )
+            result_code = formula.get("result_code")
+            if result_code is None:
+                continue
+            outputs = outputs_by_test.setdefault(test_type, set())
+            if result_code in outputs:
+                context = "base formulas" if type_code is None else f"module type {type_code}"
+                raise InstituteSettingsValidationError(
+                    f"Glue result codes must be unique per test type in {context}."
+                )
+            outputs.add(result_code)
+        if any(
+            outputs & inputs_by_test.get(test_type, set())
+            for test_type, outputs in outputs_by_test.items()
+        ):
+            context = "base formulas" if type_code is None else f"module type {type_code}"
+            raise InstituteSettingsValidationError(
+                "Glue result codes must not also be raw inputs in the same "
+                f"test type and {context}."
+            )
 
 
 def _glue_default_process(value: Any) -> str | None:
@@ -991,6 +1039,99 @@ def _assembly_tool_slots(value: Any) -> list[dict[str, Any]]:
             seen_property_keys.add(property_key)
             slot["property_key"] = property_key
         normalised.append(slot)
+    return normalised
+
+
+def _test_tool_fields(value: Any) -> dict[str, list[dict[str, Any]]] | None:
+    """Normalize which test-type fields hold a registry tool, not a typed value.
+
+    Shape: ``{"<TEST_TYPE>": [{"code": "<FIELD_CODE>", "kinds": ["jig"]}]}``.
+
+    A PDB test definition cannot say "this field is a jig" — it says
+    ``dataType: string`` — so the generated form renders free text wherever an
+    institute records tooling in a test rather than on the assembly. The
+    mirrored evidence shows the cost: one institute's 28 ``MODULE_BOW`` runs
+    carry the same jig under three spellings, its 17 wire-bonding runs one
+    machine under four. Naming the field here turns it into a picker over the
+    tool registry, which is what the production sheet's data-validation
+    dropdown always did.
+
+    Which fields those are is institute business (harte Regel 4): no test
+    type, field code or tool kind may be a literal in application code.
+    ``kinds`` is optional and filters the registry by ``Tool.kind``; omitting
+    it offers every active, compatible tool. ``None`` clears the mapping.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise InstituteSettingsValidationError("test_tool_fields must be an object.")
+    normalised: dict[str, list[dict[str, Any]]] = {}
+    for raw_test_type, raw_fields in value.items():
+        test_type = _clean_string(
+            raw_test_type, label="Tool field test type", max_length=64
+        ).upper()
+        if _TEST_TYPE_RE.fullmatch(test_type) is None:
+            raise InstituteSettingsValidationError(
+                "Tool field test types may contain uppercase letters, digits, "
+                "and underscores."
+            )
+        if test_type in normalised:
+            raise InstituteSettingsValidationError(
+                "Tool field test types must be unique."
+            )
+        if not isinstance(raw_fields, list):
+            raise InstituteSettingsValidationError(
+                "Every tool field test type must map to a list of field objects."
+            )
+        if not raw_fields:
+            # Silently dropping it would leave an admin staring at a key that
+            # vanished on save; say what the accepted value is instead.
+            raise InstituteSettingsValidationError(
+                "A tool field test type must list at least one field; "
+                "remove the test type instead of mapping it to an empty list."
+            )
+        fields: list[dict[str, Any]] = []
+        seen_codes: set[str] = set()
+        for raw_field in raw_fields:
+            if not isinstance(raw_field, dict):
+                raise InstituteSettingsValidationError(
+                    "Every tool field must be an object."
+                )
+            if set(raw_field) - _TEST_TOOL_FIELD_FIELDS:
+                raise InstituteSettingsValidationError(
+                    "Tool fields only support code and kinds."
+                )
+            code = _result_code(raw_field.get("code"), "Tool field code")
+            if code in seen_codes:
+                raise InstituteSettingsValidationError(
+                    "Tool field codes must be unique per test type."
+                )
+            seen_codes.add(code)
+            field: dict[str, Any] = {"code": code}
+            if "kinds" in raw_field:
+                kinds = _clean_string_list(
+                    raw_field["kinds"],
+                    setting_name="Tool field kinds",
+                    item_label="tool kind",
+                    max_length=24,
+                )
+                # Tool.kind is canonical lower-case registry data. Store the
+                # profile filter the same way so a harmless `JIG` spelling
+                # cannot produce an apparently valid but empty picker.
+                field["kinds"] = list(dict.fromkeys(kind.lower() for kind in kinds))
+            if raw_field.get("step") is not None:
+                # The band this field is shown under, named by a
+                # `glue_weight_inputs` step key — the production sheet keeps
+                # its tooling rows inside the gluing band they belong to, and
+                # no derivation formula names a jig, so the band cannot be
+                # recovered from the formula. Only the *shape* is checked
+                # here: a patch may legitimately set this before (or without)
+                # the steps it points at, and an unknown key degrades to the
+                # unnamed remainder rather than blocking the save.
+                field["step"] = _glue_step_key(raw_field["step"])
+            fields.append(field)
+        normalised[test_type] = fields
     return normalised
 
 
@@ -1171,6 +1312,10 @@ def normalize_institute_settings_update(
     if "assembly_tool_slots" in settings_patch:
         normalised["assembly_tool_slots"] = _assembly_tool_slots(
             settings_patch["assembly_tool_slots"]
+        )
+    if "test_tool_fields" in settings_patch:
+        normalised["test_tool_fields"] = _test_tool_fields(
+            settings_patch["test_tool_fields"]
         )
     if "glue_targets" in settings_patch:
         normalised["glue_targets"] = _glue_targets(settings_patch["glue_targets"])

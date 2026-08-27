@@ -76,6 +76,28 @@ const CURVE_SENTINEL = 0.987654321;
 const MAP_KEY = "ABC_R5H1_0";
 const MAP_VALUE = 123.456;
 
+const stagedGlueDerivation = {
+  kind: "glue_weight",
+  process: "TRUE_BLUE",
+  process_source: "profile_default",
+  steps: [
+    {
+      key: "hybrids",
+      label: "Hybrid bondline",
+      measured_mg: 166.4,
+      target_mg: 164,
+      tolerance_mg: 25,
+      verdict: "ok",
+      reason: null,
+      result_code: "GW_GLUE_H1",
+      inputs: [
+        { code: "GW_SENSOR", name: "Sensor", value: 7.0162 },
+        { code: "GW_MODULE_H1", name: "Module after hybrid", value: 9.3866 },
+      ],
+    },
+  ],
+};
+
 const curve = [
   CURVE_SENTINEL,
   ...Array.from({ length: 58 }, (_, index) => index / 1000),
@@ -125,7 +147,15 @@ function action(overrides: Partial<OutboxAction> & { id: number }): OutboxAction
 }
 
 const actions: OutboxAction[] = [
-  action({ id: 501 }),
+  action({
+    id: 501,
+    payload: {
+      component_sn: DUMMY_SN,
+      test_type: "GLUE_WEIGHT",
+      derived_results: { GW_GLUE_H1: 0.1664 },
+      derived: stagedGlueDerivation,
+    },
+  }),
   action({
     id: 502,
     kind: "stage_move",
@@ -306,6 +336,21 @@ beforeEach(() => {
 });
 
 describe("staged measurement values", () => {
+  it("shows the complete staged server derivation on the approval card and in details", async () => {
+    await renderScreen();
+    const card = cardFor(501);
+    const summary = card.querySelector(".staged-action-summary") as HTMLElement;
+
+    expect(within(summary).getByText("Hybrid bondline")).toBeInTheDocument();
+    expect(within(summary).getByText("166.4 / 164 ± 25 mg")).toBeInTheDocument();
+
+    const details = card.querySelector(".staged-action-details") as HTMLElement;
+    await userEvent.setup().click(within(details).getByText("Action details"));
+    expect(within(details).getByText("Derived by the server")).toBeInTheDocument();
+    expect(within(details).getByText("166.4 mg")).toBeInTheDocument();
+    expect(within(details).getByText(/revalidated by the worker/i)).toBeInTheDocument();
+  });
+
   it("shows the proposed scalars inline and reduces arrays and maps to extent chips", async () => {
     await renderScreen();
     const card = cardFor(501);

@@ -21,6 +21,14 @@ export type TestFormLabels = {
   booleanTrue: string;
   booleanFalse: string;
   arrayHint: string;
+  /**
+   * Shown instead of "<results> is required" when the schema itself declares
+   * no measurement field this form can capture — the person's input is not
+   * the problem, so the message must not read like it is. Optional so a label
+   * bundle keeps type-checking without it; `DEFAULT_NO_MEASUREMENT_FIELDS`
+   * (English, like every default locale string) is used until one is wired.
+   */
+  noMeasurementFields?: (testType: string) => string;
   requiredField: (field: string) => string;
   invalidNumber: (field: string, line?: number) => string;
   invalidInteger: (field: string, line?: number) => string;
@@ -50,7 +58,17 @@ export type TestFormProps = {
 };
 
 type FieldKind = "string" | "float" | "integer" | "boolean" | "unsupported";
+/**
+ * The two blocks of a submitted run — the payload keys `uploadTestRunResults`
+ * expects. `results` is itkFlow's name for the measurement block regardless of
+ * which key the *definition* spelled it under (see `measurementFields`).
+ */
 type FieldSection = "properties" | "results";
+
+/** English fallback for `TestFormLabels.noMeasurementFields`. */
+export const DEFAULT_NO_MEASUREMENT_FIELDS = (testType: string): string =>
+  `${testType} declares no measurement field that can be entered here, so this ` +
+  `form cannot record a run for it. Upload a result file for this test type instead.`;
 
 type NormalizedField = {
   code: string;
@@ -121,16 +139,28 @@ export function requiredCodes(definition: TestSchemaDefinition, section: FieldSe
     return new Set();
   }
 
-  const scoped = required[section];
-  if (Array.isArray(scoped)) {
-    return new Set(scoped.filter((code): code is string => typeof code === "string"));
+  // The measurement block is spelled `results` by itkFlow and `parameters` by
+  // the PDB (see `measurementFields`), so a scoped `required` map is consulted
+  // under both spellings for that one section.
+  const keys = section === "results" ? (["results", "parameters"] as const) : ([section] as const);
+  const scopedCodes = new Set<string>();
+  let scopedFound = false;
+  for (const key of keys) {
+    const scoped = required[key];
+    if (Array.isArray(scoped)) {
+      scopedFound = true;
+      for (const code of scoped) {
+        if (typeof code === "string") scopedCodes.add(code);
+      }
+    } else if (isRecord(scoped)) {
+      scopedFound = true;
+      for (const [code, value] of Object.entries(scoped)) {
+        if (value === true) scopedCodes.add(code);
+      }
+    }
   }
-  if (isRecord(scoped)) {
-    return new Set(
-      Object.entries(scoped)
-        .filter(([, value]) => value === true)
-        .map(([code]) => code),
-    );
+  if (scopedFound) {
+    return scopedCodes;
   }
   // Some map-shaped definitions put the flags directly under `required`
   // instead of nesting them below `properties` / `results`.
@@ -141,11 +171,16 @@ export function requiredCodes(definition: TestSchemaDefinition, section: FieldSe
   );
 }
 
+const EMPTY_REQUIRED: ReadonlySet<string> = new Set<string>();
+
 function normalizeFields(
-  collection: TestSchemaFieldCollection | undefined,
-  required: Set<string>,
+  collection: TestSchemaFieldCollection | null | undefined,
+  required: ReadonlySet<string>,
 ): NormalizedField[] {
-  if (collection === undefined) {
+  // `null` as well as `undefined`: a mirrored definition is raw PDB JSON, and
+  // an explicit `"results": null` would otherwise reach `Object.entries` and
+  // throw during render.
+  if (collection === undefined || collection === null) {
     return [];
   }
 
@@ -196,13 +231,62 @@ function normalizeFields(
   return fields;
 }
 
+/**
+ * The measurement fields of one definition — the block that becomes the run's
+ * `results` payload.
+ *
+ * Two vocabularies name the same block. A PDB test-type definition
+ * (`getTestTypeByCode`, mirrored raw) calls it **`parameters`**: every MODULE
+ * definition in a live mirror carries no `results` key at all and lists all of
+ * its measurement fields — GLUE_WEIGHT's 19 `GW_*` weights, VISUAL_INSPECTION's
+ * 18 strings — under `parameters`. itkFlow calls it **`results`**: that is the
+ * `uploadTestRunResults` payload key, and the key a caller writes when it
+ * rewrites a definition before rendering (the worksheet edit strip re-emits
+ * `{...definition, properties, results}` with the previous run's values).
+ *
+ * PRECEDENCE, deliberately: `results` wins — but only while it actually
+ * carries fields; an absent, null or empty `results` falls through to
+ * `parameters`. Exactly one block is ever used, so a definition holding both
+ * never renders a field twice.
+ *   - `results` first, because when it is populated it is either a definition
+ *     that genuinely uses that key or a caller-rewritten one whose fields
+ *     carry prefilled `defaultValue`s; preferring `parameters` there would
+ *     throw those away.
+ *   - "carries fields" rather than "is present", because a rewriter can
+ *     legitimately emit `results: []` for a parameters-only definition — and
+ *     reading that as "this test type has no measurements" is exactly how an
+ *     empty form survives one layer along.
+ */
+export function measurementCollection(definition: TestSchemaDefinition): {
+  key: "results" | "parameters";
+  collection: TestSchemaFieldCollection | null | undefined;
+} {
+  const declared = definition.results;
+  // "Carries fields", not "is defined": normalizing answers that question with
+  // the same rules the form itself applies.
+  return normalizeFields(declared, EMPTY_REQUIRED).length > 0
+    ? { key: "results", collection: declared }
+    : { key: "parameters", collection: definition.parameters };
+}
+
+/** The measurement fields of one definition, normalized for rendering.
+ * Exported alongside `measurementCollection` so a caller that has to touch the
+ * raw collection (prefilling a previous run into it) resolves the same block
+ * this form will render, instead of assuming a key. */
+export function measurementFields(definition: TestSchemaDefinition): NormalizedField[] {
+  return normalizeFields(
+    measurementCollection(definition).collection,
+    requiredCodes(definition, "results"),
+  );
+}
+
 function normalizeSchema(definition: TestSchemaDefinition): NormalizedSchema {
   return {
     properties: normalizeFields(
       definition.properties,
       requiredCodes(definition, "properties"),
     ),
-    results: normalizeFields(definition.results, requiredCodes(definition, "results")),
+    results: measurementFields(definition),
   };
 }
 
@@ -248,8 +332,8 @@ function parseScalar(
     case "string":
       return { status: "value", value };
     case "float": {
-      const parsed = Number(value);
-      return DECIMAL_NUMBER.test(value) && Number.isFinite(parsed)
+      const parsed = Number(value.replace(",", "."));
+      return LOCALIZED_DECIMAL_NUMBER.test(value) && Number.isFinite(parsed)
         ? { status: "value", value: parsed }
         : { status: "error", message: labels.invalidNumber(field.label, line) };
     }
@@ -277,6 +361,7 @@ function parseScalar(
 }
 
 const DECIMAL_NUMBER = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/u;
+const LOCALIZED_DECIMAL_NUMBER = /^[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][+-]?\d+)?$/u;
 
 function emptyArrayLineError(
   field: NormalizedField,
@@ -370,6 +455,13 @@ export default function TestForm({
     schema.schema,
   ]);
   const fields = useMemo(() => normalizeSchema(schema.schema), [schemaKey]);
+  // A schema can declare measurement fields that no control can hold — a
+  // PDB `testRun` reference, an `object` map. If none of them is enterable,
+  // the run cannot be completed here, and that is the schema's doing.
+  const hasEnterableResult = fields.results.some((field) => field.kind !== "unsupported");
+  const noMeasurementFieldsMessage = (
+    labels.noMeasurementFields ?? DEFAULT_NO_MEASUREMENT_FIELDS
+  )(schema.test_code.trim());
   const [runNumber, setRunNumber] = useState("");
   const [date, setDate] = useState("");
   const [passed, setPassed] = useState(true);
@@ -432,7 +524,12 @@ export default function TestForm({
       key.startsWith("results:"),
     );
     if (Object.keys(values.results).length === 0 && !hasResultFieldError) {
-      nextErrors.results = labels.requiredField(labels.results);
+      // A run without a single measured value is still refused — but only the
+      // enterable case is the person's to fix, so only that one is phrased as
+      // a missing input.
+      nextErrors.results = hasEnterableResult
+        ? labels.requiredField(labels.results)
+        : noMeasurementFieldsMessage;
     }
 
     setErrors(nextErrors);
@@ -485,6 +582,7 @@ export default function TestForm({
           {...common}
           className="text-input phase4-textarea mono"
           rows={4}
+          inputMode={field.kind === "float" ? "decimal" : undefined}
           onChange={(event) => updateDraft(section, field.code, event.target.value)}
         />
       );
@@ -505,8 +603,16 @@ export default function TestForm({
         <input
           {...common}
           className="text-input"
-          type={field.kind === "string" ? "text" : "number"}
-          step={field.kind === "float" ? "any" : field.kind === "integer" ? "1" : undefined}
+          // A float is deliberately NOT `type="number"`. `parseScalar` accepts a
+          // comma as the decimal separator (mixed-locale labs write 0,166), but
+          // a numeric input rejects the comma in the browser before the parser
+          // ever sees it — the operator's keystroke is simply swallowed. Text
+          // plus `inputMode="decimal"` still raises the numeric keypad on a
+          // tablet, and validation stays with the parser that understands both
+          // separators. Integers keep the stepper; they have no separator.
+          type={field.kind === "integer" ? "number" : "text"}
+          inputMode={field.kind === "float" ? "decimal" : undefined}
+          step={field.kind === "integer" ? "1" : undefined}
           onChange={(event) => updateDraft(section, field.code, event.target.value)}
         />
       );
@@ -661,10 +767,18 @@ export default function TestForm({
         </section>
       )}
 
-      {errors.results !== undefined && (
+      {errors.results !== undefined ? (
         <div className="error-banner" role="alert">
           <span>{errors.results}</span>
         </div>
+      ) : (
+        !hasEnterableResult && (
+          // Say it before the submit is attempted, not only after it fails:
+          // nothing on this form can make such a schema submittable.
+          <div className="info-banner" role="status">
+            <span>{noMeasurementFieldsMessage}</span>
+          </div>
+        )
       )}
 
       <div className="phase4-form-actions">
