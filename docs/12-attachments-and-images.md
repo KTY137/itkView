@@ -755,7 +755,8 @@ Kind-Bilder.
   hat aber als Nebeneffekt genau diese Vorschaubilder hinter eine
   Nutzeraktion geschoben. Der zugehörige Commit `07a59d9` ist per
   Tag-Nachfahrprüfung in `v0.2.2-alpha` enthalten; damit gilt das Verhalten ab
-  Desktop-Bundle 0.2.2. `desktop/package.json` steht heute auf `0.2.5`.
+  Desktop-Bundle 0.2.2. `desktop/package.json` traegt die Bundle-Version und
+  wird mit jedem Release gemeinsam mit den Tauri-Metadaten angehoben.
 
 ### 5.3 Thumbnails in Listen
 

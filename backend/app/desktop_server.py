@@ -14,9 +14,10 @@ so this module owns what Compose otherwise supplies:
 
 Two ways to learn the server is up, because a windowed bundle has no stdout:
 the host may pass an explicit ``--port`` and poll ``/health``, and a run with a
-console additionally prints one ``ITKFLOW_READY {json}`` line. PDB access keeps
-the repository-wide default: production is reached only when both opt-in
-variables are set deliberately.
+console additionally prints one ``ITKFLOW_READY {json}`` line. The end-user
+desktop bundle selects the production read target by default, but sends no PDB
+traffic until a user connects personal access codes. Writes remain confined to
+itkFlow-registered DUMMY-batch test components.
 """
 
 from __future__ import annotations

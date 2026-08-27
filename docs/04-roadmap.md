@@ -871,8 +871,9 @@ vom Design-Ziel abdriftet.
   und API auf einer Origin liegen und Session-Cookie/CSRF unveraendert
   funktionieren. Zustand (DB, Credential-Key, Logs) liegt im
   Anwendungsdatenverzeichnis, dasselbe wie beim Windows-Launcher. Die
-  PDB-Defaults bleiben unangetastet (test / kein Produktions-Opt-in /
-  `dummy_only`). Details: `docs/adr/005-desktop-packaging.md`.
+  Das Endnutzer-Bundle waehlt Production-Reads ab Werk; PDB-Verkehr beginnt
+  erst nach dem Verbinden persoenlicher Access-Codes. Der Schreibbereich bleibt
+  `dummy_only`. Details: `docs/adr/005-desktop-packaging.md`.
 - **PDB-Request-Timeout griff nie (2026-08-25, Bugfix):** `requests` waehlt den
   Adapter mit dem *laengsten* Prefix, und itkdb mountet einen eigenen fuer die
   PDB-Basis-URL. Der generische `https://`-Adapter war damit fuer jeden echten
