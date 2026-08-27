@@ -1402,9 +1402,9 @@ def test_breaker_trips_after_consecutive_transient_failures():
     breaker = attachment_store.OutageCircuitBreaker(threshold=3)
     breaker.record_failure(transient=True)
     breaker.record_failure(transient=True)
-    assert breaker.tripped is False
+    assert breaker.sweep_is_doomed is False
     breaker.record_failure(transient=True)
-    assert breaker.tripped is True
+    assert breaker.sweep_is_doomed is True
 
 
 def test_permanent_failures_and_successes_reset_the_breaker():
@@ -1414,7 +1414,7 @@ def test_permanent_failures_and_successes_reset_the_breaker():
     breaker.record_failure(transient=True)
     breaker.record_success()
     breaker.record_failure(transient=True)
-    assert breaker.tripped is False
+    assert breaker.sweep_is_doomed is False
 
 
 def test_reused_file_does_not_reset_transient_failure_streak(
@@ -1458,7 +1458,7 @@ def test_reused_file_does_not_reset_transient_failure_streak(
     session.commit()
 
     assert stats.failed == 2 and stats.reused == 1
-    assert breaker.tripped is True
+    assert breaker.sweep_is_doomed is True
 
 
 def test_the_default_breaker_threshold_is_a_small_named_constant():
@@ -1493,6 +1493,33 @@ def _add_many_attachments(session, count: int) -> None:
     session.commit()
 
 
+def _add_share_link_attachment(session, code: str, url: str) -> None:
+    """A URL-valued result, the shape zFlow-era visual inspections still use."""
+    session.add(
+        TestRunEvidence(
+            component_sn="20USEM20000050",
+            test_type="VISUAL_INSPECTION",
+            passed=True,
+            source="pdb",
+            external_ref=f"RUN-share-{code}",
+            payload={
+                "attachments": [
+                    {
+                        "code": code,
+                        "filename": "photo.jpg",
+                        "content_type": None,
+                        "title": "Shared attachment",
+                        "type": "share_link",
+                        "url": url,
+                        "source": "share_link",
+                    }
+                ]
+            },
+        )
+    )
+    session.commit()
+
+
 def test_a_tripped_breaker_stops_fetching_remaining_files(session, settings, no_sleep):
     _add_many_attachments(session, 4)
     client = _FlakyClient(failures=999)  # network-shaped forever
@@ -1503,11 +1530,14 @@ def test_a_tripped_breaker_stops_fetching_remaining_files(session, settings, no_
     )
     session.commit()
 
-    assert breaker.tripped is True
-    # Only the files that tripped the breaker were attempted; the rest are
-    # left for the retried job instead of burning their own ladders too.
-    assert stats.failed == 2 and stats.total == 2
-    # Each attempted file exhausted its full ladder first (3 attempts x 2 routes).
+    assert breaker.sweep_is_doomed is True
+    # Every file still gets an honest outcome — none is silently skipped, and
+    # none is recorded as stored, so the next sweep retries them all.
+    assert stats.failed == 4 and stats.total == 4
+    # But only the two that tripped the route touched the network, each
+    # exhausting its full ladder (3 attempts x 2 routes). The remaining two
+    # failed immediately: that is the entire point, since burning a ladder per
+    # file is what turned an unreachable host into an hours-long crawl.
     assert client.calls == 12
 
 
@@ -1521,7 +1551,7 @@ def test_permanent_file_failures_never_trip_the_breaker(session, settings, no_sl
     )
     session.commit()
 
-    assert breaker.tripped is False
+    assert breaker.sweep_is_doomed is False
     assert stats.failed == 4 and stats.total == 4
 
 
@@ -1545,8 +1575,46 @@ def test_transient_client_unavailability_counts_toward_the_breaker(
     )
     session.commit()
 
-    assert breaker.tripped is True
-    assert stats.failed == 3 and stats.total == 3
+    # The PDB route is the one route whose loss abandons the whole sweep.
+    assert breaker.sweep_is_doomed is True
+    assert stats.failed == 4 and stats.total == 4
+
+
+def test_one_dead_share_host_does_not_doom_a_sweep_the_pdb_is_serving(
+    session, settings, no_sleep, monkeypatch
+):
+    """The failure the owner actually hit, in miniature.
+
+    87 consecutive attachments pointed into a single CERNBox folder share that
+    answers `501 Not Implemented`. With one global streak, five of them in a
+    row failed the entire evidence sync — at the same file, every time — while
+    the PDB was answering perfectly and every other attachment was fine.
+
+    A dead share host must cost its own files and nothing more.
+    """
+    _add_many_attachments(session, 2)
+    _add_share_link_attachment(session, "dead-1", "https://share.example.org/s/AAA")
+    _add_share_link_attachment(session, "dead-2", "https://share.example.org/s/BBB")
+    _add_share_link_attachment(session, "dead-3", "https://share.example.org/s/CCC")
+
+    def _always_down(url, timeout):
+        raise TimeoutError("connection timed out")
+
+    monkeypatch.setattr(attachment_store, "_open_public_url", _always_down)
+
+    client = _FlakyClient(failures=0)  # the PDB is healthy
+    breaker = attachment_store.OutageCircuitBreaker(threshold=2)
+    stats = download_attachments(
+        session, _FakeGateway(client), settings, "20USEM20000050", breaker=breaker
+    )
+    session.commit()
+
+    # The share host is contained...
+    assert breaker.is_tripped("share.example.org") is True
+    # ...but the sweep is not abandoned, so the PDB files still arrive.
+    assert breaker.sweep_is_doomed is False
+    assert stats.downloaded == 2
+    assert stats.failed == 3
 
 
 def test_download_accepts_a_precomputed_descriptor_plan(session, settings, evidence):
@@ -1608,3 +1676,27 @@ def test_reuse_keeps_the_content_type_the_download_established(session, settings
     assert second.reused == 1 and second.downloaded == 0
     assert row.content_type == "image/jpeg", "the reuse path blanked the sniffed type"
     assert row.is_image, "a mirrored image must stay visible after a re-sweep"
+
+
+def test_a_501_is_a_permanent_answer_not_an_outage():
+    """`501 Not Implemented` must never be retried, and never look like one.
+
+    Measured against the owner's live mirror: CERNBox answers 501 to a DAV
+    request against a *folder* share, and 87 consecutive attachments point
+    into one such share. Classified with the rest of 5xx as transient, each
+    burned its full retry ladder and the run of them tripped the outage
+    breaker, so every evidence sync aborted at the same file. A 501 is the
+    server stating it does not implement the request; no retry can change it.
+    """
+    assert attachment_store.is_transient_download_error(_HttpStatusError(501)) is False
+    assert attachment_store.is_transient_download_error(_HttpStatusError(505)) is False
+    # The genuinely retryable server failures are untouched.
+    for status in (500, 502, 503, 504):
+        assert attachment_store.is_transient_download_error(_HttpStatusError(status)) is True
+    for status in (408, 425, 429):
+        assert attachment_store.is_transient_download_error(_HttpStatusError(status)) is True
+    # And a 501 therefore cannot trip the breaker on its own.
+    breaker = attachment_store.OutageCircuitBreaker(threshold=2)
+    for _ in range(5):
+        breaker.record_failure(transient=False)
+    assert breaker.sweep_is_doomed is False

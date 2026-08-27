@@ -732,6 +732,48 @@ betroffenen Tests etwa in einem Drittel der Laeufe **am korrekten Verhalten** �
 und Tests, die grundlos rot werden, bringen ein Team dazu, rote Balken
 wegzuerklaeren.
 
+## Attachment-Ausfaelle: pro Remote, nicht global (Bugfix 2026-08-27)
+
+Der Owner meldete: „Der Sync bricht immer bei Step 2 ab." Zweimal exakt bei
+**489 von 3839** Dateien — deterministisch, also kein Netzausfall. Am echten
+Spiegel nachgemessen:
+
+- Ab Position 487 wechseln die Deskriptoren auf **87 aufeinanderfolgende
+  CERNBox-Links**, die alle in **eine** Ordner-Freigabe zeigen
+  (`/files/link/public/<token>/<ordner>`).
+- CERNBox beantwortet die DAV-Route dafuer mit **HTTP 501 Not Implemented**.
+- `is_transient_download_error` hielt jedes 5xx fuer voruebergehend. Also:
+  volle Retry-Leiter je Datei, fuenf Fehlschlaege in Folge, **Outage-Breaker
+  reisst den ganzen Job ab** — waehrend die PDB einwandfrei antwortete und die
+  486 Dateien davor sauber liefen.
+
+Zwei Ursachen, beide behoben:
+
+1. **501/505 sind keine Stoerung, sondern eine Aussage ueber Faehigkeiten.**
+   Ein Retry kann daran nichts aendern. `_PERMANENT_5XX_STATUSES` nimmt sie
+   aus der transienten Klasse heraus; `app/pdb_sync.py` wurde bewusst
+   gleichgezogen, damit die beiden Klassifikationen nicht auseinanderlaufen.
+2. **Der Breaker zaehlt jetzt pro Remote** (`descriptor_route`: PDB, EOS,
+   Share-Host). Fehlschlaege haeufen sich naturgemaess nach Host, weil
+   Anhaenge komponentenweise gruppiert sind — eine globale Strecke konnte
+   „das Netz ist weg" nicht von „dieser eine Host antwortet hier nicht"
+   unterscheiden. Ein totes Remote wird fuer den Rest des Sweeps
+   uebersprungen (seine Dateien scheitern sofort statt je Minuten an
+   Retries), und **nur die PDB-Route** laesst den Job scheitern
+   (`sweep_is_doomed`). Ein toter Share-Host kostet seine eigenen Dateien und
+   sonst nichts; nichts davon wird als gespeichert vermerkt, der naechste
+   Sweep versucht es erneut.
+
+**Offen, bewusst nicht in diesem Fix:** Die 87 Bilder sind damit noch nicht
+gespiegelt. Die Freigabe ist ein **Ordner**, kein Einzelfile: `/s/<token>/
+download?files=<name>` liefert HTTP 200 — aber ein **tar-Archiv** (ustar-
+Signatur an Byte 257), das den Ordner enthaelt. Sie zu holen hiesse, Archive
+zu entpacken und zu entscheiden, welches Mitglied welchem Testlauf gehoert;
+das ist ein eigener Schnitt, kein Anhaengsel an einen Ausfall-Fix. **Keine
+Zugangsdaten noetig:** cernbox.cern.ch ist ohne VPN und ohne Anmeldung
+erreichbar, die anderen Freigabe-Formen (`/s/<t>`, `/index.php/s/<t>`) laden
+anonym fehlerfrei.
+
 ## Unbeaufsichtigter Auto-Sync (`app/auto_sync.py`, 2026-08-27)
 
 Ein Sweep war frueher zu teuer, um ihn auf einen Timer zu legen: ein Request

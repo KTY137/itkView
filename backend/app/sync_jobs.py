@@ -1711,10 +1711,17 @@ def run_evidence_sync_job(
                 failed=attachment_stats.failed + stats.failed,
             )
             processed_files += stats.total
-            if breaker.tripped:
-                # Everything mirrored so far is already committed and the
-                # upserts are idempotent — failing transiently hands the rest
-                # to the existing single automatic retry instead of crawling.
+            if breaker.sweep_is_doomed:
+                # Only the PDB route going dark abandons the sweep: everything
+                # mirrored so far is already committed and the upserts are
+                # idempotent, so failing transiently hands the rest to the
+                # existing single automatic retry instead of crawling.
+                #
+                # An unreachable *share host* deliberately does not come here.
+                # It costs its own files and nothing else, and failing the job
+                # for it meant a site whose share links need something we do
+                # not have saw every sync abort at the same file, forever,
+                # while the mirror itself was perfectly healthy.
                 raise PdbEvidenceUnavailable(
                     "Attachment mirroring hit repeated transient network "
                     "failures; files mirrored so far are kept and the sync "

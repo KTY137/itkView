@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -405,6 +405,16 @@ class _PdbClientUnavailable(RuntimeError):
 # HTTP statuses worth retrying: request timeout, too-early, rate limit, 5xx.
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429})
 
+# 5xx statuses that are a permanent statement about capability, not an outage.
+# Retrying them cannot help, and treating them as transient is worse than
+# merely wasteful: measured against the live TUDO mirror, CERNBox answers
+# `501 Not Implemented` for a DAV request against a *folder* share, and 87
+# consecutive attachments point into one such share. Classified as transient,
+# each burned its full retry ladder and the run of them tripped the outage
+# breaker, so every sweep aborted at the same file while the PDB itself was
+# answering perfectly. 505 is the same kind of answer.
+_PERMANENT_5XX_STATUSES = frozenset({501, 505})
+
 # Exception type names that mean transport trouble, not a data answer. itkdb
 # wraps requests/urllib3 errors differently between releases, so the chain is
 # matched by name instead of importing every optional dependency.
@@ -478,7 +488,9 @@ def is_transient_download_error(error: BaseException) -> bool:
         seen.add(id(current))
         status = _http_status_of(current)
         if status is not None:
-            return status in _TRANSIENT_HTTP_STATUSES or 500 <= status < 600
+            if status in _TRANSIENT_HTTP_STATUSES:
+                return True
+            return 500 <= status < 600 and status not in _PERMANENT_5XX_STATUSES
 
         name = type(current).__name__.lower()
         detail = str(current).lower()
@@ -813,31 +825,83 @@ def _beat(heartbeat: Callable[[], None] | None) -> None:
 ATTACHMENT_OUTAGE_BREAKER_THRESHOLD = 5
 
 
+PDB_ROUTE = "pdb"
+
+
+def descriptor_route(descriptor: Mapping[str, Any]) -> str:
+    """Which remote a descriptor is fetched from.
+
+    Attachments do not all come from the same place, and they fail
+    independently: the PDB serves the binary store, EOS serves signed
+    downloads, and zFlow-era results point at institute share hosts. Grouping
+    by remote is what lets one unreachable host be contained instead of
+    stopping the sweep.
+    """
+
+    if descriptor.get("source") == "share_link" or descriptor.get("type") == "eos":
+        url = descriptor.get("url")
+        if isinstance(url, str) and url:
+            host = urlsplit(url).hostname
+            if host:
+                return host.rstrip(".").lower()
+        return "share_link"
+    return PDB_ROUTE
+
+
 class OutageCircuitBreaker:
-    """Detect a network outage from consecutive transient file failures.
+    """Contain a dead remote without failing a sweep that is otherwise fine.
 
     Per-file *permanent* answers (a 404, an HTML page where a binary was
     requested, an oversized body) are real verdicts about that file: they stay
-    best effort, reset the streak and never trip the breaker. Only
-    network-shaped failures — each of which already exhausted its own retry
-    ladder — count toward the threshold.
+    best effort, reset the streak and never trip anything. Only network-shaped
+    failures — each of which already exhausted its own retry ladder — count.
+
+    Streaks are counted **per remote**, which was the whole lesson of the
+    first version. Failures cluster by host, because attachments are grouped
+    by component and a component's files tend to live in one place. A single
+    global streak therefore could not tell "the network is down" from "this
+    one host is unreachable from here", and a site whose CERNBox share links
+    need a VPN saw every sweep aborted at the same file — while the PDB
+    itself was answering perfectly.
+
+    So a tripped remote is skipped for the rest of the sweep (its remaining
+    files fail immediately rather than each burning minutes of retries), and
+    only the PDB route going dark means the sweep itself cannot proceed.
     """
 
     def __init__(self, threshold: int = ATTACHMENT_OUTAGE_BREAKER_THRESHOLD) -> None:
         self.threshold = max(1, int(threshold))
-        self.consecutive_transient_failures = 0
-        self.tripped = False
+        self._streaks: dict[str, int] = {}
+        self.tripped_routes: set[str] = set()
 
-    def record_success(self) -> None:
-        self.consecutive_transient_failures = 0
+    def record_success(self, route: str = PDB_ROUTE) -> None:
+        self._streaks[route] = 0
 
-    def record_failure(self, *, transient: bool) -> None:
+    def record_failure(self, route: str = PDB_ROUTE, *, transient: bool) -> None:
         if not transient:
-            self.consecutive_transient_failures = 0
+            self._streaks[route] = 0
             return
-        self.consecutive_transient_failures += 1
-        if self.consecutive_transient_failures >= self.threshold:
-            self.tripped = True
+        streak = self._streaks.get(route, 0) + 1
+        self._streaks[route] = streak
+        if streak >= self.threshold:
+            self.tripped_routes.add(route)
+
+    def is_tripped(self, route: str) -> bool:
+        """Whether this remote has stopped answering and should be skipped."""
+
+        return route in self.tripped_routes
+
+    @property
+    def sweep_is_doomed(self) -> bool:
+        """Whether the failure is broad enough to abandon the whole sweep.
+
+        Only the PDB route qualifies. An unreachable share host costs those
+        files and nothing else; the mirror, the evidence and every other
+        attachment still arrive, and the failed files are never recorded as
+        stored, so the next sweep simply tries them again.
+        """
+
+        return PDB_ROUTE in self.tripped_routes
 
 
 @dataclass
@@ -914,12 +978,13 @@ def _fetch_all(
         outcomes.append(outcome)
         if breaker is None:
             return
+        route = descriptor_route(outcome.descriptor)
         if outcome.outcome == "failed":
-            breaker.record_failure(transient=outcome.transient)
+            breaker.record_failure(route, transient=outcome.transient)
         elif outcome.outcome == "downloaded":
-            # Only a real network response proves that the outage is over.
+            # Only a real network response proves that the remote is back.
             # Reusing an already mirrored file is deliberately neutral.
-            breaker.record_success()
+            breaker.record_success(route)
 
     client: Any = None
     # Set once client construction has exhausted its own retry budget: every
@@ -932,10 +997,18 @@ def _fetch_all(
     client_unavailable_transient = False
 
     for descriptor in descriptors:
-        if breaker is not None and breaker.tripped:
-            break
-
         key = (descriptor["source"], descriptor["code"])
+
+        # A remote that has stopped answering is skipped for the rest of the
+        # sweep: its files fail immediately instead of each burning a full
+        # retry ladder. Only that remote is affected — the PDB, EOS and every
+        # other share host keep being fetched normally, which is what stops
+        # one dead host from costing a whole sync.
+        if breaker is not None and not force and not resolved.get(key):
+            if breaker.is_tripped(descriptor_route(descriptor)):
+                outcomes.append(_FetchOutcome(descriptor, "failed", transient=True))
+                _beat(heartbeat)
+                continue
 
         # Resolved either before this call (a previous sweep) or by an
         # earlier descriptor in this same call (two test runs can list the
