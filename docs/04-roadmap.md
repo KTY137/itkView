@@ -31,6 +31,92 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-27)
 
+- **Manuelle Testerfassung entscheidet jetzt fail-closed aus dem effektiven
+  Schema (2026-08-27):** `TestForm.manualEntryCapability()` ist die gemeinsame
+  Entscheidung fuer Karte und Worksheet-Edit-Strip, jeweils **nach** dem
+  Feldlayout. REQUIRED-`object`-/`testRun`-Felder blockieren die manuelle
+  Erfassung; primitive Arrays sind nur bei fehlendem oder hoechstens
+  eindimensionalem `arrayDimensions` sicher, jede explizit hoehere oder
+  unlesbare Dimension macht den Testtyp file-only. Statt Tool-Felder plus
+  halbem/totem Formular nennen beide Oberflaechen die blockierenden Felder und
+  fuehren mit `Use JSON file upload` direkt (Scroll + Fokus) zum bestehenden
+  Datei-Drop. Es gibt bewusst keinen Raw-JSON-Object-Editor. Am anonymisiert
+  ausgewerteten MODULE-Spiegel sind damit 7 von 14 Definitionen vollstaendig
+  manuell erfassbar (`ATLAS18_RECOVERY`, `GLUE_WEIGHT`, `MODULE_BOW`,
+  `MODULE_IV_PS_BONDED`, `MODULE_IV_PS_V1`, `MODULE_WIRE_BONDING`,
+  `VISUAL_INSPECTION`); die anderen sieben, insbesondere
+  `MODULE_METROLOGY` und `MODULE_IV_AMAC_TC`, bleiben ehrlich Datei-Upload.
+  Der Frontend-Vertrag ist mit Capability-, Formular-, Worksheet- und echter
+  Screen-Integration abgedeckt. **Offene Haertung:** Der Manual-Entry-Ingestor
+  validiert API-Payloads noch nicht gegen das gespiegelte Schema; der UI-Guard
+  allein ist keine serverseitige Autorisierung.
+
+- **TUDO nutzt fuer Stage-Gates weiterhin den Seed-Default, nicht ein
+  abgenommenes Institutsprofil (read-only Audit 2026-08-27):** Das lokale
+  Live-Profil enthaelt weder `stage_order` noch `stage_requirements` oder
+  `required_properties`; damit greift die generische Seed-Reihenfolge. Vor
+  einer fachlichen Freigabe muss der Owner fuer jede Modul-Familie
+  `required`/`mayFail`/optional/if-present festlegen, die Alternative
+  `MODULE_IV_AMAC | MODULE_IV_AMAC_TC` ausdruecklich entscheiden und klaeren,
+  welche Kind-Evidenz ein Eltern-Gate erfuellt. Der Code erfindet diese Policy
+  nicht aus Live-Haeufigkeiten.
+
+- **Der Inline-Editor bleibt auch bei grossen Schemata lesbar
+  (2026-08-27):** Die Worksheet-Variante des generierten Formulars gruppiert
+  Laufkopf, Conditions/Properties und Measurements als drei kompakte
+  Flaechen. Wiederholende Schema-Beschreibungen stehen nicht mehr dauerhaft
+  unter jedem der 19 `GLUE_WEIGHT`-Felder, bleiben aber fuer Screenreader ueber
+  `aria-describedby` und fuer Mausnutzer als nativer Hover-Titel erhalten;
+  Array- und Unsupported-Hinweise bleiben sichtbar. `Cancel` und
+  `Stage test result` teilen sich jetzt eine Aktionsleiste. Im anonymisierten
+  1600-px-UI-Audit sank der reale Edit-Strip von 1 698 auf 1 254 px Hoehe,
+  ohne ein Feld auszublenden. Vorher-/Nachher-Aufnahmen liegen unter
+  `artifacts/ui-audit/`.
+
+- **Statistics zeigt IV und CV jetzt als eigene Kollektivkurven
+  (2026-08-27):** Zwei Karten entdecken kompatible Current/Voltage- bzw.
+  Capacitance/Voltage-Paare aus dem lokalen Measurement-Dimensions-Endpunkt;
+  weder Instituts- noch exakte PDB-Testtyp-Codes stehen im Frontend. Ein
+  Familienmarker verhindert, dass Current-Stability oder Load-Regulation als
+  IV ausgegeben werden. Mehrere Schemata bleiben wegen verschiedener Einheiten
+  und Sweep-Protokolle waehlbar statt vermischt. Die expliziten Karten zeichnen
+  nur gleich lange X/Y-Arrays und nennen ausgeschlossene Laeufe, fehlende
+  Schemata/Paare, Ladefehler und den bestehenden 300-Run-Cap; der generische
+  Messwert-Explorer samt Scalar-Verteilungen bleibt darunter erhalten. Der
+  lokale Spiegel belegt read-only fuenf IV-Schemata/1 960 lebende Laeufe und
+  ein CV-Schema/364 Laeufe, aktuell 2 324 von 2 324 Paaren laengengleich.
+  UI-Vertrag und Offline-Mockup sind in [`05`](05-ui-design-reference.md)
+  nachgezogen; 18 fokussierte Helper-/Screen-Tests decken Erkennung,
+  Fehlklassifikation, Paarfilter, Umschalten und Empty States ab.
+
+- **Pflichttest-Erfassung schliesst den Stage-Move jetzt auf derselben offenen
+  Detailseite (2026-08-27):** Der Requirement-Stift fuehrt durch den realen
+  Worksheet-Weg `manual-entry`-Ingest -> Dry-Run -> Outbox-Draft. Nach `Push`
+  pollt die Seite begrenzt den einzelnen Action-Status und laedt bei der
+  Worker-Antwort Detail, Preview/Worksheet und Stage-Suggestion gemeinsam neu;
+  nur `confirmed` zaehlt als Evidenz, nie ein Draft oder `submitted`. Danach
+  kann der neu gueltige `stage_move` direkt vorgeschlagen werden. Ein
+  zwischenzeitliches `failed` beendet den begrenzten Watch nicht: der
+  automatische Retry `failed -> submitted -> confirmed` bleibt auf derselben
+  Seite sichtbar; dasselbe gilt nach Reload oder einer verlorenen
+  Push-Transition-Antwort. Der
+  Edit-Strip ignoriert ausserdem terminal zurueckgezogene (`deleted`) Laeufe
+  beim Vorbelegen und laedt sie auch nach einem spaeten Fetch nicht in eine
+  laufende Eingabe. Abgedeckt durch einen echten UI-Integrationstest des
+  ganzen Bedienwegs plus zwei Withdrawn-Prefill-Regressionen; UI-Vertrag in
+  [`05`](05-ui-design-reference.md).
+
+- **Unmoegliche Klebegewichte sind kein Urteil mehr (2026-08-27):** Beim ersten
+  Seeden des TUDO-Glue-Profils lieferten zwei lebende Laeufe negative
+  Klebegewichte (−8696 mg, −7771 mg) — vertauschte Felder, `GW_MODULE_H1` und
+  `GW_GLUE_H1` ueber Kreuz — und wurden mit voller Zuversicht als `too_little`
+  beurteilt. Genau der Fehler des abgeloesten Blattes, nur mit besserer
+  Arithmetik. Ein negatives Ergebnis meldet jetzt
+  `verdict=unknown, reason=implausible_result`; 48 der 50 lebenden Messungen
+  bleiben unveraendert. Nur die Untergrenze steht im Code (Physik), jede
+  Obergrenze waere eine Ermessensfrage und gehoert ins Profil. Details
+  [`11`](11-logistics-operations.md), UI-Text [`05`](05-ui-design-reference.md).
+
 - **Die 87 Bilder hinter der Ordner-Freigabe sind erreichbar — sie lagen in
   einem Tar (2026-08-27).** Live und anonym gegen die Share-Links des Owners
   gemessen (nur GET, keine Zugangsdaten, kein PDB-Kontakt). **Ein einziger**
@@ -42,11 +128,14 @@ vom Design-Ziel abdriftet.
   (nicht ZIP, wie docs/12 bisher behauptete), und der „Dateiname" des
   Deskriptors ist gar keine Datei, sondern ein **Ordner** mit zwei JPEGs, zwei
   32-MB-Canon-Rohdateien und einer Notiz. Neu: itkFlow packt **genau ein**
-  Mitglied **im Speicher** aus und übergibt dessen Bytes dem bestehenden
-  Ablageweg. Die Auswahl ist eine reine Funktion des Archivinhalts —
-  `(Rang, Pfad)` mit Rang 0 = der benannte Eintrag, 1 = darstellbares Bild,
-  2 = sonst speicherbar, 3 = Rest —, sodass die Streaming-Reihenfolge eines
-  Hosts nie ändern kann, welche Datei ein Operator bekommt. Nennt die URL
+  vollständiges Mitglied **im Speicher** aus und übergibt dessen Bytes dem
+  bestehenden Ablageweg; beim Vergleich mit dem bisherigen Gewinner überlappt
+  höchstens das feste 512-Byte-Sniff-Präfix eines Nachfolgers. Für verschiedene
+  normalisierte Pfade gewinnt `(Rang, Pfad)` mit Rang 0 = benannter Eintrag,
+  1 = per Magic Bytes gesnifftes browserdarstellbares Bild, 2 = anderes echtes
+  Bild, 3 = anderes speicherbares Format, 4 = Rest. Bei einem im Tar doppelt
+  vorkommenden normalisierten Pfad gilt bewusst **first wins**; spätere
+  Dubletten werden ignoriert. Nennt die URL
   keinen Eintrag, wird nur ein Archiv mit genau einem Kandidaten akzeptiert.
   **Sicherheit ist hier die Sache, nicht die Fußnote:** nie `extractall` (per
   AST-Test am geparsten Modul festgenagelt), nur reguläre Dateien (Symlinks,
@@ -57,9 +146,12 @@ vom Design-Ziel abdriftet.
   entscheidet vor dem Lesen, vier Deckel (komprimierte Draht-Bytes,
   dekomprimierter Tar-Strom inklusive GNU-/PAX-Metadaten, Summe der
   deklarierten Bytes, Mitgliederzahl 2048), alle aus
-  `attachment_max_bytes` abgeleitet, und nie mehr als **ein** Mitglied im
-  Speicher. Tar und gzip-Tar, sonst nichts; ein gzip-Strom gilt erst als
-  Archiv, wenn die `ustar`-Magic im **dekomprimierten** Präfix steht.
+  `attachment_max_bytes` abgeleitet, und nie mehr als ein vollständiges
+  Mitglied plus das 512-Byte-Präfix im Speicher. Tar und gzip-Tar, sonst
+  nichts; ein gzip-Strom gilt erst als Archiv, wenn die `ustar`-Magic im
+  **dekomprimierten** Präfix steht. Optionale gzip-Headerfelder und der
+  anschließende Deflate-Strom haben getrennte feste 128-KiB-Sniff-Budgets;
+  ein danach noch unentscheidbarer Strom wird abgelehnt.
   HTML-Abwehr, Größenlimit und Content-Sniffing laufen unverändert über die
   extrahierten Bytes; der `content_type` kommt aus den Magic Bytes vor der
   Endung, sonst landete die Datei endungslos und bliebe unsichtbar. Die 16
@@ -75,7 +167,7 @@ vom Design-Ziel abdriftet.
   Am echten Archiv nachgemessen: gewählt `20USED50000029_2.JPG`, 8 845 759 B,
   gesnifft `image/jpeg`. Preis, bewusst akzeptiert: 79 MB Archiv je Bild,
   einmalig ~1,5 GB für die 20 Zeilen — nur eine Auflistung der Freigabe könnte
-  das vermeiden, und genau die verweigert die 501. 119 Attachment-Tests
+  das vermeiden, und genau die verweigert die 501. 134 Attachment-Tests
   (Basis 82); die Schutzregeln sind einzeln als fehlschlagbar nachgewiesen,
   einschliesslich GNU-longname/PAX und Log-Privacy. Details
   [`12`](12-attachments-and-images.md) §1, §2.3, §2.3a,
@@ -168,15 +260,18 @@ vom Design-Ziel abdriftet.
   aufgeschlagen. `TestForm.measurementCollection()` entscheidet den Vorrang
   jetzt an einer Stelle: `results` gewinnt, solange es Felder traegt, sonst
   `parameters`; genau ein Block wird gerendert. Am Live-Spiegel nachgemessen:
-  11 der 14 Definitionen sind vollstaendig erfassbar, MODULE_METROLOGY zu 1
-  von 6 (fuenf `object`-Positionskarten), HYBRID_TESTS_SUMMARY und MODULE_TC
-  zu 0 — die beiden letzten sagen das jetzt als Hinweis, statt eine fehlende
-  Eingabe zu behaupten. Ursache der Blindheit: **jede** bisherige Fixture war
+  7 der 14 Definitionen sind nach dem neuen Capability-Vertrag vollstaendig
+  erfassbar. `MODULE_METROLOGY` hat zwar ein skalares Messfeld, verlangt aber
+  zwei `object`-Positionskarten; `MODULE_IV_AMAC_TC` verlangt fuenf
+  Objektbloecke und traegt echte zweidimensionale Kurven. Beide sind daher wie
+  `HYBRID_TESTS_SUMMARY` und `MODULE_TC` file-only — ein einzelnes
+  darstellbares Feld macht kein vollstaendig absendbares Schema. Ursache der Blindheit: **jede** bisherige Fixture war
   `results`-foermig, eine Form, die die PDB nie liefert; die neuen Fixtures in
   `frontend/src/test/pdbTestTypeSchemas.ts` sind wortgleich aus dem
-  Live-Spiegel kopiert. Server-seitig war nichts anzupassen — der Dry-Run
-  validiert Wertformen je Testtyp (`ingestion.py`) und nie Codes gegen das
-  Schema, es gibt also keine zweite Liste, die auseinanderlaufen koennte.
+  Live-Spiegel kopiert. Server-seitig bleibt Haertung offen: Der Dry-Run
+  prueft die grundsaetzliche Payload-Form, aber nicht REQUIRED-Codes und
+  Array-Dimensionen gegen die gespiegelte Definition; der API-Pfad darf sich
+  langfristig nicht allein auf den Frontend-Guard verlassen.
   Doku: [`05`](05-ui-design-reference.md) „Testerfassung".
 
 - **Sync brach immer bei Step 2 ab (2026-08-27, gegen den echten Spiegel
@@ -207,18 +302,31 @@ vom Design-Ziel abdriftet.
   „ist das ein Bild?“, die Galerie braucht „malt ein Browser das?“. Die
   Content-Type-Reparatur hätte zwei 36-MB-TIFFs wahrheitsgemäß auf
   `image/tiff` gesetzt und damit zwei dauerhaft kaputte Kacheln geliefert —
-  ein behobener Fehler, der einen neuen ausliefert. Beide Renderer prüfen
-  jetzt `isDisplayableImage()` (`frontend/src/ui.ts`) und zeigen sonst den
-  bestehenden Platzhalter „gespeichert, nicht darstellbar“. Der `content_type`
-  bleibt wahr; zurückgehalten wird nichts. Details
+  ein behobener Fehler, der einen neuen ausliefert. Die Galerien behalten
+  deshalb jedes lokal gespeicherte `image/*` in seiner Besitzergruppe, prüfen
+  erst beim Rendern `isDisplayableImage()` (`frontend/src/ui.ts`) und zeigen
+  TIFF/sonstige nicht browserdarstellbare Formate als Platzhalter
+  `Stored locally · preview unavailable` statt als kaputtes `<img>` oder falschen
+  Leerzustand. Der `content_type` bleibt wahr; zurückgehalten wird nichts.
+  Eigene- und Nur-Kind-TIFFs sind als Regressionen abgedeckt. Details
   [`12`](12-attachments-and-images.md) §5b.
-- **Die Bilder werden sichtbar: drei Ursachen, alle am Live-Spiegel gemessen
+- **Generierte Plots aus gespiegelten Map-Werten (2026-08-27):** Die
+  aufgeklappte Laufansicht zeichnet neben den unveraenderten numerischen
+  Array-/IV-Kurven jetzt einen kategorischen Plot fuer eine vollstaendig
+  endliche Zahlen-Map und einen Scatter mit neutraler erster/zweiter
+  Wertachse fuer eine vollstaendig endliche Map exakter Zweierpaare. Ohne
+  Schema-Metadaten duerfen generische Zahlenpaare nicht als `Δx`/`Δy`
+  umgedeutet werden. Die vollstaendige Map-Tabelle bleibt
+  immer sichtbar. Leere, gemischte oder nicht-endliche Maps bleiben bewusst
+  nur Tabelle — es werden weder Werte konvertiert noch Punkte erfunden. Der
+  Datenplot haengt nicht davon ab, ob der Lauf ein Plot-Attachment besitzt.
+- **Die Bilder werden sichtbar: vier Ursachen, alle am Live-Spiegel gemessen
   (2026-08-27).** Der Bestand hielt 432 echte Bilddateien; ein Operator sah
   fast keine. (1) **Das Listen-Limit zaehlte Zeilen, nicht Komponenten.**
   `GET /api/components/thumbnails` deckelte auf 2000 Attachment-**Zeilen**, und
   2671 der 3734 Zeilen sind Instrument-`.txt`: die ersten 2000 erreichten 460
   von 759 Seriennummern und ergaben **83 Kacheln, wo 279 Komponenten ein Bild
-  haben**. Filter und Ein-Zeile-je-Komponente stehen jetzt im SQL
+  haben**. Browserfaehiger Bildfilter und Ein-Zeile-je-Komponente stehen jetzt im SQL
   (`GROUP BY`/`MIN(id)` statt Fensterfunktion — gleiche Semantik, keine
   SQLite-3.25-Abhaengigkeit), das Limit begrenzt seither Komponenten: **279**.
   (2) **Eine Modulseite kannte die Bilder ihrer Kinder nicht.** Nur 3 der 432
@@ -226,9 +334,10 @@ vom Design-Ziel abdriftet.
   an 156 Modulen). `GET /api/components/{sn}/attachments` liefert jetzt
   `{component_sn, attachments, children}`: die Bilder je Kind in einer eigenen
   Gruppe mit Seriennummer und Bauteiltyp, **nie** in die eigenen gemischt —
-  dieselbe Form wie die Kind-Evidenz im Worksheet (Commit `e3ba33f`), samt
-  deren Kostenregel: **eine** zusaetzliche Query fuer die ganze Familie, per
-  Test festgenagelt. Die Anhaenge **pro Lauf** bleiben unberuehrt, ein Lauf
+  dieselbe Form wie die Kind-Evidenz im Worksheet (Commit `e3ba33f`), mit einem
+  **konstanten Query-Satz** für die ganze Familie statt N+1 (Laufmetadaten,
+  Payloads sowie Association-/Legacy-Anhänge), per Test festgenagelt. Die
+  Anhaenge **pro Lauf** bleiben unberuehrt, ein Lauf
   gehoert genau einer Komponente. (3) **Eine zweite CERNBox-URL-Form wurde nie
   umgeschrieben.** 20 Zeilen auf Powerboards tragen die Weboberflaechen-Route
   `/files/link/public/<token>[/<Datei>]`; sie bekamen die HTML-Seite und wurden
@@ -247,6 +356,35 @@ vom Design-Ziel abdriftet.
   432 Bilder**), und „metrology images" ist eine UI-Panel-Beschriftung, kein
   Testtyp (0 Bilder an allen vier Metrologie-Testtypen, alle 432 an
   Sichtpruefungen).
+  (4) **Blob-Deduplizierung war zugleich die falsche Zuordnungsidentitaet.**
+  Ein global eindeutiges `(source, pdb_code)` speicherte die Bytes richtig nur
+  einmal, konnte aber nur eine `component_sn`/Testlauf-Kombination halten;
+  gemeinsam verwendete Share-Codes verschwanden dadurch auf allen weiteren
+  Komponenten. `test_run_attachment_reference` haelt jetzt jede
+  Komponenten-/Testtyp-/Lauf-Zuordnung additiv, waehrend der Blob und seine
+  Datei dedupliziert bleiben. Ein einmaliger SQLite-Start-Backfill liest nur
+  den lokalen Evidence-Mirror. Auf einer read-only Online-Kopie des realen
+  Mirrors blieben 3 772 Blobs unveraendert und ergaben exakt 3 839 Referenzen
+  (0 fehlend, unerwartet, verwaist oder doppelt); die Bildsichtbarkeit stieg
+  von 298 auf 355 Komponenten. Der zweite Start blieb in 0,08 s unveraendert.
+  Parallele Direkt-/Background-Syncs desselben Blobs bleiben bis zum sichtbaren
+  Root-Commit serialisiert; ein deterministischer Test deckt dabei auch
+  SAVEPOINT und Commit-Autoflush ab. Auch ein `force`-Lauf holt einen Blob bei
+  mehreren Lauf-Deskriptoren nur einmal und teilt den Fetch, statt denselben
+  `.part`-Pfad zweimal zu verwenden. Historische PostgreSQL-Daten brauchen
+  weiterhin einen Re-Sync oder eine spaetere Alembic-/JSONB-Migration.
+  Nachzug aus dem finalen Datenintegritaets-Audit: Thumbnail- und
+  Kind-Galerie-SQL normalisieren den MIME-Basistyp jetzt genauso wie Python
+  und Frontend (inklusive Leerraum vor `;`); die SQLite-Startreparatur fuer
+  historisch geleerte Typen deckt neben JPEG/PNG/TIFF auch die bereits
+  unterstuetzten GIF/WebP/BMP/AVIF/SVG-Suffixe ab, streng nur fuer wirklich
+  heruntergeladene Zeilen mit exakter Endung. Derselbe Audit schliesst die
+  zweite Identitaetsluecke: Gallery-Read-Models tragen `source`, Binary-URLs
+  koennen `(source, code)` exakt aufloesen und Thumbnails liefern diesen
+  Locator statt nur `code`. Neue Downloads liegen source-qualifiziert unter
+  `<SN>/<source>/<code>.<ext>`, damit gleiche Codes und gleiche Endungen aus
+  verschiedenen Quellen weder im Browser noch auf der Platte kollidieren;
+  gespeicherte Legacy-`relative_path` bleiben kompatibel.
 
 - **Sync-Runde 2: Index-dann-Bulk, rollierende Anzeige, optionaler Auto-Sync
   (2026-08-27).** Die vorige Runde hatte den Sweep parallelisiert, aber den
@@ -750,10 +888,12 @@ vom Design-Ziel abdriftet.
   Metrologie und IV-Kurven lokal zur Verfuegung; neue Endpunkte
   `GET /api/components/{sn}/tests` und `GET /api/components/thumbnails`.
 - **Attachments lokal (2026-08-25):** `app/attachment_store.py` spiegelt
-  Bilder/Plots in einen Ordner (`attachment_dir`), ein Verzeichnis je
-  Seriennummer. PDB-Dateinamen wandern nie in einen Pfad; gespeichert wird
-  unter dem Attachment-Code plus Extension aus einer Allowlist. Die UI zeigt
-  Messwerte, IV-Kurven und Thumbnails (Detailseite und Komponentenliste).
+  Bilder/Plots in einen Ordner (`attachment_dir`), fuer neue Downloads unter
+  `<Seriennummer>/<source>/<Attachment-Code><Extension>`. PDB-Dateinamen
+  wandern nie in einen Pfad; die Extension stammt aus einer Allowlist.
+  Bestehende flache `relative_path`-Eintraege bleiben lesbar und werden beim
+  Reuse nicht umgeschrieben. Die UI zeigt Messwerte, IV-Kurven und Thumbnails
+  (Detailseite und Komponentenliste).
 - **`sync-evidence` antwortet 503 statt „0 gespiegelt" (2026-08-25):** eine
   nicht erreichbare PDB sah bisher aus wie „diese Komponente hat keine Tests" —
   genau die Verwechslung, die eine ganze Instituts-Ansicht wie lauter fehlende

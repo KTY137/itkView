@@ -160,6 +160,16 @@
   .tl time{font:11px var(--mono);color:var(--muted);width:88px;flex:0 0 auto}
   .callout{margin-top:14px;border:1px solid color-mix(in srgb,var(--warn) 55%,var(--line));background:color-mix(in srgb,var(--warn) 9%,var(--surface));border-radius:10px;padding:12px 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px}
   .callout b{font-family:var(--mono);font-weight:600;font-size:12px}
+  .ws-demo-row{display:grid;grid-template-columns:minmax(150px,1fr) minmax(170px,1.2fr) auto auto;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:8px 8px 0 0;background:var(--surface2);font-size:12px}
+  .ws-demo-edit{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--accent);border-left-width:3px;border-radius:0 0 9px 9px}
+  .ws-demo-edit-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--ink2)}
+  .ws-demo-surface{padding:10px;border:1px solid var(--hairline);border-radius:8px;background:var(--surface2)}
+  .ws-demo-surface h3{margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink2)}
+  .ws-demo-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 10px}
+  .ws-demo-grid .fld{margin:0;min-width:0}
+  .ws-demo-grid .fld label{font-size:9.5px;line-height:1.25}
+  .ws-demo-grid .fld input,.ws-demo-grid .fld select{padding:7px 9px;font-size:12px;min-width:0}
+  .ws-demo-actions{display:flex;justify-content:flex-end;gap:8px;padding:10px;border-radius:8px;background:var(--surface2)}
 
   /* ---------- tables / ingest log ---------- */
   .tbl-wrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
@@ -255,6 +265,8 @@
     .brand{position:sticky;left:0;z-index:2;flex:0 0 auto;padding:6px 8px;background:var(--surface)}
     .nav-btn{width:auto;flex:0 0 auto;white-space:nowrap}
     .det{grid-template-columns:1fr}
+    .ws-demo-grid{grid-template-columns:1fr}
+    .ws-demo-row{grid-template-columns:1fr auto}
     .account-grid,.secret-grid,.settings-row{grid-template-columns:1fr}
     .crumb{display:none}
     .sync{display:none}
@@ -471,6 +483,65 @@
             </div>
           </div>
           <div class="panel">
+            <h2>Module worksheet · primary inline entry</h2>
+            <p class="account-copy">The GLUE_WEIGHT row stays in context while its complete mirrored PDB form opens directly underneath.</p>
+            <div class="ws-demo-row">
+              <strong class="m">GLUE_WEIGHT</strong>
+              <span>19 measured results</span>
+              <span class="chip serious"><span class="st"></span>missing</span>
+              <span class="m">✎</span>
+            </div>
+            <div class="ws-demo-edit">
+              <div class="ws-demo-edit-head"><strong>Record GLUE_WEIGHT</strong><span class="chip mono">inline edit</span><span>Descriptions stay available on hover without repeating every label.</span></div>
+              <section class="ws-demo-surface" aria-labelledby="ws-demo-run">
+                <h3 id="ws-demo-run">Run</h3>
+                <div class="ws-demo-grid">
+                  <div class="fld"><label>Run number *</label><input aria-label="Run number" value="7"></div>
+                  <div class="fld"><label>Measurement date *</label><input aria-label="Measurement date" type="datetime-local" value="2026-08-27T14:02"></div>
+                  <div class="fld"><label>Passed</label><select aria-label="Passed"><option>Yes</option><option>No</option></select></div>
+                  <div class="fld"><label>Problems</label><select aria-label="Problems"><option>No</option><option>Yes</option></select></div>
+                </div>
+              </section>
+              <section class="ws-demo-surface" aria-labelledby="ws-demo-properties">
+                <h3 id="ws-demo-properties">Conditions and properties</h3>
+                <div class="ws-demo-grid">
+                  <div class="fld"><label>Glue application method *</label><input title="&quot;stencil&quot; or &quot;dispenser&quot;"></div>
+                  <div class="fld"><label>Version number of stencil or dispenser programme used for Hybrid 1</label><input title="Version number of stencil or dispenser programme used for Hybrid 1"></div>
+                  <div class="fld"><label>Version number of stencil or dispenser programme used for Hybrid 2</label><input title="Version number of stencil or dispenser programme used for Hybrid 2"></div>
+                  <div class="fld"><label>Version number of stencil or dispenser programme used for Powerboard</label><input title="Version number of stencil or dispenser programme used for Powerboard"></div>
+                </div>
+              </section>
+              <section class="ws-demo-surface" aria-labelledby="ws-demo-results">
+                <h3 id="ws-demo-results">Measured results</h3>
+                <div class="ws-demo-grid">
+                  <div class="fld"><label>Weight of sensor [g]</label><input inputmode="decimal" title="Weight of bare sensor [g]"></div>
+                  <div class="fld"><label>Weight of glue under hybrid 2 [g]</label><input inputmode="decimal" title="Weight of glue under hybrid 2 [g]"></div>
+                  <div class="fld"><label>Weight of hybrid 1 (without tabs) [g]</label><input inputmode="decimal" title="Weight of hybrid 1 (without tabs) [g]"></div>
+                  <div class="fld"><label>Weight of glue under powerboard [g]</label><input inputmode="decimal" title="Glue weight under powerboard [g]"></div>
+                  <div class="fld"><label>Weight of hybrid 2 (without tabs) [g]</label><input inputmode="decimal" title="Weight of hybrid 2 (without tabs) [g]"></div>
+                  <div class="fld"><label>Weight of glue under hybrid 1 [g]</label><input inputmode="decimal" title="Weight of glue under hybrid 1 [g]"></div>
+                  <div class="fld"><label>Weight of module with hybrid 1 and hybrid 2 [g]</label><input inputmode="decimal" title="Weight of module with hybrid 1 and hybrid 2 [g]"></div>
+                  <div class="fld"><label>Weight of glue under hybrids 1 and 2 combined [g]</label><input inputmode="decimal" title="Weight of glue under hybrids 1 and 2 combined [g]"></div>
+                  <div class="fld"><label>Weight of module with only a powerboard [g]</label><input inputmode="decimal" title="Weight of module with only a powerboard [g]"></div>
+                  <div class="fld"><label>Weight of powerboard [g]</label><input inputmode="decimal" title="Weight of powerboard [g]"></div>
+                  <div class="fld"><label>Weight of module with 1 hybrid and powerboard [g]</label><input inputmode="decimal" title="Weight of module with 1 hybrid and powerboard [g]"></div>
+                  <div class="fld"><label>Weight of glue under hybrid 1 and powerboard combined [g]</label><input inputmode="decimal" title="Weight of glue under hybrid 1 and powerboard combined [g]"></div>
+                  <div class="fld"><label>Weight of module with hybrid 1, hybrid 2 and powerboard [g]</label><input inputmode="decimal" title="Weight of module with hybrid 1, hybrid 2 and powerboard [g]"></div>
+                  <div class="fld"><label>Weight of glue under hybrid 1, hybrid 2 and powerboard combined [g]</label><input inputmode="decimal" title="Weight of glue under hybrid 1, hybrid 2 and powerboard combined [g]"></div>
+                  <div class="fld"><label>Weight of module with only 1 hybrid [g]</label><input inputmode="decimal" title="Weight of module with only 1 hybrid [g]"></div>
+                  <div class="fld"><label>Weight of hybrid 1 (with tabs) [g]</label><input inputmode="decimal" title="Weight of hybrid 1 (with tabs) [g]"></div>
+                  <div class="fld"><label>Weight of hybrid 2 (with tabs) [g]</label><input inputmode="decimal" title="Weight of hybrid 2 (with tabs) [g]"></div>
+                  <div class="fld"><label>Weight of hybrid 1 tabs [g]</label><input inputmode="decimal" title="Weight of hybrid 1 tabs [g]"></div>
+                  <div class="fld"><label>Weight of hybrid 2 tabs [g]</label><input inputmode="decimal" title="Weight of hybrid 2 tabs [g]"></div>
+                </div>
+              </section>
+              <div class="ws-demo-actions">
+                <button class="btn sm">Cancel</button>
+                <button class="btn sm primary" data-toast="GLUE_WEIGHT test result staged for review; no direct PDB write was made.">Stage test result</button>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
             <h2>Add test result</h2>
             <p class="account-copy">Upload instrument output or record a result from the locally mirrored PDB schema.</p>
             <div class="dropzone">Drop a JSON file here, or choose a file<br><span class="mono">component pin: 20USE5R0000128</span></div>
@@ -484,13 +555,25 @@
             <h2>Mirrored test attachments</h2>
             <div class="action-controls" style="justify-content:flex-start;margin-bottom:10px">
               <span class="chip good"><span class="st"></span>local and available offline</span>
-              <span class="chip mono">MODULE_METROLOGY</span>
+              <span class="chip mono">VISUAL_INSPECTION</span>
             </div>
             <div class="attachment-grid">
-              <button class="attachment" data-toast="Local metrology image opened."><span>▧</span><span>height-map.png</span></button>
-              <button class="attachment" data-toast="Local metrology image opened."><span>▧</span><span>profile-x.png</span></button>
-              <button class="attachment" data-toast="Local metrology image opened."><span>▧</span><span>profile-y.png</span></button>
+              <button class="attachment" data-toast="Local inspection image opened."><span>▧</span><span>height-map.png</span></button>
+              <button class="attachment" data-toast="Local inspection image opened."><span>▧</span><span>profile-x.png</span></button>
+              <span class="attachment" title="Stored locally; preview unavailable"><span>◇</span><span>profile-y.tiff</span><span>Stored locally · preview unavailable</span></span>
             </div>
+          </div>
+          <div class="panel">
+            <h2>Generated result plots</h2>
+            <p class="account-copy">Drawn directly from mirrored numeric values, independent of plot attachments. The complete position/value table remains below each plot.</p>
+            <figure style="margin:0">
+              <svg class="spark" viewBox="0 0 320 118" role="img" aria-label="Generated categorical plot of hybrid glue thickness at four measured positions.">
+                <line x1="32" y1="94" x2="312" y2="94" stroke="var(--axis)"/><line x1="32" y1="10" x2="32" y2="94" stroke="var(--axis)"/>
+                <g stroke="var(--series)" fill="var(--series)"><line x1="58" y1="94" x2="58" y2="42"/><circle cx="58" cy="42" r="3"/><line x1="132" y1="94" x2="132" y2="27"/><circle cx="132" cy="27" r="3"/><line x1="206" y1="94" x2="206" y2="48"/><circle cx="206" cy="48" r="3"/><line x1="280" y1="94" x2="280" y2="35"/><circle cx="280" cy="35" r="3"/></g>
+                <g fill="var(--muted)" font-size="8" font-family="Consolas,monospace" text-anchor="middle"><text x="58" y="108">H1-0</text><text x="132" y="108">H1-1</text><text x="206" y="108">H2-0</text><text x="280" y="108">H2-1</text></g>
+              </svg>
+              <figcaption class="hint" style="margin:3px 0 0">Hybrid glue thickness / position or key · 4 points</figcaption>
+            </figure>
           </div>
         </div>
       </div>
@@ -632,6 +715,40 @@
       <div class="charts">
         <div class="chart-card"><h2>Stage dwell</h2><div class="sub">median days per production stage</div><div class="bars" role="img" aria-label="Stage dwell bar chart."><div class="bar-g"><span class="v">1.2</span><div class="bar" style="height:34%"></div></div><div class="bar-g"><span class="v">2.8</span><div class="bar" style="height:78%"></div></div><div class="bar-g"><span class="v">1.9</span><div class="bar" style="height:53%"></div></div><div class="bar-g"><span class="v">3.1</span><div class="bar" style="height:86%"></div></div></div><div class="bar-lbls"><span>HV TAB</span><span>GLUED</span><span>STITCH</span><span>BONDED</span></div></div>
         <div class="panel"><h2>Filters</h2><div class="fld"><label>Component type</label><select><option>All module types</option><option>R5M0</option><option>R5M1</option></select></div><div class="fld"><label>Time window</label><select><option>Last 90 days</option><option>Last 30 days</option><option>All mirrored history</option></select></div></div>
+      </div>
+      <div style="margin-top:18px">
+        <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink2);margin:0">Collective IV and CV curves</h2>
+        <p class="account-copy" style="margin:5px 0 12px">One compatible mirrored PDB schema per panel; schemas with different units or sweep protocols are never mixed on one axis.</p>
+        <div class="charts">
+          <div class="chart-card">
+            <h2>Collective IV curves</h2><div class="sub">current against voltage · one line per mirrored test run</div>
+            <div class="fld"><label>PDB test schema</label><select><option>ATLAS18_IV_TEST_V1</option><option>MODULE_IV_PS_V1</option><option>MODULE_IV_AMAC</option></select></div>
+            <div class="action-controls" style="justify-content:flex-start;margin-bottom:8px"><span class="chip good"><span class="st"></span>passed (298)</span><span class="chip crit"><span class="st"></span>failed, dashed (2)</span><span class="chip mono">CURRENT vs VOLTAGE</span></div>
+            <svg class="spark" viewBox="0 0 320 130" role="img" aria-label="Collective IV curve chart: 300 current versus voltage runs overlaid.">
+              <line x1="28" y1="108" x2="312" y2="108" stroke="var(--axis)"/><line x1="28" y1="12" x2="28" y2="108" stroke="var(--axis)"/>
+              <line x1="28" y1="76" x2="312" y2="76" stroke="var(--grid)"/><line x1="28" y1="44" x2="312" y2="44" stroke="var(--grid)"/>
+              <polyline points="28,103 78,99 128,93 178,82 228,61 278,33 312,19" fill="none" stroke="var(--series)" stroke-width="2" opacity=".45"/>
+              <polyline points="28,101 78,97 128,90 178,78 228,58 278,39 312,25" fill="none" stroke="var(--series)" stroke-width="2" opacity=".45"/>
+              <polyline points="28,99 78,94 128,84 178,68 228,50 278,26 312,15" fill="none" stroke="var(--crit)" stroke-width="2" stroke-dasharray="6 4"/>
+              <text x="170" y="126" fill="var(--muted)" font-size="9" font-family="Consolas,monospace" text-anchor="middle">Voltage</text>
+              <text x="9" y="60" fill="var(--muted)" font-size="9" font-family="Consolas,monospace" text-anchor="middle" transform="rotate(-90 9 60)">Current</text>
+            </svg>
+          </div>
+          <div class="chart-card">
+            <h2>Collective CV curves</h2><div class="sub">capacitance against voltage · one line per mirrored test run</div>
+            <div class="fld"><label>PDB test schema</label><select><option>ATLAS18_CV_TEST_V1</option></select></div>
+            <div class="action-controls" style="justify-content:flex-start;margin-bottom:8px"><span class="chip good"><span class="st"></span>passed (300)</span><span class="chip mono">CAPACITANCE vs VOLTAGE</span></div>
+            <svg class="spark" viewBox="0 0 320 130" role="img" aria-label="Collective CV curve chart: 300 capacitance versus voltage runs overlaid.">
+              <line x1="28" y1="108" x2="312" y2="108" stroke="var(--axis)"/><line x1="28" y1="12" x2="28" y2="108" stroke="var(--axis)"/>
+              <line x1="28" y1="76" x2="312" y2="76" stroke="var(--grid)"/><line x1="28" y1="44" x2="312" y2="44" stroke="var(--grid)"/>
+              <polyline points="28,20 74,22 120,26 166,37 212,59 258,80 312,91" fill="none" stroke="var(--series)" stroke-width="2" opacity=".42"/>
+              <polyline points="28,17 74,19 120,25 166,40 212,65 258,85 312,94" fill="none" stroke="var(--series)" stroke-width="2" opacity=".42"/>
+              <polyline points="28,24 74,25 120,29 166,42 212,61 258,77 312,87" fill="none" stroke="var(--series)" stroke-width="2" opacity=".42"/>
+              <text x="170" y="126" fill="var(--muted)" font-size="9" font-family="Consolas,monospace" text-anchor="middle">Voltage</text>
+              <text x="9" y="60" fill="var(--muted)" font-size="9" font-family="Consolas,monospace" text-anchor="middle" transform="rotate(-90 9 60)">Capacitance</text>
+            </svg>
+          </div>
+        </div>
       </div>
     </section>
 
