@@ -74,7 +74,7 @@ export default function ImageLightbox({
         ×
       </button>
       <img
-        src={componentAttachmentUrl(sn, attachment.code)}
+        src={componentAttachmentUrl(sn, attachment.code, attachment.source)}
         alt={attachment.title ?? attachment.filename ?? t.images.untitled}
       />
       <div className="img-lightbox-cap">

@@ -3,7 +3,12 @@
  * Kept free of React/DOM so the geometry is unit-testable: curves are scaled
  * into an SVG viewBox, scalars are binned into a histogram. */
 
-import type { MeasurementCurve, MeasurementValue } from "./api";
+import type {
+  MeasurementCurve,
+  MeasurementDimensions,
+  MeasurementResultDimension,
+  MeasurementValue,
+} from "./api";
 
 export type CurveGeometry = {
   /** SVG polyline points strings, same order as the input curves. */
@@ -13,6 +18,99 @@ export type CurveGeometry = {
   yMin: number;
   yMax: number;
 };
+
+export type CollectiveCurveFamily = "iv" | "cv";
+
+export type CollectiveCurveCandidate = {
+  family: CollectiveCurveFamily;
+  testType: string;
+  xResult: MeasurementResultDimension;
+  yResult: MeasurementResultDimension;
+  /** Upper bound from the dimension counts; exact pairing is checked per run. */
+  runs: number;
+};
+
+const CURVE_FAMILY_RESULTS: Record<
+  CollectiveCurveFamily,
+  { x: "voltage"; y: "current" | "capacitance" }
+> = {
+  iv: { x: "voltage", y: "current" },
+  cv: { x: "voltage", y: "capacitance" },
+};
+
+function semanticScore(result: MeasurementResultDimension, wanted: string): number {
+  const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const code = normalize(result.code);
+  const name = normalize(result.name ?? "");
+  if (code === wanted) return 100;
+  if (name === wanted) return 90;
+  if (code.split(" ").includes(wanted)) return 70;
+  if (name.split(" ").includes(wanted)) return 60;
+  return 0;
+}
+
+function hasFamilyMarker(
+  testType: string,
+  xResult: MeasurementResultDimension,
+  yResult: MeasurementResultDimension,
+  family: CollectiveCurveFamily,
+): boolean {
+  const tokens = (value: string) =>
+    value.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token !== "");
+  if (tokens(testType).includes(family)) return true;
+  // Some older schemas use a generic test-type name but carry the family on
+  // both axes (for example IV_CURRENT + IV_VOLTAGE).
+  return tokens(xResult.code).includes(family) && tokens(yResult.code).includes(family);
+}
+
+/** Discover curve datasets by measured quantity, never by institute or exact
+ * PDB test-type code. Schemas stay separate because their units and sweep
+ * protocols may differ; the caller lets the operator choose among them. */
+export function collectiveCurveCandidates(
+  dimensions: MeasurementDimensions,
+  family: CollectiveCurveFamily,
+): CollectiveCurveCandidate[] {
+  const semantics = CURVE_FAMILY_RESULTS[family];
+  const candidates: CollectiveCurveCandidate[] = [];
+  for (const testType of dimensions.test_types) {
+    const arrays = testType.results.filter((result) => result.kind === "array");
+    const ranked = (wanted: string) =>
+      arrays
+        .map((result) => ({ result, score: semanticScore(result, wanted) }))
+        .filter((entry) => entry.score > 0)
+        .sort(
+          (left, right) =>
+            right.score - left.score || right.result.runs - left.result.runs ||
+            left.result.code.localeCompare(right.result.code),
+        )[0]?.result;
+    const xResult = ranked(semantics.x);
+    const yResult = ranked(semantics.y);
+    if (
+      xResult === undefined ||
+      yResult === undefined ||
+      xResult.code === yResult.code ||
+      !hasFamilyMarker(testType.test_type, xResult, yResult, family)
+    ) {
+      continue;
+    }
+    candidates.push({
+      family,
+      testType: testType.test_type,
+      xResult,
+      yResult,
+      runs: Math.min(xResult.runs, yResult.runs),
+    });
+  }
+  return candidates.sort(
+    (left, right) => right.runs - left.runs || left.testType.localeCompare(right.testType),
+  );
+}
+
+/** Explicit IV/CV panels must never silently fall back to sample index: only
+ * runs for which the backend found a same-length x array are honest pairs. */
+export function pairedCurves(curves: MeasurementCurve[]): MeasurementCurve[] {
+  return curves.filter((curve) => curve.x !== null && curve.x.length === curve.y.length);
+}
 
 /** Scale curves into a `width`×`height` box (y flipped for SVG). Curves
  * without an x array plot against the sample index. Degenerate ranges pad by

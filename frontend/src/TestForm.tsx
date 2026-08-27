@@ -55,6 +55,9 @@ export type TestFormProps = {
   labels: TestFormLabels;
   onSubmit: (payload: TestFormSubmitPayload) => void | Promise<unknown>;
   disabled?: boolean;
+  variant?: "default" | "worksheet";
+  cancelLabel?: string;
+  onCancel?: () => void;
 };
 
 type FieldKind = "string" | "float" | "integer" | "boolean" | "unsupported";
@@ -64,6 +67,25 @@ type FieldKind = "string" | "float" | "integer" | "boolean" | "unsupported";
  * which key the *definition* spelled it under (see `measurementFields`).
  */
 type FieldSection = "properties" | "results";
+
+export type ManualEntryBlockerReason =
+  | "required-unsupported-type"
+  | "unsupported-array-shape"
+  | "no-enterable-measurement";
+
+export type ManualEntryBlocker = {
+  section: FieldSection;
+  code: string;
+  label: string;
+  dataType: string;
+  arrayDimensions: number | null;
+  reason: ManualEntryBlockerReason;
+};
+
+export type ManualEntryCapability = {
+  canEnter: boolean;
+  blockers: ManualEntryBlocker[];
+};
 
 /** English fallback for `TestFormLabels.noMeasurementFields`. */
 export const DEFAULT_NO_MEASUREMENT_FIELDS = (testType: string): string =>
@@ -77,6 +99,8 @@ type NormalizedField = {
   kind: FieldKind;
   rawDataType: string;
   isArray: boolean;
+  arrayDimensions: number | null;
+  arrayShapeSupported: boolean;
   required: boolean;
   defaultValue: unknown;
 };
@@ -120,6 +144,27 @@ function fieldKind(rawDataType: string): FieldKind {
     default:
       return "unsupported";
   }
+}
+
+function arrayShape(
+  descriptor: TestSchemaField,
+  isArray: boolean,
+): { dimensions: number | null; supported: boolean } {
+  if (!isArray) return { dimensions: null, supported: true };
+  const raw = descriptor.arrayDimensions ?? descriptor.array_dimensions;
+  // A missing/null dimension is how a number of otherwise ordinary one-
+  // dimensional PDB arrays are mirrored. It is safe to capture those as one
+  // value per line. Anything explicitly more complex (or malformed) stays
+  // file-only: flattening it would silently change the payload shape.
+  if (raw === undefined || raw === null) return { dimensions: null, supported: true };
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0) {
+    return { dimensions: null, supported: false };
+  }
+  return { dimensions: raw, supported: raw <= 1 };
+}
+
+function fieldCanEnter(field: NormalizedField): boolean {
+  return field.kind !== "unsupported" && field.arrayShapeSupported;
 }
 
 /**
@@ -216,13 +261,17 @@ function normalizeFields(
       "";
     const rawValueType =
       textValue(descriptor.valueType) ?? textValue(descriptor.value_type) ?? "single";
+    const isArray = rawValueType.toLowerCase() === "array";
+    const shape = arrayShape(descriptor, isArray);
     fields.push({
       code,
       label: textValue(descriptor.name) ?? textValue(descriptor.title) ?? code,
       description: textValue(descriptor.description),
       kind: fieldKind(rawDataType),
       rawDataType,
-      isArray: rawValueType.toLowerCase() === "array",
+      isArray,
+      arrayDimensions: shape.dimensions,
+      arrayShapeSupported: shape.supported,
       required: descriptor.required === true || required.has(code),
       defaultValue: descriptor.defaultValue ?? descriptor.default,
     });
@@ -288,6 +337,86 @@ function normalizeSchema(definition: TestSchemaDefinition): NormalizedSchema {
     ),
     results: measurementFields(definition),
   };
+}
+
+/**
+ * Whether the generated controls can safely create a complete manual run for
+ * this exact definition. This is deliberately fail-closed and shared by both
+ * entry surfaces: required object/testRun fields block, and primitive arrays
+ * are enterable only when their declared shape is missing or at most 1-D.
+ */
+export function manualEntryCapability(
+  definition: TestSchemaDefinition,
+): ManualEntryCapability {
+  const fields = normalizeSchema(definition);
+  const blockers: ManualEntryBlocker[] = [];
+  const seen = new Set<string>();
+
+  function addBlocker(
+    section: FieldSection,
+    field: NormalizedField,
+    reason: ManualEntryBlockerReason,
+  ) {
+    const key = `${section}:${field.code}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    blockers.push({
+      section,
+      code: field.code,
+      label: field.label,
+      dataType: field.rawDataType,
+      arrayDimensions: field.arrayDimensions,
+      reason,
+    });
+  }
+
+  for (const section of ["properties", "results"] as const) {
+    for (const field of fields[section]) {
+      if (field.kind !== "unsupported" && !field.arrayShapeSupported) {
+        addBlocker(section, field, "unsupported-array-shape");
+        continue;
+      }
+      if (!field.required || fieldCanEnter(field)) continue;
+      addBlocker(
+        section,
+        field,
+        "required-unsupported-type",
+      );
+    }
+  }
+
+  if (!fields.results.some(fieldCanEnter)) {
+    const unavailableResults = fields.results.filter((field) => !fieldCanEnter(field));
+    if (unavailableResults.length === 0) {
+      blockers.push({
+        section: "results",
+        code: "results",
+        label: "Results",
+        dataType: "",
+        arrayDimensions: null,
+        reason: "no-enterable-measurement",
+      });
+    } else {
+      for (const field of unavailableResults) {
+        addBlocker("results", field, "no-enterable-measurement");
+      }
+    }
+  }
+
+  return { canEnter: blockers.length === 0, blockers };
+}
+
+/** Compact, deterministic field list for the two blocking notices. */
+export function manualEntryBlockerSummary(
+  capability: ManualEntryCapability,
+  limit = 6,
+): string {
+  const names = capability.blockers.map((field) =>
+    field.label === field.code ? field.code : `${field.label} (${field.code})`,
+  );
+  const visible = names.slice(0, Math.max(1, limit));
+  const remaining = names.length - visible.length;
+  return remaining > 0 ? `${visible.join(", ")} (+${remaining})` : visible.join(", ");
 }
 
 function initialFieldValue(field: NormalizedField): string {
@@ -386,7 +515,7 @@ function parseField(
   rawValue: string,
   labels: TestFormLabels,
 ): ParsedField {
-  if (field.kind === "unsupported") {
+  if (!fieldCanEnter(field)) {
     return field.required
       ? { status: "error", message: labels.unsupportedType(field.label, field.rawDataType) }
       : { status: "empty" };
@@ -445,6 +574,9 @@ export default function TestForm({
   labels,
   onSubmit,
   disabled = false,
+  variant = "default",
+  cancelLabel,
+  onCancel,
 }: TestFormProps) {
   const idPrefix = safeIdPart(useId());
   const schemaKey = JSON.stringify([
@@ -458,7 +590,7 @@ export default function TestForm({
   // A schema can declare measurement fields that no control can hold — a
   // PDB `testRun` reference, an `object` map. If none of them is enterable,
   // the run cannot be completed here, and that is the schema's doing.
-  const hasEnterableResult = fields.results.some((field) => field.kind !== "unsupported");
+  const hasEnterableResult = fields.results.some(fieldCanEnter);
   const noMeasurementFieldsMessage = (
     labels.noMeasurementFields ?? DEFAULT_NO_MEASUREMENT_FIELDS
   )(schema.test_code.trim());
@@ -534,6 +666,29 @@ export default function TestForm({
 
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) {
+      const firstError = Object.keys(nextErrors)[0];
+      let controlName: string | null = null;
+      if (firstError === "runNumber" || firstError === "date") {
+        controlName = firstError;
+      } else if (firstError === "results") {
+        const firstResult = fields.results.find(fieldCanEnter);
+        controlName = firstResult === undefined ? null : `results.${firstResult.code}`;
+      } else {
+        const separator = firstError.indexOf(":");
+        if (separator > 0) {
+          controlName = `${firstError.slice(0, separator)}.${firstError.slice(separator + 1)}`;
+        }
+      }
+      const control =
+        controlName === null ? null : event.currentTarget.elements.namedItem(controlName);
+      if (control instanceof HTMLElement) {
+        // `noValidate` keeps locale-aware parsing under our control, so it also
+        // makes focus management our responsibility. Keep a long worksheet
+        // form from appearing to do nothing when its first error is above the
+        // viewport.
+        control.focus({ preventScroll: true });
+        control.scrollIntoView?.({ block: "nearest" });
+      }
       return;
     }
 
@@ -555,7 +710,7 @@ export default function TestForm({
     const validationId = `${inputId}-error`;
     const error = errors[errorKey(section, field.code)];
     const describedBy = [
-      field.description === null && !field.isArray && field.kind !== "unsupported"
+      field.description === null && !field.isArray && fieldCanEnter(field)
         ? null
         : hintId,
       error === undefined ? null : validationId,
@@ -563,18 +718,30 @@ export default function TestForm({
       .filter((value): value is string => value !== null)
       .join(" ");
     const value = draft[section][field.code] ?? "";
+    // The worksheet is intentionally dense: its schema may contain dozens of
+    // measurements in a narrow detail column. Keep descriptive copy in the
+    // accessibility tree and expose it as a native hover title, without
+    // repeating every label as another permanently visible line. Array and
+    // unsupported-type guidance remains visible because it changes how (or
+    // whether) the value can be entered.
+    const quietDescription =
+      variant === "worksheet" &&
+      field.description !== null &&
+      !field.isArray &&
+      fieldCanEnter(field);
     const common = {
       id: inputId,
       name: `${section}.${field.code}`,
       value,
       disabled,
-      required: field.required && field.kind !== "unsupported",
+      required: field.required && fieldCanEnter(field),
       "aria-invalid": error === undefined ? undefined : true,
       "aria-describedby": describedBy === "" ? undefined : describedBy,
+      title: quietDescription ? field.description ?? undefined : undefined,
     } as const;
 
     let control;
-    if (field.kind === "unsupported") {
+    if (!fieldCanEnter(field)) {
       control = <input {...common} className="text-input" readOnly />;
     } else if (field.isArray) {
       control = (
@@ -629,9 +796,9 @@ export default function TestForm({
           {field.required && <span aria-hidden="true"> *</span>}
         </span>
         {control}
-        {(field.description !== null || field.isArray || field.kind === "unsupported") && (
-          <small className="muted" id={hintId}>
-            {field.kind === "unsupported"
+        {(field.description !== null || field.isArray || !fieldCanEnter(field)) && (
+          <small className={quietDescription ? "sr-only" : "muted"} id={hintId}>
+            {!fieldCanEnter(field)
               ? labels.unsupportedType(field.label, field.rawDataType)
               : (
                   <>
@@ -652,7 +819,11 @@ export default function TestForm({
   }
 
   return (
-    <form className="phase4-form" onSubmit={handleSubmit} noValidate>
+    <form
+      className={variant === "worksheet" ? "phase4-form phase4-form-worksheet" : "phase4-form"}
+      onSubmit={handleSubmit}
+      noValidate
+    >
       <div className="phase4-form-grid">
         <label className="phase4-field" htmlFor={`${idPrefix}-run-number`}>
           <span className="field-label">
@@ -782,6 +953,11 @@ export default function TestForm({
       )}
 
       <div className="phase4-form-actions">
+        {onCancel !== undefined && cancelLabel !== undefined && (
+          <button className="btn" type="button" disabled={disabled} onClick={onCancel}>
+            {cancelLabel}
+          </button>
+        )}
         <button className="btn primary" type="submit" disabled={disabled}>
           {labels.submit}
         </button>

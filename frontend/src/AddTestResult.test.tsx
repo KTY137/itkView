@@ -42,6 +42,8 @@ const labels: AddTestResultLabels = {
   chooseTestType: "Choose a test type",
   pinnedTestType: (testType) => `Pinned test: ${testType}`,
   pinnedSchemaMissing: (testType) => `No schema for ${testType}.`,
+  manualEntryBlocked: (testType, fields) => `${testType} is file-only: ${fields}`,
+  useFileUpload: "Use JSON file upload",
   noSchemas: "No schemas available.",
   syncSchemas: "Sync schemas",
   syncingSchemas: "Syncing schemas",
@@ -553,6 +555,190 @@ describe("AddTestResult", () => {
 
     expect(screen.queryByLabelText("Test type")).not.toBeInTheDocument();
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  it("replaces a form with named blockers and focuses the existing JSON upload", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const user = userEvent.setup();
+    render(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[
+          {
+            id: 31,
+            component_type: "MODULE",
+            test_code: "OBJECT_TEST",
+            name: "Object test",
+            synced_at: "2026-08-27T12:00:00Z",
+            schema: {
+              properties: [
+                { code: "DCS", name: "DCS settings", dataType: "object", required: true },
+              ],
+              parameters: [{ code: "VALUE", name: "Value", dataType: "float" }],
+            },
+          },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Record test" }));
+    await user.selectOptions(screen.getByLabelText("Test type"), "31");
+
+    expect(await screen.findByText(/OBJECT_TEST is file-only/)).toHaveTextContent(
+      "DCS settings (DCS)",
+    );
+    expect(screen.queryByLabelText(/^Run number/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Dry-run manual result" })).not.toBeInTheDocument();
+
+    const fileInput = screen.getByLabelText("Choose JSON file");
+    expect(fileInput).not.toHaveAttribute("hidden");
+    await user.click(screen.getByRole("button", { name: "Use JSON file upload" }));
+
+    expect(screen.queryByLabelText("Test type")).not.toBeInTheDocument();
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "center" });
+    expect(document.activeElement).toBe(fileInput);
+  });
+
+  it("keeps a 2-D primitive array file-only instead of flattening it into a textarea", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[
+          {
+            id: 32,
+            component_type: "MODULE",
+            test_code: "TWO_DIMENSIONAL_TEST",
+            name: "Two-dimensional test",
+            synced_at: "2026-08-27T12:00:00Z",
+            schema: {
+              parameters: [
+                { code: "VALUE", name: "Value", dataType: "float" },
+                {
+                  code: "CURRENT",
+                  name: "Current",
+                  dataType: "float",
+                  valueType: "array",
+                  arrayDimensions: 2,
+                },
+              ],
+            },
+          },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Record test" }));
+    await user.selectOptions(screen.getByLabelText("Test type"), "32");
+
+    expect(await screen.findByText(/TWO_DIMENSIONAL_TEST is file-only/)).toHaveTextContent(
+      "Current (CURRENT)",
+    );
+    expect(container.querySelector('textarea[name="results.CURRENT"]')).toBeNull();
+    expect(screen.queryByLabelText(/^Run number/)).not.toBeInTheDocument();
+  });
+
+  it("disables a file-only redirect whenever its target chooser is disabled", async () => {
+    const user = userEvent.setup();
+    const fileOnlySchema: TestTypeSchema = {
+      id: 33,
+      component_type: "MODULE",
+      test_code: "OBJECT_TEST",
+      name: "Object test",
+      synced_at: "2026-08-27T12:00:00Z",
+      schema: {
+        properties: [{ code: "DCS", name: "DCS settings", dataType: "object", required: true }],
+        parameters: [{ code: "VALUE", name: "Value", dataType: "float" }],
+      },
+    };
+    const { rerender } = render(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[fileOnlySchema]}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Record test" }));
+    await user.selectOptions(screen.getByLabelText("Test type"), "33");
+    expect(await screen.findByRole("button", { name: "Use JSON file upload" })).toBeEnabled();
+
+    rerender(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[fileOnlySchema]}
+        disabled
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Use JSON file upload" })).toBeDisabled();
+    expect(screen.getByLabelText("Choose JSON file")).toBeDisabled();
+  });
+
+  it("applies each external file-upload intent once and focuses the real drop target", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const { rerender } = render(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[]}
+        fileUploadIntent={{ testType: "OBJECT_TEST", token: 1 }}
+      />,
+    );
+
+    const fileInput = screen.getByLabelText("Choose JSON file");
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    expect(document.activeElement).toBe(fileInput);
+
+    rerender(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[]}
+        fileUploadIntent={{ testType: "OBJECT_TEST", token: 1 }}
+      />,
+    );
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[]}
+        fileUploadIntent={{ testType: "OBJECT_TEST", token: 2 }}
+      />,
+    );
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2));
+    expect(document.activeElement).toBe(fileInput);
+  });
+
+  it("keeps the JSON chooser in the keyboard tab order", async () => {
+    const user = userEvent.setup();
+    render(
+      <AddTestResult
+        componentSn="20USEM00000001"
+        componentType="MODULE"
+        labels={labels}
+        schemas={[]}
+      />,
+    );
+
+    const fileInput = screen.getByLabelText("Choose JSON file");
+    await user.tab();
+
+    expect(fileInput).toHaveFocus();
+    expect(fileInput).toHaveAttribute("type", "file");
   });
 });
 

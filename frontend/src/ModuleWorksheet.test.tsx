@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -300,6 +300,7 @@ function renderWorksheet(overrides: Partial<ComponentProps<typeof ModuleWorkshee
       worksheet={worksheet}
       schemas={[glueSchema]}
       canWrite
+      onUseFileUpload={vi.fn()}
       {...overrides}
     />,
   );
@@ -477,6 +478,77 @@ describe("ModuleWorksheet", () => {
     expect(within(runList as HTMLElement).getByText(t.worksheet.statusPassed)).toBeInTheDocument();
   });
 
+  it("prefills from the newest live run and never from a newer withdrawn run", async () => {
+    const user = userEvent.setup();
+    vi.mocked(getComponentTests).mockResolvedValue([
+      {
+        ...mirroredRun,
+        external_ref: "run-withdrawn-newer",
+        measured_at: "2026-08-25T10:00:00Z",
+        run_number: "9",
+        run_state: "deleted",
+        results: { GW1: 9.99 },
+      },
+      {
+        ...mirroredRun,
+        external_ref: "run-live-older",
+        measured_at: "2026-08-20T10:00:00Z",
+        run_number: "3",
+        run_state: null,
+        results: { GW1: 0.1664 },
+      },
+    ]);
+    renderWorksheet();
+
+    await user.click(screen.getByRole("button", { name: "Record GLUE_WEIGHT" }));
+
+    expect(await screen.findByLabelText(/GW1/)).toHaveValue("0.1664");
+    expect(screen.getByLabelText(/GW1/)).not.toHaveValue("9.99");
+  });
+
+  it("does not load a withdrawn-only run into an already open empty strip", async () => {
+    const user = userEvent.setup();
+    let resolveRuns: ((runs: TestRunDetail[]) => void) | undefined;
+    vi.mocked(getComponentTests).mockReturnValue(
+      new Promise<TestRunDetail[]>((resolve) => {
+        resolveRuns = resolve;
+      }),
+    );
+    const noLiveGlueRuns: ComponentPreviewWorksheet = {
+      ...worksheet,
+      groups: worksheet.groups.map((group) => ({
+        ...group,
+        rows: group.rows.map((row) =>
+          row.test_type === "GLUE_WEIGHT"
+            ? { ...row, status: "missing", latest: null, run_count: 0 }
+            : row,
+        ),
+      })),
+    };
+    renderWorksheet({ worksheet: noLiveGlueRuns });
+
+    await user.click(screen.getByRole("button", { name: "Record GLUE_WEIGHT" }));
+    const input = await screen.findByLabelText(/GW1/);
+    expect(input).toHaveValue("");
+    await user.type(input, "0.245");
+    await waitFor(() => expect(getComponentTests).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      resolveRuns?.([
+        {
+          ...mirroredRun,
+          external_ref: "run-withdrawn-only",
+          measured_at: "2026-08-25T10:00:00Z",
+          run_number: "9",
+          run_state: "deleted",
+          results: { GW1: 9.99 },
+        },
+      ]);
+    });
+
+    expect(input).toHaveValue("0.245");
+  });
+
   it("stages an in-row edit through ingest -> dry-run -> propose-outbox, prefilled from the latest run", async () => {
     const user = userEvent.setup();
     const onStaged = vi.fn();
@@ -566,10 +638,12 @@ describe("ModuleWorksheet", () => {
 
     it("blocks the strip instead of a silent dead end when a non-round-trippable field is required", async () => {
       const user = userEvent.setup();
+      const onUseFileUpload = vi.fn();
       vi.mocked(getComponentTests).mockResolvedValue([metrologyRunWithMap]);
       renderWorksheet({
         worksheet: metrologyWorksheet,
         schemas: [metrologySchemaRequired],
+        onUseFileUpload,
       });
 
       await user.click(screen.getByRole("button", { name: "Record MODULE_METROLOGY" }));
@@ -584,6 +658,106 @@ describe("ModuleWorksheet", () => {
       // TestForm itself must not render at all — a half-usable form here
       // would still let the operator submit a payload missing this field.
       expect(screen.queryByLabelText("HYBRID_GLUE_THICKNESS")).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: t.worksheet.useFileUpload }));
+      expect(onUseFileUpload).toHaveBeenCalledWith("MODULE_METROLOGY");
+    });
+  });
+
+  describe("manual-entry capability", () => {
+    const missingWorksheet = (testType: string): ComponentPreviewWorksheet => ({
+      groups: [
+        {
+          stage: "TESTED",
+          reached: true,
+          rows: [
+            {
+              test_type: testType,
+              status: "missing",
+              latest: null,
+              staged: [],
+              run_count: 0,
+            },
+          ],
+        },
+      ],
+    });
+
+    it("names required object fields and routes the file-only test to JSON upload", async () => {
+      const user = userEvent.setup();
+      const onUseFileUpload = vi.fn();
+      renderWorksheet({
+        worksheet: missingWorksheet("MODULE_IV_AMAC_TC"),
+        schemas: [
+          {
+            id: 21,
+            component_type: "MODULE",
+            test_code: "MODULE_IV_AMAC_TC",
+            name: "Module IV AMAC thermal cycle",
+            synced_at: "2026-08-27T12:00:00Z",
+            schema: {
+              properties: [
+                { code: "DCS", name: "DCS settings", dataType: "object", required: true },
+                {
+                  code: "SCAN_INFO",
+                  name: "Scan information",
+                  dataType: "object",
+                  required: true,
+                },
+              ],
+              parameters: [{ code: "SUMMARY", name: "Summary", dataType: "float" }],
+            },
+          },
+        ],
+        onUseFileUpload,
+      });
+
+      await user.click(screen.getByRole("button", { name: "Record MODULE_IV_AMAC_TC" }));
+
+      expect(await screen.findByText(/DCS settings \(DCS\)/u)).toHaveTextContent(
+        "Scan information (SCAN_INFO)",
+      );
+      expect(screen.queryByLabelText(/Run number/u)).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Stage test result" })).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: t.worksheet.useFileUpload }));
+      expect(onUseFileUpload).toHaveBeenCalledWith("MODULE_IV_AMAC_TC");
+    });
+
+    it("does not render a flattening textarea for a 2-D primitive curve", async () => {
+      const user = userEvent.setup();
+      const onUseFileUpload = vi.fn();
+      const { container } = renderWorksheet({
+        worksheet: missingWorksheet("MODULE_TC"),
+        schemas: [
+          {
+            id: 22,
+            component_type: "MODULE",
+            test_code: "MODULE_TC",
+            name: "Module thermal cycle",
+            synced_at: "2026-08-27T12:00:00Z",
+            schema: {
+              parameters: [
+                { code: "SUMMARY", name: "Summary", dataType: "float" },
+                {
+                  code: "CURRENT",
+                  name: "Current",
+                  dataType: "float",
+                  valueType: "array",
+                  arrayDimensions: 2,
+                },
+              ],
+            },
+          },
+        ],
+        onUseFileUpload,
+      });
+
+      await user.click(screen.getByRole("button", { name: "Record MODULE_TC" }));
+
+      expect(await screen.findByText(/Current \(CURRENT\)/u)).toBeInTheDocument();
+      expect(container.querySelector('textarea[name="results.CURRENT"]')).toBeNull();
+      expect(screen.queryByLabelText(/Run number/u)).not.toBeInTheDocument();
     });
   });
 

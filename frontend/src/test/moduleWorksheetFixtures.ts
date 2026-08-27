@@ -77,6 +77,7 @@ export const METROLOGY_THICKNESS: Record<string, number> = {
 };
 
 const ivAttachment: TestRunAttachment = {
+  source: "pdb",
   code: "att-iv-3",
   test_type: "MODULE_IV_PS_V1",
   test_run_ref: "RUN-IV-3",

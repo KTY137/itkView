@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, DragEvent } from "react";
 import type {
   IngestFile,
@@ -9,7 +9,7 @@ import type {
 import { useDataEntryProfile } from "./dataEntryProfile";
 import { planFieldLayout } from "./fieldLayout";
 import { DerivedDetail } from "./GlueDerivation";
-import TestForm from "./TestForm";
+import TestForm, { manualEntryBlockerSummary, manualEntryCapability } from "./TestForm";
 import type {
   TestFormLabels,
   TestFormSubmitPayload,
@@ -42,6 +42,8 @@ export type AddTestResultLabels = {
   chooseTestType: string;
   pinnedTestType: (testType: string) => string;
   pinnedSchemaMissing: (testType: string) => string;
+  manualEntryBlocked: (testType: string, fields: string) => string;
+  useFileUpload: string;
   noSchemas: string;
   syncSchemas: string;
   syncingSchemas: string;
@@ -125,6 +127,8 @@ export type AddTestResultProps = {
    * this remains a single new prop.
    */
   initialTestType?: RecordTestIntent;
+  /** Focus the existing JSON file entry from another surface, such as the worksheet. */
+  fileUploadIntent?: RecordTestIntent;
 };
 
 /** See `AddTestResultProps.initialTestType`. */
@@ -159,8 +163,11 @@ export default function AddTestResult({
   pinnedTestType,
   intentToken = 0,
   initialTestType,
+  fileUploadIntent,
 }: AddTestResultProps) {
   const rootRef = useRef<HTMLElement>(null);
+  const fileEntryRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [selectedSchemaId, setSelectedSchemaId] = useState<number | null>(null);
   const [dragActive, setDragActive] = useState(false);
@@ -173,6 +180,16 @@ export default function AddTestResult({
   const [ingest, setIngest] = useState<IngestFile | null>(null);
   const [preview, setPreview] = useState<IngestPreview | null>(null);
   const [stagedActionId, setStagedActionId] = useState<number | null>(null);
+  const fileUploadIntentToken = fileUploadIntent?.token ?? 0;
+
+  const focusFileUpload = useCallback(() => {
+    setFormOpen(false);
+    fileEntryRef.current?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    // Focus the actual file chooser, not merely its surrounding card. A
+    // visually hidden (but not HTML-hidden) input remains keyboard-operable
+    // and lets Enter/Space open the native picker after a file-only redirect.
+    fileInputRef.current?.focus({ preventScroll: true });
+  }, []);
 
   const availableSchemas = useMemo(
     () =>
@@ -251,6 +268,11 @@ export default function AddTestResult({
         : { ...selectedSchema, schema: plan.definition },
     [selectedSchema, plan],
   );
+  const manualCapability = useMemo(
+    () =>
+      laidOutSchema === null ? null : manualEntryCapability(laidOutSchema.schema),
+    [laidOutSchema],
+  );
   const [toolValues, setToolValues] = useState<Record<string, string>>({});
   const [missingToolCodes, setMissingToolCodes] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {
@@ -313,6 +335,11 @@ export default function AddTestResult({
     setSelectedSchemaId(match?.id ?? null);
     rootRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
   }, [normalizedPinnedTestType, initialTestTypeToken, normalizedInitialTestType]);
+
+  useEffect(() => {
+    if (fileUploadIntentToken === 0) return;
+    focusFileUpload();
+  }, [fileUploadIntentToken, focusFileUpload]);
 
   useEffect(() => {
     if (
@@ -593,7 +620,10 @@ export default function AddTestResult({
       </header>
 
       <div className="phase4-split add-test-result-entries">
-        <div className="add-test-result-entry">
+        <div
+          ref={fileEntryRef}
+          className="add-test-result-entry"
+        >
           <h4 className="section-title">{labels.fileEntryTitle}</h4>
           <div
             className={`add-test-dropzone${dragActive ? " is-dragging" : ""}`}
@@ -603,13 +633,13 @@ export default function AddTestResult({
             onDrop={handleDrop}
           >
             <span>{busy === "ingest" ? labels.processing : labels.dropFile}</span>
-            <label className="btn" aria-disabled={interactionDisabled}>
+            <label className="btn file-choose-btn" aria-disabled={interactionDisabled}>
               {labels.chooseFile}
               <input
+                ref={fileInputRef}
                 className="add-test-file-input"
                 type="file"
                 accept="application/json,.json"
-                hidden
                 disabled={interactionDisabled}
                 onChange={handleFileInput}
               />
@@ -674,7 +704,7 @@ export default function AddTestResult({
               ))}
             </select>
           </label>
-          {plan !== null && (
+          {plan !== null && manualCapability?.canEnter === true && (
             // Tooling first, as on the sheet: what the module was built in is
             // decided before the scale is read, and it is chosen, not typed.
             <ToolFieldSection
@@ -698,7 +728,25 @@ export default function AddTestResult({
               disabled={schemaInteractionDisabled}
             />
           )}
-          {laidOutSchema !== null && (
+          {laidOutSchema !== null && manualCapability?.canEnter === false && (
+            <div className="info-banner" role="status">
+              <span>
+                {labels.manualEntryBlocked(
+                  laidOutSchema.test_code,
+                  manualEntryBlockerSummary(manualCapability),
+                )}
+              </span>
+              <button
+                type="button"
+                className="btn"
+                disabled={schemaInteractionDisabled}
+                onClick={focusFileUpload}
+              >
+                {labels.useFileUpload}
+              </button>
+            </div>
+          )}
+          {laidOutSchema !== null && manualCapability?.canEnter === true && (
             <TestForm
               component={componentSn}
               schema={laidOutSchema}

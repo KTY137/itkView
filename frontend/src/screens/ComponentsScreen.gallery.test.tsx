@@ -9,6 +9,7 @@
  * the bytes. A merged grid would fetch them from the parent's URL and 404.
  */
 import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
 import type { ComponentAttachments, TestRunAttachment } from "../api";
@@ -51,6 +52,7 @@ const SENSOR_SN = "20USES40000123";
 
 function image(code: string, overrides: Partial<TestRunAttachment> = {}): TestRunAttachment {
   return {
+    source: "pdb",
     code,
     test_type: "VISUAL_INSPECTION",
     test_run_ref: `RUN-${code}`,
@@ -114,6 +116,13 @@ function childSection(): HTMLElement {
   return section;
 }
 
+function ownImagePanel(): HTMLElement {
+  const heading = screen.getByRole("heading", { name: t.images.title });
+  const panel = heading.nextElementSibling;
+  if (!(panel instanceof HTMLElement)) throw new Error("own image panel not found");
+  return panel;
+}
+
 it("shows a child's image tagged with the child's serial and type", async () => {
   renderModulePage();
 
@@ -126,7 +135,7 @@ it("shows a child's image tagged with the child's serial and type", async () => 
   expect(within(section).getByText(describeComponent(family.children[0]))).toBeTruthy();
   expect(within(section).getByRole("img")).toHaveAttribute(
     "src",
-    `/api/components/${SENSOR_SN}/attachments/sensor-photo`,
+    `/api/components/${SENSOR_SN}/attachments/sensor-photo?source=pdb`,
   );
 });
 
@@ -138,8 +147,90 @@ it("keeps the component's own images out of the children's groups", async () => 
   // The module's own picture is fetched under the module's serial, and it is
   // not repeated inside the child group.
   const own = screen.getByAltText("module-photo.jpg");
-  expect(own).toHaveAttribute("src", `/api/components/${MODULE_SN}/attachments/module-photo`);
+  expect(own).toHaveAttribute(
+    "src",
+    `/api/components/${MODULE_SN}/attachments/module-photo?source=pdb`,
+  );
   expect(within(childSection()).queryByAltText("module-photo.jpg")).toBeNull();
+});
+
+it("addresses equal attachment codes by source in the gallery and lightbox", async () => {
+  vi.mocked(getComponentAttachments).mockResolvedValue({
+    component_sn: MODULE_SN,
+    attachments: [
+      image("shared-code", { source: "pdb", filename: "pdb-copy.jpg" }),
+      image("shared-code", { source: "share_link", filename: "shared-copy.jpg" }),
+    ],
+    children: [],
+  });
+  renderModulePage();
+
+  const pdbImage = await screen.findByAltText("pdb-copy.jpg");
+  const sharedImage = screen.getByAltText("shared-copy.jpg");
+  expect(pdbImage).toHaveAttribute(
+    "src",
+    `/api/components/${MODULE_SN}/attachments/shared-code?source=pdb`,
+  );
+  expect(sharedImage).toHaveAttribute(
+    "src",
+    `/api/components/${MODULE_SN}/attachments/shared-code?source=share_link`,
+  );
+
+  await userEvent.setup().click(sharedImage.closest("button") as HTMLButtonElement);
+  const dialog = screen.getByRole("dialog", { name: "shared-copy.jpg" });
+  expect(within(dialog).getByRole("img")).toHaveAttribute(
+    "src",
+    `/api/components/${MODULE_SN}/attachments/shared-code?source=share_link`,
+  );
+});
+
+it("keeps an own TIFF visible with an explicit unavailable-preview label", async () => {
+  vi.mocked(getComponentAttachments).mockResolvedValue({
+    component_sn: MODULE_SN,
+    attachments: [
+      image("module-scan", {
+        filename: "module-scan.tiff",
+        content_type: "image/tiff",
+      }),
+    ],
+    children: [],
+  });
+  renderModulePage();
+
+  await screen.findByText(/module-scan\.tiff/u);
+  const panel = ownImagePanel();
+  expect(within(panel).queryByText(t.images.empty)).toBeNull();
+  expect(within(panel).queryByText(t.images.ownEmpty)).toBeNull();
+  expect(within(panel).getByText(t.images.storedLocally)).toBeInTheDocument();
+  expect(panel.querySelector(".img-thumb.placeholder")).not.toBeNull();
+  expect(panel.querySelector("img")).toBeNull();
+});
+
+it("keeps a child-only TIFF in its owner group with an unavailable-preview label", async () => {
+  vi.mocked(getComponentAttachments).mockResolvedValue({
+    component_sn: MODULE_SN,
+    attachments: [],
+    children: [
+      {
+        ...family.children[0],
+        attachments: [
+          image("sensor-scan", {
+            filename: "sensor-scan.tif",
+            content_type: "image/tiff",
+          }),
+        ],
+      },
+    ],
+  });
+  renderModulePage();
+
+  await screen.findByText(t.images.ownEmpty);
+  const section = childSection();
+  expect(screen.queryByText(t.images.empty)).toBeNull();
+  expect(within(section).getByText(/sensor-scan\.tif/u)).toBeInTheDocument();
+  expect(within(section).getByText(t.images.storedLocally)).toBeInTheDocument();
+  expect(section.querySelector(".img-thumb.placeholder")).not.toBeNull();
+  expect(section.querySelector("img")).toBeNull();
 });
 
 it("says so when only the children have pictures", async () => {

@@ -34,6 +34,7 @@ import type {
   ComponentOut,
   ComponentPreviewAction,
   ComponentPreviewTest,
+  ComponentThumbnail,
   OutboxAction,
   OutboxStatus,
   WorksheetArraySummary,
@@ -280,7 +281,7 @@ export default function StagedScreen({
   const { canWrite, user, showToast } = useAuth();
   const [actions, setActions] = useState<OutboxAction[]>([]);
   const [components, setComponents] = useState<ComponentOut[]>([]);
-  const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
+  const [thumbnails, setThumbnails] = useState<Record<string, ComponentThumbnail>>({});
   const [previewActions, setPreviewActions] = useState<Record<number, ComponentPreviewAction>>({});
   // Ghost tests keyed by the outbox action they belong to: the measured values
   // this screen approves (see the module docstring for why this is the source).
@@ -613,7 +614,7 @@ function ComponentActionGroup({
   onDiscard,
 }: {
   group: ActionGroup;
-  thumbnails: Record<string, string>;
+  thumbnails: Record<string, ComponentThumbnail>;
   stagedTests: Record<number, ComponentPreviewTest>;
   canWriteAction: (action: OutboxAction) => boolean;
   busy: BusyAction | null;
@@ -632,7 +633,7 @@ function ComponentActionGroup({
         {thumbnail !== undefined && group.sn !== null ? (
           <img
             className="staged-component-thumb"
-            src={componentAttachmentUrl(group.sn, thumbnail)}
+            src={componentAttachmentUrl(group.sn, thumbnail.code, thumbnail.source)}
             alt={t.staged.thumbnailAlt(group.localName)}
           />
         ) : (
