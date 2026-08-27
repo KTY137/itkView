@@ -55,7 +55,7 @@ import {
   subscribeStagedPreviewPreference,
 } from "../stagedPreview";
 import type { StagedPreviewMode } from "../stagedPreview";
-import { describeComponent, outboxStatusChipClass, roleLabel, stageChipClass, stageLabel } from "../ui";
+import { describeComponent, isDisplayableImage, outboxStatusChipClass, roleLabel, stageChipClass, stageLabel } from "../ui";
 import RegisterModuleForm from "./RegisterModuleForm";
 
 function errorMessage(err: unknown): string {
@@ -192,6 +192,17 @@ export default function ComponentsScreen({
     reloadedEvidenceJob.current = job.id;
     setReloadKey((key) => key + 1);
   }, [evidenceSync.job]);
+
+  // Rolling readout during an evidence sweep. The sweep commits each component
+  // as it arrives, so the mirror already holds the new evidence, thumbnails and
+  // attachments while the job is still running — this re-reads it periodically
+  // instead of leaving the screen on stale rows until the terminal status.
+  // Only the evidence sweep qualifies: the component sync writes its whole
+  // mirror in one closing transaction and has nothing to show mid-run.
+  useEffect(() => {
+    if (evidenceSync.dataEpoch === 0) return;
+    setReloadKey((key) => key + 1);
+  }, [evidenceSync.dataEpoch]);
 
   // React to a cross-screen navigation intent (board card click, topbar scan).
   const navToken = nav?.token ?? 0;
@@ -397,6 +408,7 @@ export default function ComponentsScreen({
         evidenceJobId={
           evidenceSync.job?.status === "succeeded" ? evidenceSync.job.id : null
         }
+        evidenceEpoch={evidenceSync.dataEpoch}
         pinnedTestType={detailTestType}
         testIntentToken={detailIntentToken}
         onNavigate={onNavigate}
@@ -726,6 +738,7 @@ export function ComponentDetailPanel({
   onBack,
   onOpen,
   evidenceJobId,
+  evidenceEpoch,
   pinnedTestType,
   testIntentToken,
   onNavigate,
@@ -735,6 +748,9 @@ export function ComponentDetailPanel({
   onBack: () => void;
   onOpen: (sn: string) => void;
   evidenceJobId: number | null;
+  /** Rolling readout counter from the evidence sync controller: advances while
+   * a sweep is running so an open component does not sit on a stale preview. */
+  evidenceEpoch: number;
   pinnedTestType: string | null;
   testIntentToken: number;
   /** Cross-screen navigation (review finding I3: wires the worksheet's "View
@@ -822,6 +838,16 @@ export function ComponentDetailPanel({
     setReloadKey((key) => key + 1);
     setPreviewReloadKey((key) => key + 1);
   }, [evidenceJobId]);
+
+  // Same rolling readout as the list, where it matters more: a person watching
+  // one component during a sweep would otherwise read a stale preview — and a
+  // stale required-test verdict — for the whole run, even though this
+  // component's evidence may already be committed.
+  useEffect(() => {
+    if (evidenceEpoch === 0) return;
+    setReloadKey((key) => key + 1);
+    setPreviewReloadKey((key) => key + 1);
+  }, [evidenceEpoch]);
 
   // Stage suggestion is a best-effort extra: hide the section when the backend
   // is offline or has no data for this component, without disturbing the detail.
@@ -1534,7 +1560,7 @@ function ImagesSection({ sn, refreshKey }: { sn: string; refreshKey: number }) {
     setLightbox(null);
     getComponentAttachments(sn, ctrl.signal)
       .then((attachments) =>
-        setImages(attachments.filter((attachment) => attachment.stored && attachment.is_image)),
+        setImages(attachments.filter((attachment) => attachment.stored && isDisplayableImage(attachment))),
       )
       .catch((err: unknown) => {
         if (ctrl.signal.aborted) return;

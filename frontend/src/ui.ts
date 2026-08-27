@@ -213,3 +213,35 @@ export function describeComponent(c: {
   if (raw) return `${kind} · ${raw}`;
   return kind;
 }
+
+/**
+ * Whether a browser will actually paint this attachment in an `<img>`.
+ *
+ * `is_image` answers "is this an image", which is not the same question. The
+ * mirror holds two 36 MB TIFFs from a visual inspection: a truthful
+ * `image/tiff` makes `is_image` true, and Chromium — so also the desktop
+ * WebView2 shell — renders nothing but a broken tile. Callers use this to show
+ * the existing "stored, not displayable" placeholder instead, which is honest
+ * about the file being present.
+ *
+ * The list is what browsers agree on, not everything that is an image.
+ */
+const DISPLAYABLE_IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "image/bmp",
+  "image/avif",
+  "image/svg+xml",
+]);
+
+export function isDisplayableImage(attachment: {
+  is_image: boolean;
+  content_type: string | null;
+}): boolean {
+  if (!attachment.is_image) return false;
+  const type = (attachment.content_type ?? "").split(";")[0].trim().toLowerCase();
+  return DISPLAYABLE_IMAGE_TYPES.has(type);
+}

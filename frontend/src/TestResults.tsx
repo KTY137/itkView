@@ -22,6 +22,7 @@ import {
   type TestRunDetail,
 } from "./api";
 import { t } from "./i18n";
+import { isDisplayableImage } from "./ui";
 import ImageLightbox from "./ImageLightbox";
 
 export type DisplayTestRun = TestRunDetail | ComponentPreviewTest;
@@ -275,7 +276,7 @@ export function RunAttachments({ sn, attachments, onOpen }: {
   return (
     <div className="img-grid compact">
       {attachments.map((attachment) =>
-        attachment.stored && attachment.is_image ? (
+        attachment.stored && isDisplayableImage(attachment) ? (
           <button
             type="button"
             className="img-thumb"
