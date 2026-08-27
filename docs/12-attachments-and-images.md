@@ -543,6 +543,36 @@ Kind-Bilder.
   dem Review-Nachzug keine gespiegelten Läufe mehr (docs/04).
 - Nicht in Exporten/Statistiken.
 
+## 5b. `is_image` beantwortet nicht die Frage der Anzeige (2026-08-27)
+
+`TestRunAttachment.is_image` leitet sich aus dem `content_type` ab und
+beantwortet „ist das ein Bild?“. Die Galerie braucht aber die andere Frage:
+**„malt ein Browser das?“** Beides fällt auseinander, sobald ein Format im
+Spiegel liegt, das Chromium nicht dekodiert.
+
+Konkret: der Spiegel hält zwei 36-MB-TIFFs aus einer Sichtprüfung
+(`20USEH40000134`). Die Content-Type-Reparatur schreibt dort wahrheitsgemäß
+`image/tiff` zurück — womit `is_image` wahr wird und die WebView2-Shell des
+Desktop-Bundles zwei dauerhaft kaputte Kacheln zeigt. Ein behobener Fehler
+hätte also einen neuen ausgeliefert, und die nächste Meldung wäre zu Recht
+„die Bilder sind wieder kaputt“ gewesen.
+
+Deshalb prüfen beide Renderer (`ImagesSection` in `ComponentsScreen.tsx` und
+die Lauf-Thumbnails in `TestResults.tsx`) zusätzlich `isDisplayableImage()`
+aus `frontend/src/ui.ts` — eine Allowlist der Formate, auf die sich Browser
+einig sind (jpeg, png, gif, webp, bmp, avif, svg). Fällt ein Anhang durch,
+erscheint der bestehende Platzhalter „gespeichert, nicht darstellbar“:
+ehrlich darüber, dass die Datei da und abrufbar ist, nur nicht inline zeigbar.
+
+**Der `content_type` bleibt dabei wahr.** Ein TIFF ist ein TIFF; der Typ wird
+nicht zurückgehalten, um einen Anzeigefehler verschwinden zu lassen. Wer die
+Allowlist erweitert, ändert nur die Anzeige, nie die Daten.
+
+Randnotiz aus der Messung: kein Bauteil im Spiegel hat *ausschließlich* ein
+TIFF, deshalb liefert die Thumbnail-Auswahl (`MIN(id)`) nie eine
+nicht-darstellbare Kachel aus — diese Karte trägt keinen Content-Type und
+könnte den Fall gar nicht abfangen.
+
 ## 6. Fehlersuche: „Ich sehe keine Bilder"
 
 In dieser Reihenfolge abarbeiten — jeder Schritt ist ohne Codelektüre

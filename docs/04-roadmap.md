@@ -31,6 +31,15 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-27)
 
+- **Nicht darstellbare Bildformate (2026-08-27):** `is_image` beantwortet
+  „ist das ein Bild?“, die Galerie braucht „malt ein Browser das?“. Die
+  Content-Type-Reparatur hätte zwei 36-MB-TIFFs wahrheitsgemäß auf
+  `image/tiff` gesetzt und damit zwei dauerhaft kaputte Kacheln geliefert —
+  ein behobener Fehler, der einen neuen ausliefert. Beide Renderer prüfen
+  jetzt `isDisplayableImage()` (`frontend/src/ui.ts`) und zeigen sonst den
+  bestehenden Platzhalter „gespeichert, nicht darstellbar“. Der `content_type`
+  bleibt wahr; zurückgehalten wird nichts. Details
+  [`12`](12-attachments-and-images.md) §5b.
 - **Die Bilder werden sichtbar: drei Ursachen, alle am Live-Spiegel gemessen
   (2026-08-27).** Der Bestand hielt 432 echte Bilddateien; ein Operator sah
   fast keine. (1) **Das Listen-Limit zaehlte Zeilen, nicht Komponenten.**
