@@ -351,6 +351,24 @@ def _timestamp_after(value: datetime | None, boundary: datetime | None) -> bool:
     return value > boundary
 
 
+def _timestamps_equal(value: datetime | None, boundary: datetime | None) -> bool:
+    """Whether two persisted UTC timestamps are the same instant.
+
+    Reachable in ordinary operation, not just in tests: Windows resolves the
+    system clock to roughly 15.6 ms, so a component sync that commits
+    immediately before its evidence follow-up is claimed writes both
+    timestamps inside a single tick.
+    """
+
+    if value is None or boundary is None:
+        return False
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    if boundary.tzinfo is None:
+        boundary = boundary.replace(tzinfo=timezone.utc)
+    return value == boundary
+
+
 def _close_stale_job_if_unchanged(session: Session, job: SyncJob) -> bool:
     """Close a stale lease only if no other process refreshed it meanwhile."""
 
@@ -1993,7 +2011,23 @@ def fail_sync_job(
                 result = dict(component_job.result or {})
                 if not bool(result.get(EVIDENCE_FOLLOWUP_PENDING_KEY)):
                     continue
-                if not _timestamp_after(job.started_at, component_job.finished_at):
+                # The tie belongs to this attempt. `_timestamp_after` is
+                # strict on purpose, but it answers a different question: for
+                # *coverage* an ambiguous generation should be swept again, so
+                # a tie means "not covered". Here it decided whether the retry
+                # verdict is written at all, and an absent key is neither
+                # `due` nor `blocked` — `_reconcile_evidence_followup` then
+                # returned without scheduling anything and the follow-up was
+                # silently dropped until a person pressed sync.
+                #
+                # A component job whose `finished_at` equals the evidence
+                # job's `started_at` is exactly the follow-up chain: the sync
+                # committed and its evidence job was claimed inside one clock
+                # tick. So the verdict is recorded on a tie whatever it says.
+                if not (
+                    _timestamp_after(job.started_at, component_job.finished_at)
+                    or _timestamps_equal(job.started_at, component_job.finished_at)
+                ):
                     continue
                 result[EVIDENCE_FOLLOWUP_RETRY_KEY] = followup_retry_state
                 component_job.result = result

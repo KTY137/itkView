@@ -700,6 +700,38 @@ alle mit definiertem sicheren Ausgang):
   `_attachment_summaries` aus der URL gestrippt und der Downloader holt sich
   ohnehin eine frische URL.
 
+## Zeitstempel-Gleichstand im Evidence-Nachlauf (Bugfix 2026-08-27)
+
+`_timestamp_after` vergleicht **strikt** (`>`), und das ist fuer die
+*Abdeckungs*-Frage richtig: Ein Gleichstand muss „nicht abgedeckt" bedeuten,
+damit die Generation erneut gespiegelt wird — sie faelschlich als abgedeckt zu
+werten hiesse, einen Sweep zu ueberspringen und Daten zu verlieren.
+
+Derselbe Helfer entschied aber auch, ob das **Retry-Verdikt** ueberhaupt auf
+den Komponenten-Job geschrieben wird. Dort kippte der Gleichstand in die
+falsche Richtung: Der Schluessel wurde nie geschrieben, ein fehlender
+Schluessel ist weder `due` noch `blocked`, also kehrte
+`_reconcile_evidence_followup` zurueck, ohne irgendetwas zu planen — **ein
+transient gescheiterter Evidence-Nachlauf verschwand still, bis jemand von
+Hand synct.**
+
+Der Gleichstand ist nicht theoretisch: Windows loest die Systemuhr auf rund
+**15,6 ms** auf, und ein Komponenten-Sync, der unmittelbar vor der Uebernahme
+seines Evidence-Jobs committet, schreibt beide Zeitstempel in denselben Tick.
+
+Behoben: An der Verdikt-Stelle zaehlt der Gleichstand jetzt mit (ein
+Komponenten-Job, der genau beim Start des Evidence-Jobs endet, **ist** die
+Nachlaufkette), waehrend die Abdeckungs-Stellen strikt bleiben. Beide
+Richtungen sind an der Zeile kommentiert — die naheliegende „Vereinheitlichung"
+der beiden Vergleiche wuerde den Fehler wieder einbauen.
+
+Gefunden wurde er als vermeintlich flakiger Test. Die Testvorbedingung haengt
+deshalb nicht mehr an der Uhr: `_commit_pending_component_generation`
+datiert den Commit um fuenf Sekunden zurueck. Vorher scheiterten die
+betroffenen Tests etwa in einem Drittel der Laeufe **am korrekten Verhalten** —
+und Tests, die grundlos rot werden, bringen ein Team dazu, rote Balken
+wegzuerklaeren.
+
 ## Unbeaufsichtigter Auto-Sync (`app/auto_sync.py`, 2026-08-27)
 
 Ein Sweep war frueher zu teuer, um ihn auf einen Timer zu legen: ein Request

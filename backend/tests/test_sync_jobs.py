@@ -1874,6 +1874,21 @@ def _commit_pending_component_generation(
         job_id,
         lambda institute_code, requested_by, user_id: None,
     )
+    # Backdate the commit so the evidence attempt that follows unambiguously
+    # starts *after* this generation. Every caller means "the component was
+    # already committed when the evidence job was claimed", and coverage is
+    # decided by a strict `started_at > finished_at` — deliberately, because
+    # treating an ambiguous pair as covered would skip a sweep and lose data.
+    # Windows resolves the clock to ~15.6 ms, so without this the two land in
+    # one tick often enough to make these tests fail perhaps a third of the
+    # time, on the correct behaviour. The precondition belongs in the fixture,
+    # not in the clock.
+    with session_factory() as session:
+        job = session.get(SyncJob, job_id)
+        backdated = job.finished_at - timedelta(seconds=5)
+        job.finished_at = backdated
+        job.updated_at = backdated
+        session.commit()
     return job_id
 
 
@@ -2494,3 +2509,80 @@ def test_the_attachment_plan_is_computed_once_per_component(
     assert status["status"] == "succeeded"
     assert status["result"]["attachments_total"] == 3
     assert calls == {f"20USEM0000082{index}": 1 for index in range(1, 4)}
+
+
+def test_a_timestamp_tie_still_records_a_due_retry(session_factory, tudo: dict):
+    """A clock-resolution tie must never cost the durable retry intent.
+
+    `_timestamp_after` is strict on purpose: for the *coverage* question, a tie
+    should mean "not covered" so the component is swept again. But the same
+    helper also gates writing the retry verdict onto the component job, and
+    there a tie meant the key was never written at all. An absent key is not
+    `due`, and `_reconcile_evidence_followup` returns without scheduling
+    anything — so a transiently failed follow-up was silently dropped until a
+    person pressed sync.
+
+    The tie is reachable in practice: Windows' system clock granularity is
+    ~15.6 ms, and a component sync that commits immediately before its evidence
+    follow-up is claimed lands both timestamps inside one tick. This is how it
+    was found — as a "flaky" full-suite failure that reproduced nowhere else.
+    """
+    from app.sync_jobs import (
+        EVIDENCE_FOLLOWUP_PENDING_KEY,
+        EVIDENCE_FOLLOWUP_RETRY_KEY,
+        FOLLOWUP_RETRY_DUE,
+        fail_sync_job,
+    )
+
+    tie = utcnow().replace(microsecond=0)
+    with session_factory() as session:
+        component = SyncJob(
+            kind="components",
+            institute_code="TUDO",
+            status="succeeded",
+            phase="complete",
+            current=1,
+            total=1,
+            percent=100.0,
+            message="Component sync completed.",
+            result={"institute_code": "TUDO", EVIDENCE_FOLLOWUP_PENDING_KEY: True},
+            requested_by="operator@example.org",
+            user_id=None,
+            active_key=None,
+            created_at=tie,
+            started_at=tie,
+            updated_at=tie,
+            finished_at=tie,
+        )
+        evidence = SyncJob(
+            kind="evidence",
+            institute_code="TUDO",
+            status="running",
+            phase="fetching",
+            current=0,
+            total=None,
+            percent=None,
+            message="Fetching detailed evidence.",
+            requested_by="operator@example.org",
+            user_id=None,
+            active_key="evidence:TUDO",
+            created_at=tie,
+            # Exactly the component's finished_at — the tie under test.
+            started_at=tie,
+            updated_at=tie,
+        )
+        session.add_all([component, evidence])
+        session.commit()
+        component_id, evidence_id = component.id, evidence.id
+
+    fail_sync_job(
+        session_factory,
+        evidence_id,
+        "PDB unreachable",
+        followup_retry_state=FOLLOWUP_RETRY_DUE,
+    )
+
+    with session_factory() as session:
+        result = session.get(SyncJob, component_id).result
+        assert result[EVIDENCE_FOLLOWUP_PENDING_KEY] is True
+        assert result[EVIDENCE_FOLLOWUP_RETRY_KEY] == FOLLOWUP_RETRY_DUE
