@@ -187,9 +187,10 @@ the same place `start-itkflow.ps1` uses, so a PDB connection made in the dev
 launcher keeps working in the packaged app. **Back up `pdb-credential.key`**:
 losing it makes saved PDB connections unreadable.
 
-PDB access is unchanged by packaging: the desktop build starts against no PDB
-and needs the same two deliberate opt-ins for production reads. Design notes
-and the trade-offs are in `docs/adr/005-desktop-packaging.md`.
+The desktop build selects the production PDB read target by default, but sends
+no PDB traffic until a user connects personal access codes. Writes remain
+restricted to itkFlow-registered DUMMY-batch test components. Design notes and
+the trade-offs are in `docs/adr/005-desktop-packaging.md`.
 
 ## Troubleshooting
 
