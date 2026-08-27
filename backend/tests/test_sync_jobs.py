@@ -541,9 +541,9 @@ def test_manager_wires_component_success_to_evidence_enqueue(client, session_fac
             self.call = (function, args)
 
     manager = SyncJobManager(session_factory, client.app.state.settings)
-    manager._executor.shutdown(wait=False)
+    manager.shutdown()
     executor = _RecordingExecutor()
-    manager._executor = executor
+    manager._component_executor = executor
 
     def fetcher(settings, institute, access_codes, report):
         return FetchResult(records=[], skipped=0)
@@ -700,6 +700,9 @@ def test_evidence_job_keeps_what_it_already_mirrored_when_interrupted(
     very end. The user then sees every required test as "missing".
     """
     client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    # Serial fetch: this test pins *which* components were finished before the
+    # failure, which is only deterministic without concurrent fetches.
+    client.app.state.settings.sync_fetch_concurrency = 1
     with session_factory() as session:
         for index in range(1, 4):
             session.add(
@@ -882,6 +885,9 @@ def test_evidence_fetch_retry_keeps_the_job_heartbeat_fresh(
     """
     monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
     client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    # The per-retry heartbeat message is a serial-path contract; the pooled
+    # path proves its liveness separately (see the parallel heartbeat test).
+    client.app.state.settings.sync_fetch_concurrency = 1
     _add_module(session_factory, "20USEM00000401")
     client.app.state.sync_job_manager = RecordingManager()
     job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
@@ -1372,9 +1378,9 @@ def test_manager_start_evidence_passes_the_retry_hook(client, session_factory):
             self.call = (function, args)
 
     manager = SyncJobManager(session_factory, client.app.state.settings)
-    manager._executor.shutdown(wait=False)
+    manager.shutdown()
     executor = _RecordingExecutor()
-    manager._executor = executor
+    manager._evidence_executor = executor
 
     manager.start_evidence(77)
 
@@ -1578,3 +1584,367 @@ def test_the_institute_profile_still_narrows_the_evidence_scope(
         job_id,
     )
     assert fake_client.component_requests == ["20USEM00000411"]
+
+
+# --- fast + outage-robust sweeps (docs/09) -----------------------------------
+
+
+def _job_status(session_factory, job_id: int) -> str | None:
+    with session_factory() as session:
+        job = session.get(SyncJob, job_id)
+        return job.status if job is not None else None
+
+
+def test_component_and_evidence_jobs_run_on_separate_workers(
+    client: TestClient, session_factory, tudo: dict, as_operator
+):
+    """A multi-hour evidence sweep must not starve a component sync: each job
+    kind owns its own single worker (mirror writes stay serialized per kind,
+    the durable active_key leases remain the single-flight guard)."""
+    manager = SyncJobManager(session_factory, client.app.state.settings)
+    release = Event()
+    try:
+        # Occupy the evidence worker the way a long institute sweep does.
+        manager._evidence_executor.submit(lambda: release.wait(timeout=30))
+        job_id = _queue_component_job(session_factory, requested_by="operator@example.org")
+        manager.start(
+            job_id,
+            lambda settings, institute, access_codes, report: FetchResult(records=[], skipped=0),
+        )
+        _wait_for(lambda: _job_status(session_factory, job_id) == "succeeded")
+    finally:
+        release.set()
+        manager.shutdown()
+
+
+def test_a_queued_job_waiting_for_its_worker_is_kept_heartbeat_fresh(
+    client: TestClient, session_factory, tudo: dict, as_operator
+):
+    """Institute B's evidence job can queue behind institute A's sweep for
+    hours. While the owning process is alive its heartbeat must stay fresh, or
+    the three-minute grace lets lease takeover / startup recovery close a job
+    that is merely waiting for its worker."""
+    from datetime import timedelta
+
+    from app.sync_jobs import _job_heartbeat_stale
+
+    manager = SyncJobManager(session_factory, client.app.state.settings)
+    release = Event()
+    try:
+        manager._evidence_executor.submit(lambda: release.wait(timeout=30))
+        job_id = _queue_evidence_job(session_factory, requested_by="operator@example.org")
+        manager.start_evidence(job_id)
+        assert manager._watch_thread is not None and manager._watch_thread.daemon
+
+        # Simulate a long wait behind the busy worker.
+        with session_factory() as session:
+            job = session.get(SyncJob, job_id)
+            assert job.status == "queued"
+            job.updated_at = utcnow() - timedelta(hours=1)
+            session.commit()
+
+        manager._refresh_queued_heartbeats()
+
+        with session_factory() as session:
+            job = session.get(SyncJob, job_id)
+            assert job.status == "queued"
+            assert not _job_heartbeat_stale(job)
+    finally:
+        release.set()
+        manager.shutdown()
+
+
+class _BarrierClient(_EvidenceClient):
+    """Proves overlap: getComponent blocks until N calls are in flight."""
+
+    def __init__(self, barrier: Barrier):
+        super().__init__()
+        self._barrier = barrier
+
+    def get(self, action, json=None):
+        if action == "getComponent":
+            self._barrier.wait(timeout=10)
+        return super().get(action, json=json)
+
+
+def test_evidence_fetches_run_concurrently_with_one_gateway_per_worker(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path
+):
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    client.app.state.settings.sync_fetch_concurrency = 3
+    for index in range(1, 4):
+        _add_module(session_factory, f"20USEM0000070{index}")
+    client.app.state.sync_job_manager = RecordingManager()
+    job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
+
+    barrier = Barrier(3)
+    gateways: list[_EvidenceGateway] = []
+
+    def gateway_factory(settings, access_codes):
+        assert access_codes.access_code1.startswith("offline-code-1-user-")
+        gateway = _EvidenceGateway(_BarrierClient(barrier))
+        gateways.append(gateway)
+        return gateway
+
+    run_evidence_sync_job(
+        session_factory, client.app.state.settings, gateway_factory, job_id
+    )
+
+    status = client.get(f"/api/sync/jobs/{job_id}").json()
+    assert status["status"] == "succeeded", status["error"]
+    with session_factory() as session:
+        mirrored = sorted(session.scalars(select(TestRunEvidence.component_sn)))
+    assert mirrored == ["20USEM00000701", "20USEM00000702", "20USEM00000703"]
+    # The barrier only opens when three getComponent calls are in flight at
+    # once, and itkdb clients are not thread-safe: every fetch worker must
+    # build its own gateway instead of sharing one requests.Session.
+    assert len(gateways) >= 3
+
+
+def test_fetch_concurrency_one_keeps_the_serial_single_gateway_sweep(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path
+):
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    client.app.state.settings.sync_fetch_concurrency = 1
+    for index in range(1, 3):
+        _add_module(session_factory, f"20USEM0000071{index}")
+    client.app.state.sync_job_manager = RecordingManager()
+    job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
+    fake_client = _EvidenceClient()
+    factory_calls = []
+
+    def gateway_factory(settings, access_codes):
+        factory_calls.append(1)
+        return _EvidenceGateway(fake_client)
+
+    run_evidence_sync_job(
+        session_factory, client.app.state.settings, gateway_factory, job_id
+    )
+
+    assert client.get(f"/api/sync/jobs/{job_id}").json()["status"] == "succeeded"
+    assert len(factory_calls) == 1
+    assert fake_client.component_requests == ["20USEM00000711", "20USEM00000712"]
+
+
+class _OneDeadComponentClient(_EvidenceClient):
+    """One serial number never answers; everything else serves normally."""
+
+    def __init__(self, dead_sn: str):
+        super().__init__()
+        self._dead_sn = dead_sn
+
+    def get(self, action, json=None):
+        if action == "getComponent" and json["component"] == self._dead_sn:
+            raise ConnectionResetError("Connection reset by peer")
+        return super().get(action, json=json)
+
+
+def test_parallel_fetch_commits_finished_components_and_fails_transiently(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
+):
+    """Fetch results are consumed in submission order: everything committed
+    before the dead component stays mirrored, nothing after it is
+    half-committed, and the job fails transiently so the existing single
+    automatic retry takes over."""
+    monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    client.app.state.settings.sync_fetch_concurrency = 2
+    for index in range(1, 4):
+        _add_module(session_factory, f"20USEM0000072{index}")
+    job_id = _queue_evidence_job(session_factory, requested_by="operator@example.org")
+    on_transient = _RecordingRetry()
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, codes: _EvidenceGateway(_OneDeadComponentClient("20USEM00000722")),
+        job_id,
+        on_transient,
+    )
+
+    with session_factory() as session:
+        assert session.get(SyncJob, job_id).status == "failed"
+        mirrored = sorted(session.scalars(select(TestRunEvidence.component_sn)))
+    assert mirrored == ["20USEM00000721"]
+    assert len(on_transient.contexts) == 1
+    assert on_transient.contexts[0].auto_retry is False
+
+
+def test_parallel_fetch_heartbeats_while_waiting_on_slow_reads(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
+):
+    """A pool wait must never go quiet longer than the heartbeat interval: the
+    retry ladders now run inside fetch workers, which cannot write the durable
+    heartbeat themselves (all database writes stay on the job thread)."""
+    import app.sync_jobs as sync_jobs_module
+
+    monkeypatch.setattr("app.sync_jobs.PARALLEL_FETCH_HEARTBEAT_SECONDS", 0.05)
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    client.app.state.settings.sync_fetch_concurrency = 2
+    _add_module(session_factory, "20USEM00000731")
+    client.app.state.sync_job_manager = RecordingManager()
+    job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
+    heartbeats: list[str] = []
+
+    class _SlowClient(_EvidenceClient):
+        def get(self, action, json=None):
+            if action == "getComponent":
+                time.sleep(0.4)
+            return super().get(action, json=json)
+
+    real_update = sync_jobs_module._update_progress
+
+    def spy(spy_factory, spy_job_id, phase, current, total, *, message=None):
+        if message and "waiting" in message.lower():
+            heartbeats.append(message)
+        real_update(spy_factory, spy_job_id, phase, current, total, message=message)
+
+    monkeypatch.setattr("app.sync_jobs._update_progress", spy)
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, codes: _EvidenceGateway(_SlowClient()),
+        job_id,
+    )
+
+    assert client.get(f"/api/sync/jobs/{job_id}").json()["status"] == "succeeded"
+    assert heartbeats, "no heartbeat was written while the pool wait was pending"
+
+
+class _AttachmentOutageClient(_EvidenceClient):
+    """Evidence phase serves fine; every attachment byte-fetch dies
+    network-shaped, exactly like an outage that begins mid-sweep."""
+
+    def __init__(self):
+        super().__init__()
+        self.attachment_attempts = 0
+
+    def get(self, action, json=None):
+        if action in ("getTestRunAttachment", "uu-app-binarystore/getBinaryData"):
+            self.attachment_attempts += 1
+            raise ConnectionResetError("Connection reset by peer")
+        return super().get(action, json=json)
+
+
+def test_an_attachment_outage_fails_the_job_transiently_instead_of_crawling(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
+):
+    """During an outage each remaining file burns a full transient-retry
+    ladder (minutes each, at zero progress). After the breaker threshold of
+    consecutive transient file failures the phase must stop and the job must
+    fail transiently — handing over to the single automatic retry — while
+    everything already mirrored stays committed."""
+    from app.attachment_store import ATTACHMENT_OUTAGE_BREAKER_THRESHOLD
+
+    monkeypatch.setattr("app.sync_jobs.sleep", lambda seconds: None)
+    monkeypatch.setattr("app.attachment_store.sleep", lambda seconds: None)
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    for index in range(1, 9):
+        _add_module(session_factory, f"20USEM0000080{index}")
+    job_id = _queue_evidence_job(session_factory, requested_by="operator@example.org")
+    on_transient = _RecordingRetry()
+    shared = _AttachmentOutageClient()
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, codes: _EvidenceGateway(shared),
+        job_id,
+        on_transient,
+    )
+
+    with session_factory() as session:
+        job = session.get(SyncJob, job_id)
+        evidence_count = session.scalar(select(func.count(TestRunEvidence.id)))
+        job_status, job_error = job.status, job.error
+    assert job_status == "failed"
+    assert "attachment" in (job_error or "").lower()
+    assert evidence_count == 8  # every fetched run stays committed
+    # Transient failure: the automatic retry takes over instead of a click.
+    assert len(on_transient.contexts) == 1
+    assert on_transient.contexts[0].auto_retry is False
+    # The phase stopped after the breaker threshold, not after all 8 files.
+    expected_attempts = (
+        ATTACHMENT_OUTAGE_BREAKER_THRESHOLD
+        * client.app.state.settings.sync_page_max_attempts
+        * 2  # two download routes per attempt
+    )
+    assert shared.attachment_attempts == expected_attempts
+
+
+class _MissingAttachmentClient(_EvidenceClient):
+    """Attachment routes answer with an HTML page: permanent per-file misses."""
+
+    def get(self, action, json=None):
+        if action in ("getTestRunAttachment", "uu-app-binarystore/getBinaryData"):
+
+            class _BinaryFile:
+                content = b"<html><body>sign in</body></html>"
+                mimetype = "text/html"
+
+            return _BinaryFile()
+        return super().get(action, json=json)
+
+
+def test_permanent_attachment_failures_stay_best_effort_per_file(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path
+):
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    for index in range(1, 9):
+        _add_module(session_factory, f"20USEM0000081{index}")
+    job_id = _queue_evidence_job(session_factory, requested_by="operator@example.org")
+    on_transient = _RecordingRetry()
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, codes: _EvidenceGateway(_MissingAttachmentClient()),
+        job_id,
+        on_transient,
+    )
+
+    with session_factory() as session:
+        job = session.get(SyncJob, job_id)
+        job_status, job_result = job.status, job.result
+    assert job_status == "succeeded"
+    assert job_result["attachments_failed"] == 8
+    assert on_transient.contexts == []
+
+
+def test_the_attachment_plan_is_computed_once_per_component(
+    client: TestClient, session_factory, tudo: dict, as_operator, tmp_path, monkeypatch
+):
+    """The old sweep loaded every component's evidence payloads twice — one
+    whole-scope counting pass in a single session, then again per download.
+    The plan is now computed once, in short-lived sessions, and drives both
+    the total and the downloads."""
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    for index in range(1, 4):
+        _add_module(session_factory, f"20USEM0000082{index}")
+    client.app.state.sync_job_manager = RecordingManager()
+    job_id = client.post("/api/sync/jobs/evidence/TUDO").json()["id"]
+
+    from app import attachment_store as store
+
+    calls: dict[str, int] = {}
+    real_pending = store.pending_attachments
+
+    def counting(session, component_sn):
+        calls[component_sn] = calls.get(component_sn, 0) + 1
+        return real_pending(session, component_sn)
+
+    monkeypatch.setattr("app.attachment_store.pending_attachments", counting)
+    monkeypatch.setattr("app.sync_jobs.pending_attachments", counting)
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, codes: _EvidenceGateway(_EvidenceClient()),
+        job_id,
+    )
+
+    status = client.get(f"/api/sync/jobs/{job_id}").json()
+    assert status["status"] == "succeeded"
+    assert status["result"]["attachments_total"] == 3
+    assert calls == {f"20USEM0000082{index}": 1 for index in range(1, 4)}

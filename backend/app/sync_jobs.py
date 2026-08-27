@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from time import sleep
@@ -22,7 +24,12 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.attachment_store import AttachmentSyncStats, download_attachments, pending_attachments
+from app.attachment_store import (
+    AttachmentSyncStats,
+    OutageCircuitBreaker,
+    download_attachments,
+    pending_attachments,
+)
 from app.config import Settings
 from app.db import is_sqlite_busy as _is_sqlite_busy
 from app.models import Component, InstituteProfile, SyncJob, TestRunEvidence, utcnow
@@ -84,6 +91,16 @@ SYNC_AUTO_RETRY_DELAY_SECONDS = 60.0
 AUTO_RETRY_REQUESTED_BY_PREFIX = "automatic retry"
 # Bounded IN-list size for mirror lookups (same batch size as the tool sync).
 FINGERPRINT_CHUNK_SIZE = 500
+# How long the job thread waits on an in-flight pooled evidence fetch before
+# writing an intermediate heartbeat. The retry ladders run inside the fetch
+# workers, which never touch the database — without this the job row could go
+# quiet for longer than SYNC_HEARTBEAT_GRACE while a slow component retries.
+PARALLEL_FETCH_HEARTBEAT_SECONDS = 30.0
+# How often the manager refreshes the heartbeat of jobs that are queued but
+# still waiting for their per-kind worker thread. Must stay well below
+# SYNC_HEARTBEAT_GRACE so a waiting job is never reaped as orphaned while the
+# owning process is alive.
+QUEUED_HEARTBEAT_INTERVAL_SECONDS = 60.0
 
 ComponentFetcher = Callable[
     [Settings, InstituteProfile, PdbAccessCodes, SyncProgress | None],
@@ -310,11 +327,16 @@ def _close_interrupted_job(job: SyncJob) -> None:
 
 
 class SyncJobManager:
-    """Submit component jobs to one background thread.
+    """Submit sync jobs to one background worker per job kind.
 
     The database's unique ``active_key`` is the actual per-scope single-flight
-    guard. ``max_workers=1`` serializes mirror writers while allowing one
-    durable evidence follow-up per institute to wait safely in the queue.
+    guard. Each kind (components / evidence) owns a single worker thread, so
+    mirror writes stay serialized per kind while a multi-hour evidence sweep
+    can no longer starve a component sync queued behind it. Jobs that are
+    queued but still waiting for their worker get their durable heartbeat
+    refreshed by a keeper thread — otherwise a job waiting longer than
+    ``SYNC_HEARTBEAT_GRACE`` would look orphaned and be closed by lease
+    takeover although this process is alive and will run it.
     """
 
     def __init__(
@@ -326,15 +348,28 @@ class SyncJobManager:
         self._session_factory = session_factory
         self._settings = settings
         self._evidence_gateway_factory = evidence_gateway_factory or _default_evidence_gateway
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="itkflow-sync")
+        self._component_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="itkflow-sync-components"
+        )
+        self._evidence_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="itkflow-sync-evidence"
+        )
         self._retry_timers: list[threading.Timer] = []
         self._retry_lock = threading.Lock()
+        # Job ids this process submitted that may still be waiting in an
+        # executor queue. The keeper thread refreshes their heartbeats while
+        # they are queued and forgets them as soon as they progress.
+        self._queued_watch: set[int] = set()
+        self._watch_lock = threading.Lock()
+        self._watch_stop = threading.Event()
+        self._watch_thread: threading.Thread | None = None
 
     def start(self, job_id: int, fetcher: ComponentFetcher) -> None:
         def schedule_retry(context: ComponentSyncContext) -> None:
             self._schedule_retry(lambda: self._start_component_retry(fetcher, context))
 
-        self._executor.submit(
+        self._watch_queued(job_id)
+        self._component_executor.submit(
             run_component_sync_job,
             self._session_factory,
             self._settings,
@@ -345,7 +380,8 @@ class SyncJobManager:
         )
 
     def start_evidence(self, job_id: int) -> None:
-        self._executor.submit(
+        self._watch_queued(job_id)
+        self._evidence_executor.submit(
             run_evidence_sync_job,
             self._session_factory,
             self._settings,
@@ -353,6 +389,49 @@ class SyncJobManager:
             job_id,
             self._schedule_evidence_retry,
         )
+
+    # -- queued-job heartbeat keeper ----------------------------------------
+
+    def _watch_queued(self, job_id: int) -> None:
+        with self._watch_lock:
+            self._queued_watch.add(job_id)
+            if self._watch_thread is None or not self._watch_thread.is_alive():
+                self._watch_thread = threading.Thread(
+                    target=self._queued_heartbeat_loop,
+                    name="itkflow-sync-queued-heartbeat",
+                    daemon=True,
+                )
+                self._watch_thread.start()
+
+    def _queued_heartbeat_loop(self) -> None:
+        while not self._watch_stop.wait(QUEUED_HEARTBEAT_INTERVAL_SECONDS):
+            self._refresh_queued_heartbeats()
+
+    def _refresh_queued_heartbeats(self) -> None:
+        """Keep owned, still-queued jobs looking alive while they wait."""
+
+        with self._watch_lock:
+            watched = list(self._queued_watch)
+        finished: list[int] = []
+        for job_id in watched:
+            try:
+                with self._session_factory() as session:
+                    job = session.get(SyncJob, job_id)
+                    if job is None or job.status != "queued":
+                        # Running jobs heartbeat through their own progress
+                        # writes; terminal jobs need nothing anymore.
+                        finished.append(job_id)
+                        continue
+                    job.updated_at = utcnow()
+                    session.commit()
+            except Exception:
+                # Best effort: a busy database simply means the next tick
+                # refreshes instead. Telemetry must never kill the keeper.
+                log.warning(
+                    "Could not refresh the queued heartbeat for sync job %s", job_id
+                )
+        with self._watch_lock:
+            self._queued_watch.difference_update(finished)
 
     def enqueue_evidence(
         self,
@@ -425,11 +504,13 @@ class SyncJobManager:
         # process termination; the next app instance marks the durable row as
         # interrupted and releases its lease. Pending retry timers are
         # cancelled so nothing fires into a torn-down app.
+        self._watch_stop.set()
         with self._retry_lock:
             timers, self._retry_timers = self._retry_timers, []
         for timer in timers:
             timer.cancel()
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._component_executor.shutdown(wait=False, cancel_futures=True)
+        self._evidence_executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _default_evidence_gateway(settings: Settings, access_codes: PdbAccessCodes) -> PdbGateway:
@@ -752,65 +833,170 @@ def run_evidence_sync_job(
             component_total,
             message=f"Fetching detailed evidence for {component_total} components.",
         )
-        for index, component_sn in enumerate(component_sns, start=1):
 
-            def fetch_retry_heartbeat(
-                attempt: int,
-                *,
-                sn: str = component_sn,
-                done: int = index - 1,
-            ) -> None:
+        def commit_component_records(records: list) -> None:
+            # Commit each component as it arrives. A whole-institute sweep runs
+            # for a long time; collecting everything for one final transaction
+            # meant that closing the app — or any PDB hiccup — discarded every
+            # fetched run, and the UI then showed each required test as
+            # "missing". The upsert is idempotent, so a resumed sweep simply
+            # re-confirms.
+            nonlocal evidence_stats, runs_seen
+            runs_seen += len(records)
+            if not records:
+                return
+            with session_factory() as evidence_session:
+                batch_stats = upsert_test_run_evidence(evidence_session, records)
+                evidence_session.commit()
+            evidence_stats = EvidenceSyncStats(
+                created=evidence_stats.created + batch_stats.created,
+                updated=evidence_stats.updated + batch_stats.updated,
+                unchanged=evidence_stats.unchanged + batch_stats.unchanged,
+            )
+
+        fetch_concurrency = max(1, int(getattr(settings, "sync_fetch_concurrency", 1)))
+        if fetch_concurrency == 1:
+            # Fully serial sweep (the historical behavior, selectable via
+            # ITKFLOW_SYNC_FETCH_CONCURRENCY=1): one shared gateway, and the
+            # retry ladder writes its own heartbeat before every backoff.
+            for index, component_sn in enumerate(component_sns, start=1):
+
+                def fetch_retry_heartbeat(
+                    attempt: int,
+                    *,
+                    sn: str = component_sn,
+                    done: int = index - 1,
+                ) -> None:
+                    _update_progress(
+                        session_factory,
+                        job_id,
+                        "fetching",
+                        done,
+                        component_total,
+                        message=(
+                            f"Retrying {sn} after a transient PDB read error "
+                            f"(attempt {attempt + 1}/{settings.sync_page_max_attempts})."
+                        ),
+                    )
+
+                records = _fetch_evidence_with_retry(
+                    gateway,
+                    component_sn,
+                    known_flat=known_flat,
+                    max_attempts=settings.sync_page_max_attempts,
+                    on_retry=fetch_retry_heartbeat,
+                )
+                commit_component_records(records)
                 _update_progress(
                     session_factory,
                     job_id,
                     "fetching",
-                    done,
+                    index,
                     component_total,
                     message=(
-                        f"Retrying {sn} after a transient PDB read error "
-                        f"(attempt {attempt + 1}/{settings.sync_page_max_attempts})."
+                        f"Fetched {index}/{component_total} components "
+                        f"and {runs_seen} test runs."
                     ),
                 )
+        else:
+            # Bounded fetch pool: the per-component evidence reads
+            # (getComponent plus per-run getTestRun) are independent network
+            # round trips — on a real sweep they dominate the runtime at
+            # roughly a second each, strictly one after another. Each worker
+            # builds its own gateway because itkdb clients subclass
+            # requests.Session and are NOT thread-safe, while every database
+            # write (evidence commits, progress rows) stays on this job
+            # thread. Results are consumed in submission order, so commits,
+            # progress and the failure point are as deterministic as the
+            # serial sweep and memory stays bounded by the pool width.
+            thread_gateways = threading.local()
 
-            records = _fetch_evidence_with_retry(
-                gateway,
-                component_sn,
-                known_flat=known_flat,
-                max_attempts=settings.sync_page_max_attempts,
-                on_retry=fetch_retry_heartbeat,
-            )
-            runs_seen += len(records)
-            # Commit each component as it arrives. A whole-institute sweep runs
-            # for minutes; collecting everything for one final transaction meant
-            # that closing the app — or any PDB hiccup — discarded every fetched
-            # run, and the UI then showed each required test as "missing".
-            # The upsert is idempotent, so a resumed sweep simply re-confirms.
-            if records:
-                with session_factory() as evidence_session:
-                    batch_stats = upsert_test_run_evidence(evidence_session, records)
-                    evidence_session.commit()
-                evidence_stats = EvidenceSyncStats(
-                    created=evidence_stats.created + batch_stats.created,
-                    updated=evidence_stats.updated + batch_stats.updated,
-                    unchanged=evidence_stats.unchanged + batch_stats.unchanged,
+            def fetch_component(sn: str):
+                worker_gateway = getattr(thread_gateways, "gateway", None)
+                if worker_gateway is None:
+                    worker_gateway = gateway_factory(settings, access_codes)
+                    thread_gateways.gateway = worker_gateway
+                return _fetch_evidence_with_retry(
+                    worker_gateway,
+                    sn,
+                    known_flat=known_flat,
+                    max_attempts=settings.sync_page_max_attempts,
                 )
-            _update_progress(
-                session_factory,
-                job_id,
-                "fetching",
-                index,
-                component_total,
-                message=(
-                    f"Fetched {index}/{component_total} components "
-                    f"and {runs_seen} test runs."
-                ),
-            )
 
-        with session_factory() as count_session:
-            attachment_total = sum(
-                len(pending_attachments(count_session, component_sn))
-                for component_sn in component_sns
+            pool = ThreadPoolExecutor(
+                max_workers=fetch_concurrency,
+                thread_name_prefix="itkflow-evidence-fetch",
             )
+            try:
+                pending: deque[tuple[str, Future]] = deque()
+                sn_iter = iter(component_sns)
+
+                def top_up() -> None:
+                    while len(pending) < fetch_concurrency:
+                        next_sn = next(sn_iter, None)
+                        if next_sn is None:
+                            return
+                        pending.append((next_sn, pool.submit(fetch_component, next_sn)))
+
+                top_up()
+                index = 0
+                while pending:
+                    component_sn, future = pending.popleft()
+                    top_up()
+                    while True:
+                        done, _ = futures_wait(
+                            [future], timeout=PARALLEL_FETCH_HEARTBEAT_SECONDS
+                        )
+                        if done:
+                            break
+                        # The retry ladders now run inside the fetch workers,
+                        # which never write the database; this wait-side
+                        # heartbeat keeps the durable row visibly alive.
+                        _update_progress(
+                            session_factory,
+                            job_id,
+                            "fetching",
+                            index,
+                            component_total,
+                            message=(
+                                f"Fetching evidence ({index}/{component_total} components "
+                                "done; waiting on in-flight PDB reads)."
+                            ),
+                        )
+                    # Raises PdbEvidenceUnavailable once this component's own
+                    # retry budget is exhausted — the job then fails
+                    # transiently, exactly like the serial sweep.
+                    records = future.result()
+                    index += 1
+                    commit_component_records(records)
+                    _update_progress(
+                        session_factory,
+                        job_id,
+                        "fetching",
+                        index,
+                        component_total,
+                        message=(
+                            f"Fetched {index}/{component_total} components "
+                            f"and {runs_seen} test runs."
+                        ),
+                    )
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+
+        # One planning pass drives both the file total and the downloads.
+        # Short-lived sessions on purpose: each component's evidence rows
+        # (payload JSON included) enter one identity map briefly and are
+        # released again, instead of the whole evidence scope accumulating in
+        # a single session only to be re-read per component during the
+        # download loop.
+        attachment_plan: list[tuple[str, list[dict[str, Any]]]] = []
+        attachment_total = 0
+        for component_sn in component_sns:
+            with session_factory() as plan_session:
+                descriptors = pending_attachments(plan_session, component_sn)
+            if descriptors:
+                attachment_plan.append((component_sn, descriptors))
+                attachment_total += len(descriptors)
         attachment_stats = AttachmentSyncStats()
         processed_files = 0
         _update_progress(
@@ -837,7 +1023,15 @@ def run_evidence_sync_job(
                 ),
             )
 
-        for component_index, component_sn in enumerate(component_sns, start=1):
+        # Outage circuit breaker across the whole phase: every transient file
+        # failure has already burned its full retry ladder, so several in a
+        # row mean the connection is down. Without this, hundreds of pending
+        # files each crawled through minutes of retries while the job looked
+        # alive — the "frozen sync" a person actually observes.
+        breaker = OutageCircuitBreaker()
+        for component_index, (component_sn, descriptors) in enumerate(
+            attachment_plan, start=1
+        ):
             with session_factory() as attachment_session:
                 stats = download_attachments(
                     attachment_session,
@@ -845,6 +1039,8 @@ def run_evidence_sync_job(
                     settings,
                     component_sn,
                     heartbeat=attachment_heartbeat,
+                    descriptors=descriptors,
+                    breaker=breaker,
                 )
                 attachment_session.commit()
             attachment_stats = AttachmentSyncStats(
@@ -853,6 +1049,15 @@ def run_evidence_sync_job(
                 failed=attachment_stats.failed + stats.failed,
             )
             processed_files += stats.total
+            if breaker.tripped:
+                # Everything mirrored so far is already committed and the
+                # upserts are idempotent — failing transiently hands the rest
+                # to the existing single automatic retry instead of crawling.
+                raise PdbEvidenceUnavailable(
+                    "Attachment mirroring hit repeated transient network "
+                    "failures; files mirrored so far are kept and the sync "
+                    "will be retried."
+                )
             _update_progress(
                 session_factory,
                 job_id,
@@ -860,8 +1065,8 @@ def run_evidence_sync_job(
                 processed_files,
                 attachment_total,
                 message=(
-                    f"Mirrored attachments for {component_index}/{component_total} components "
-                    f"({processed_files}/{attachment_total} files)."
+                    f"Mirrored attachments for {component_index}/{len(attachment_plan)} "
+                    f"components ({processed_files}/{attachment_total} files)."
                 ),
             )
 

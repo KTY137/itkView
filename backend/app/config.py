@@ -87,6 +87,14 @@ class Settings(BaseSettings):
     # syncs. Raise it on an unreliable connection; each retry backs off
     # exponentially before the page is requested again.
     sync_page_max_attempts: int = Field(default=3, ge=1, le=10)
+    # Concurrent per-component evidence fetches (getComponent plus per-run
+    # getTestRun) during the institute evidence sweep. These are independent
+    # network reads; every fetch worker builds its own PDB client (itkdb
+    # clients subclass requests.Session and are not thread-safe) and all
+    # database writes stay on the job thread. 1 restores the fully serial
+    # sweep; the small default keeps the load on the production PDB modest
+    # while cutting a multi-hour sweep down by roughly that factor.
+    sync_fetch_concurrency: int = Field(default=4, ge=1, le=16)
 
     # --- Outbox worker ----------------------------------------------------
     # Which process submits approved outbox actions to the PDB:

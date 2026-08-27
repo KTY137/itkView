@@ -83,6 +83,16 @@ def test_sync_page_attempts_are_configurable_and_bounded():
         make_settings(sync_page_max_attempts=0)
 
 
+def test_sync_fetch_concurrency_is_configurable_and_bounded():
+    # Default is a small bounded pool; 1 restores the fully serial sweep.
+    assert make_settings().sync_fetch_concurrency == 4
+    assert make_settings(sync_fetch_concurrency=1).sync_fetch_concurrency == 1
+    with pytest.raises(ValidationError):
+        make_settings(sync_fetch_concurrency=0)
+    with pytest.raises(ValidationError):
+        make_settings(sync_fetch_concurrency=17)
+
+
 def test_ops_heartbeat_threshold_is_local_and_bounded():
     assert make_settings(ops_heartbeat_stale_seconds=91).ops_heartbeat_stale_seconds == 91
     with pytest.raises(ValidationError):

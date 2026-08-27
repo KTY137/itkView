@@ -1,8 +1,26 @@
 # PDB-Strategie: Produktions-PDB mit DUMMY-Schreib-Scope
 
 > Verbindlich seit 2026-07-08. Ersetzt die Testinstanz-Annahme aus der
-> Anfangsphase (harte Regel #2 in CLAUDE.md wurde entsprechend neu gefasst).
-> Entscheidung als ADR: `docs/adr/003-pdb-dummy-write-scope.md`.
+> Anfangsphase (harte Regel #2 in [`../CLAUDE.md`](../CLAUDE.md) wurde
+> entsprechend neu gefasst). Entscheidung als ADR:
+> [`adr/003-pdb-dummy-write-scope.md`](adr/003-pdb-dummy-write-scope.md).
+>
+> - **Besitzt:** das PDB-Sicherheitsmodell — Offline-Default, Read-Opt-ins,
+>   Schreib-Scope `dummy_only`, DUMMY-Batch-Konvention, Env-Setup, Paging und
+>   Ausfallverhalten des Syncs sowie die drei Verifikationsstufen. Bei jedem
+>   Widerspruch zu einem anderen Dokument gilt dieses hier.
+> - **Für wen:** alle, die PDB-Code anfassen, eine Instanz konfigurieren oder
+>   einen Integrationslauf starten wollen.
+> - **Verwandt:** [`adr/003-pdb-dummy-write-scope.md`](adr/003-pdb-dummy-write-scope.md)
+>   (die Entscheidung), [`adr/004-personal-pdb-credentials.md`](adr/004-personal-pdb-credentials.md)
+>   (wessen Identität PDB-Traffic erzeugt),
+>   [`adr/002-async-outbox-worker.md`](adr/002-async-outbox-worker.md)
+>   (der einzige schreibende Prozess),
+>   [`adr/006-staged-first-ui-auto-mirror.md`](adr/006-staged-first-ui-auto-mirror.md)
+>   und [`12-attachments-and-images.md`](12-attachments-and-images.md)
+>   (Evidence- und Attachment-Mirror),
+>   [`10-itk-domain-reference.md`](10-itk-domain-reference.md) (welche Typen nie
+>   registriert werden dürfen), [`README.md`](README.md) (Lesepfade).
 
 ## Ausgangslage
 
@@ -43,7 +61,8 @@
    Syncs laden die Credentials ueber `SyncJob.user_id`. Beim Approve wird eine
    Outbox-Aktion dauerhaft an User-ID + PDB-Identity des Freigebenden gebunden;
    der Worker prueft diese Bindung bei jedem Retry. Deployment-weite
-   Access-Codes sind kein Runtime-Fallback (ADR 004).
+   Access-Codes sind kein Runtime-Fallback
+   ([ADR 004](adr/004-personal-pdb-credentials.md)).
 3. **Schreib-Scope:** `ITKFLOW_PDB_WRITE_SCOPE=dummy_only` (Default). Der
    Submitter (`backend/app/pdb_submit.py`) verweigert jede Schreibaktion
    (Test-Run-Upload, Stage-Move), deren Ziel-SN nicht im lokalen Mirror mit
@@ -87,8 +106,44 @@ Owner-Entscheidung dazu (Nachkonfiguration soll entfallen):
   Env-Variable gewinnt weiterhin (`ITKFLOW_PDB_INSTANCE=offline` ergibt ein
   Deployment, das nichts erreicht).
 - Das aendert nichts an den uebrigen Schichten: PDB-Traffic entsteht erst,
-  wenn eine Person ihre persoenlichen Access-Codes verbindet (ADR 004), und
-  Writes bleiben `dummy_only` (ADR 003).
+  wenn eine Person ihre persoenlichen Access-Codes verbindet
+  ([ADR 004](adr/004-personal-pdb-credentials.md)), und Writes bleiben
+  `dummy_only` ([ADR 003](adr/003-pdb-dummy-write-scope.md)).
+
+## Zurueckgezogene Testlaeufe (`run_state`, 2026-08-27)
+
+Die PDB liefert einen **zurueckgezogenen** Testlauf ueber `getComponent`
+weiter aus; er traegt lediglich `state='deleted'`. Bis 2026-08-27 hatte
+`test_run_evidence` keine Statusspalte, ein solcher Lauf war im Spiegel von
+einer gueltigen Messung nicht zu unterscheiden — und zaehlte damit als
+Nachweis. Im echten TUDO-Spiegel sind das **102 von 14 759 Laeufen**
+(13 % aller `GLUE_WEIGHT`, 25 % aller `MODULE_BOW`, verteilt auf 45
+Komponenten).
+
+- `TestRunEvidence.run_state` spiegelt den PDB-Zustand als eigene Spalte;
+  `pdb_test_evidence` fuellt sie aus demselben Feld, das auch im Payload
+  bleibt (der inkrementelle Sweep fingerprintet den Payload).
+- `app.test_run_evidence.WITHDRAWN_RUN_STATE` / `is_withdrawn()` /
+  `live_runs_only()` sind die **einzige** Auslegung: nur der terminale
+  Zustand `deleted` zieht einen Lauf zurueck. `NULL` (unbekannt, z. B. eine
+  Nicht-PDB-Quelle) und das PDB-eigene `requestedToDelete` (ein noch nicht
+  ausgefuehrter Antrag; im Spiegel genau einmal vorhanden) zaehlen weiter.
+- Ausgeschlossen wird ein zurueckgezogener Lauf ueberall dort, wo er als
+  Nachweis gelesen wuerde: `stage_service.satisfied_test_results` (und damit
+  jedes Stage-Gate), die Worksheet-Zeilen samt `latest`, und die
+  Messwert-Statistik. Sind **alle** Laeufe eines Testtyps zurueckgezogen,
+  liest die Pflichtpruefung wieder `missing` — nie das Urteil einer Messung,
+  zu der niemand mehr steht.
+- Er verschwindet aber nicht: `GET /api/components/{sn}/tests` listet ihn
+  weiterhin und liefert `run_state` dazu, und die Worksheet-Zeile meldet
+  `withdrawn_count`. Daten zu verstecken, die die PDB noch haelt, waere eine
+  eigene Form der Falschaussage.
+- **Retrofit statt Re-Sync:** `ensure_phase0_sqlite_schema` legt die Spalte an
+  und befuellt sie per `json_extract` aus den bereits gespiegelten Payloads.
+  Gemessen am 630-MB-Spiegel des Owners: 27 s einmalig, danach 0,1 s je Start
+  (die Variante „nur `deleted` schreiben" waere dauerhaft 5,3 s pro Start).
+  Fehlt JSON1 im SQLite-Build, bleibt die Spalte NULL — also das Verhalten von
+  vorher — und der Start meldet das, statt zu scheitern.
 
 ## Ring-Module / Halbmodule
 
@@ -99,6 +154,13 @@ eine normale Parent/Child-Beziehung — unser Mirror (`parent_sn` aus dem
 `parents`-Array von `listComponents`) und der Family-Tree im UI bilden das
 bereits ab. Für DUMMY-Tests registrieren wir einzelne (Halb-)Module; eine
 Ring-Assemblierung von DUMMY-Teilen ist möglich, aber nicht Teil des E2E.
+
+Fachlich folgt daraus, dass ein Ring-Modul seine Nachweise gar nicht selbst
+traegt: Metrologie, Klebegewicht und PS-IV liegen auf den beiden Halbmodulen.
+Deshalb liefert die Worksheet-Payload seit 2026-08-27 auch die Evidence der
+**direkten Kinder** (`worksheet.children`, siehe docs/05) — im Spiegel haengen
+nur 720 von 14 759 Laeufen an MODULE-Komponenten, aber 10 114 an deren
+Kindern.
 
 ## Betrieb: Env-Setup (niemals committen)
 
@@ -376,8 +438,69 @@ inkrementell (bereits gespeicherte Dateien werden nur referenziert) — sie ist
 beim Erstlauf naturgemaess der langsamste Teil, weil dort echte Dateien
 uebertragen werden.
 
-Der Background-Executor setzt derzeit genau **einen FastAPI/Uvicorn-App-
-Prozess** voraus; sowohl `start-itkflow.ps1` als auch das Docker-CMD erfuellen
+**Schneller + ausfallrobuster Sweep (2026-08-26).** Ein realer Evidence-Sweep
+brauchte 29 Minuten fuer nur 262 Module (~1336 serielle PDB-Roundtrips a
+~1,3 s); mit dem inzwischen erweiterten Scope (~1086 Komponenten inkl.
+Sensoren) waere der naechste Volllauf in die Stunden gegangen, und ein
+Ausfall mitten in der Attachment-Phase sah wie ein eingefrorener Sync aus.
+Vier Aenderungen (`app/sync_jobs.py`, `app/attachment_store.py`):
+
+- **Begrenzt paralleler Evidence-Fetch.** Die per-Komponente-Reads
+  (`getComponent` + `getTestRun` je Lauf) sind unabhaengige Netzwerk-Reads
+  und laufen jetzt in einem kleinen Pool
+  (`ITKFLOW_SYNC_FETCH_CONCURRENCY`, Default 4, Bereich 1–16; `1` ist exakt
+  das bisherige serielle Verhalten). itkdb-Clients erben von
+  `requests.Session` und sind **nicht** threadsicher — jeder Fetch-Worker
+  baut sich deshalb aus denselben Access-Codes sein eigenes Gateway
+  (`threading.local`); saemtliche DB-Schreibzugriffe (Evidence-Commits pro
+  Komponente, Fortschritt/Heartbeat) bleiben auf dem Job-Thread. Ergebnisse
+  werden in Einreihungs-Reihenfolge konsumiert: Commits, Fortschritt und der
+  Fehlerpunkt sind damit so deterministisch wie beim seriellen Sweep, der
+  Speicher bleibt auf die Poolbreite begrenzt, und eine Komponente mit
+  erschoepftem Retry-Budget laesst den Job weiterhin transient scheitern
+  (inkl. des einen Auto-Retries). Weil die Retry-Leitern jetzt in den
+  Workern laufen (die nie in die DB schreiben), schreibt der wartende
+  Job-Thread alle `PARALLEL_FETCH_HEARTBEAT_SECONDS` (30 s) einen
+  Zwischen-Heartbeat.
+- **Ein Worker je Job-Art.** Der Manager besitzt jetzt getrennte
+  Single-Worker-Executor fuer Komponenten- und Evidence-Jobs: ein
+  stundenlanger Evidence-Sweep blockiert keinen Komponenten-Sync mehr.
+  Mirror-Schreiber bleiben je Art serialisiert; die eindeutigen
+  `active_key`-Leases bleiben der Single-Flight-Guard. Ein Job, der in der
+  Queue auf seinen Worker wartet (z. B. Institut B hinter dem Sweep von
+  Institut A), bekommt seinen Heartbeat von einem Keeper-Thread alle
+  `QUEUED_HEARTBEAT_INTERVAL_SECONDS` (60 s) aufgefrischt, solange der
+  besitzende Prozess lebt — sonst haette ihn die Drei-Minuten-Grenze der
+  Lease-Uebernahme als verwaist geschlossen. Stirbt der Prozess, bleiben die
+  Refreshes aus und die Reaping-Regel greift wie gehabt.
+- **Outage-Circuit-Breaker in der Attachment-Phase.** Jeder transiente
+  Datei-Fehlschlag hat seine volle Retry-Leiter bereits verbrannt
+  (Versuche × bis zu 60 s Read-Timeout + Backoff ≈ Minuten pro Datei);
+  mehrere davon **in Folge** bedeuten „die Leitung ist weg", nicht „diese
+  Dateien sind kaputt". Nach `ATTACHMENT_OUTAGE_BREAKER_THRESHOLD` (5)
+  aufeinanderfolgenden transienten Datei-Fehlschlaegen stoppt die Phase und
+  der Job scheitert als `PdbEvidenceUnavailable` (transient) — der
+  bestehende einmalige Auto-Retry uebernimmt, statt dass hunderte Dateien
+  stundenlang bei null Fortschritt durchkriechen. Alles bereits Gespiegelte
+  bleibt committed (idempotente Wiederaufnahme). **Permanente**
+  Datei-Antworten (404, HTML-Seite, uebergrosser Body) setzen die Serie
+  zurueck und bleiben Best-Effort pro Datei wie bisher. Schlaegt schon der
+  Client-Aufbau transient fehl, zaehlen die danach schnell scheiternden
+  Dateien ebenfalls als transient, sodass der Breaker den Sweep zuegig
+  beendet; ein permanenter Konfigurationsfehler loest ihn nicht aus.
+- **Eine Attachment-Planungsrunde statt zwei.** Die Pending-Deskriptoren
+  werden einmal pro Komponente in kurzlebigen Sessions gelesen und treiben
+  sowohl das Datei-Total als auch die Downloads (`download_attachments`
+  nimmt den vorberechneten Plan entgegen). Vorher lud eine einzige Session
+  saemtliche Evidence-Zeilen inkl. ~10-KB-Payloads in ihre Identity-Map, nur
+  um zu zaehlen — und die Download-Schleife las alles ein zweites Mal. Die
+  Attachment-Downloads selbst bleiben bewusst seriell: die Byte-Transfers
+  sind nicht der Engpass, und „consecutive" als Breaker-Signal sowie die
+  Client-Unavailable-Schnellpfade waeren unter Parallelitaet mehrdeutig.
+
+Der Background-Executor setzt weiterhin genau **einen FastAPI/Uvicorn-App-
+Prozess** voraus (jetzt mit einem Worker-Thread je Job-Art in diesem
+Prozess); sowohl `start-itkflow.ps1` als auch das Docker-CMD erfuellen
 diesen Vertrag. Mehrere Uvicorn-Worker duerfen erst aktiviert werden, wenn der
 Lease einen Prozess-Owner mit Heartbeat/Expiry besitzt und Startup-Recovery
 nur verwaiste Jobs dieses Owners schliesst.
