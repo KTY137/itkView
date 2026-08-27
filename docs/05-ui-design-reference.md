@@ -71,7 +71,11 @@ im Frontend-i18n-Modul liegt.
    die Detailseite berechnet keine Stage-Regeln selbst. Bildgalerie,
    Testlaufkarten und Thumbnails verwenden ausschliesslich lokal gespiegelte
    Attachment-Bytes; ein geoeffneter Screen holt keine Bilder direkt aus PDB
-   oder EOS.
+   oder EOS. Jedes gespeicherte `image/*` bleibt dabei als vorhandener Eintrag
+   sichtbar: Browserformate oeffnen als Bild/Lightbox, TIFF und andere nicht
+   darstellbare Formate als beschrifteter Platzhalter — nie als kaputtes
+   `<img>` und nie als falscher Leerzustand. Eigene und Kind-Anhaenge bleiben
+   nach ihrer echten Besitzer-SN getrennt.
 3. **Staged:** Arbeitsvorrat offener PDB-Absichten, nach Komponente gruppiert.
    Jede Gruppe zeigt Local Name, SN, Thumbnail und aktuelle Stage; jede Action
    zeigt eine lesbare Summary, Status, `Push to PDB` oder `Discard` und ein
@@ -97,6 +101,28 @@ im Frontend-i18n-Modul liegt.
    fehlgeschlagene in `--crit` **plus gestrichelter Linie** (Identitaet nie nur
    ueber Farbe), beide in der Legende; Hover-Ziel ist eine breitere unsichtbare
    Zwillingslinie. Achsen tragen die Einheit aus `result_meta.name`.
+
+   **Explizite Kollektivkurven fuer IV und CV (2026-08-27):** Vor dem
+   generischen Messwert-Explorer stehen zwei dauerhaft sichtbare Karten
+   `Collective IV curves` und `Collective CV curves`. Ihre Kandidaten werden
+   aus den gespiegelten Dimensionen entdeckt, nicht aus einer Liste exakter
+   PDB-Testtypen: Ein IV-Schema braucht den Familienmarker `IV` im Testtyp oder
+   auf beiden Achsencodes sowie numerische Current-/Voltage-Arrays; fuer CV
+   entsprechend `CV` plus Capacitance/Voltage. Damit werden etwa Current-
+   Stability- oder Load-Regulation-Arrays nicht als IV umetikettiert. Mehrere
+   passende Schemata bleiben im `PDB test schema`-Select getrennt, weil
+   Einheiten und Sweep-Protokolle nicht auf einer Achse vermischt werden
+   duerfen. Die Karten nutzen denselben lokalen Messwert-Endpunkt und
+   SVG-Renderer wie der Explorer (neueste hoechstens 300 Laeufe; ein Cap wird
+   sichtbar benannt), zeichnen aber **ausschliesslich** Laeufe mit explizitem,
+   gleich langem X/Y-Paar. Der generische Explorer darf weiter auf Sample-Index
+   zurueckfallen; eine als IV/CV bezeichnete Karte nie. Fehlende Schemata,
+   fehlende gleich lange Paare, ausgeschlossene Laeufe und Ladefehler erhalten
+   eigene Textzustaende. Read-only am lokalen TUDO-Spiegel belegt: fuenf
+   IV-Schemata mit zusammen 1 960 lebenden Laeufen und ein CV-Schema mit 364;
+   alle 2 324 aktuellen Paare sind laengengleich. Der generische
+   `Measurements`-Block bleibt unveraendert darunter fuer alle anderen
+   Arrays und skalaren Verteilungen.
 6. **Account / persoenliche PDB-Verbindung + Preferences:** Klick auf den angemeldeten
    User-Block in der Rail oeffnet einen eigenen Screen; Logout bleibt eine
    getrennte Aktion. Links stehen lokale Identitaet/Rolle/Institut, rechts die
@@ -231,8 +257,9 @@ Pfad:
   gezeigt, nicht korrigiert.
 - `Record test`: Testtyp aus dem lokalen PDB-Schema-Mirror waehlen und ein
   kontrolliertes Formular ausfuellen. Skalare Typen erhalten passende Felder,
-  Arrays eine validierte Zeilen-Eingabe; unbekannte Typen bleiben read-only mit
-  Erklaerung. Rohes JSON wird nie angezeigt oder editiert.
+  primitive Arrays nur bei fehlendem oder hoechstens eindimensionalem
+  `arrayDimensions` eine validierte Zeilen-Eingabe. Rohes JSON wird nie
+  angezeigt oder editiert.
 
 Beide Eingaenge erzeugen zuerst einen `IngestFile`, zeigen denselben Dry-Run
 mit Messwerten, Warnungen und Issues und bieten erst bei gueltigem Ergebnis
@@ -255,14 +282,30 @@ Edit-Strip beim Vorbelegen) — das als „dieser Testtyp hat keine Messwerte" z
 lesen war der Weg, auf dem das leere Formular eine Schicht weiter
 ueberlebt haette.
 
-**Ehrliche Meldung bei Schemata ohne erfassbares Messfeld (2026-08-27).** Die
-Regel „ohne mindestens einen Messwert kein Lauf" bleibt. Deklariert ein Schema
-aber gar kein Feld, das dieses Formular aufnehmen kann — `HYBRID_TESTS_SUMMARY`
-besteht aus 36 `testRun`-Referenzen, `MODULE_TC` aus zwei `object`-Bloecken —
-dann liegt das am Schema, nicht an der Eingabe. Solche Testtypen zeigen
-deshalb schon vor dem Absenden einen Hinweis (`info-banner`, `role="status"`),
-der den Testtyp nennt und auf den Datei-Upload verweist, und beim Absenden
-dieselbe Erklaerung statt „<Results> is required".
+**Fail-closed vor dem Formular (2026-08-27).** Die gemeinsame reine Funktion
+`TestForm.manualEntryCapability()` bewertet das nach Field-Layout effektive
+Schema fuer beide Oberflaechen. Ein REQUIRED-Feld vom Typ `object`, `testRun`
+oder einem anderen nicht kontrolliert erfassbaren Typ blockiert. Ein primitives
+Array mit explizitem `arrayDimensions > 1` oder unlesbarer Dimensionsangabe
+macht den gesamten Testtyp file-only — auch wenn dieses Array optional ist;
+sonst koennte eine reale mehrdimensionale Messung still fehlen, waehrend ein
+einziger Skalar als scheinbar vollstaendiger Lauf gestagt wird. Fehlt
+`arrayDimensions`, ist es `null`, `0` oder `1`, bleibt die Zeileneingabe
+zulaessig. Ein Schema ohne irgendein erfassbares Messfeld blockiert ebenfalls.
+Optionale unbekannte Einzel-Felder blockieren dagegen nicht, solange mindestens
+ein echtes Messfeld erfassbar ist.
+
+Bei einem Block rendern weder `Add test result` noch der Worksheet-Edit-Strip
+Tool-Felder oder ein halbes/totes `TestForm`. Der `info-banner` nennt Testtyp
+und blockierende Felder; `Use JSON file upload` schliesst die tote Eingabe,
+scrollt zum bestehenden Datei-Drop und setzt den Tastaturfokus dorthin. Dieser
+Dateiweg bleibt der einzige Weg fuer die verschachtelte Originalform — es gibt
+bewusst keinen Raw-JSON-Object-Editor. Das betrifft am gespiegelten MODULE-
+Bestand sieben von vierzehn Definitionen, darunter `MODULE_METROLOGY`
+(REQUIRED-Positionskarten) und `MODULE_IV_AMAC_TC` (REQUIRED-Objektbloecke und
+echte zweidimensionale Kurven). Der Guard ist ein UI-Sicherheitsvertrag; der
+Manual-Entry-API-Pfad muss separat noch gegen das gespiegelte Schema gehaertet
+werden.
 
 Kommt die Testerfassung vom Shipment-Screen, werden Seriennummer und Testtyp
 als gemeinsamer Navigation-Intent uebergeben. Die Detailkarte oeffnet sofort
@@ -309,7 +352,19 @@ ersten Oeffnen von „All mirrored runs".
 - **Zeile aufklappbar** zum vollen Run-Detail (Kurven, Werte, Conditions,
   Attachments) ueber dieselben Renderer wie bisher; geladen wird erst beim
   Oeffnen. Dict-wertige Ergebnisse (Metrologie, Wire Bonding) rendern als
-  Position/Wert-Paare statt als `[object Object]`.
+  Position/Wert-Paare statt als `[object Object]`. Ist eine Map vollstaendig
+  numerisch und endlich, steht vor der weiterhin vollstaendigen Tabelle ein
+  generierter kategorischer Plot. Besteht jeder Wert exakt aus einem endlichen
+  `[number, number]`-Paar, erscheint stattdessen ein semantisch neutraler
+  Scatter; seine Caption nennt `second value / first value`, waehrend Tabelle
+  und Punkt-Titel das rohe Paar als `[first, second]` erhalten. Sichtbare
+  Achsentitel werden nicht erfunden. Ohne ausdrueckliche semantische
+  Schema-Metadaten darf die UI daraus kein `Δx`/`Δy` machen. Gemischte,
+  leere oder nicht-endliche Maps bleiben nur
+  Tabelle, weil die Anzeige keine Punkte erfinden oder Werte umdeuten darf.
+  Diese Datenplots werden allein aus den gespiegelten Ergebnissen erzeugt und
+  sind unabhaengig davon, ob Attachments vorhanden sind; der bestehende
+  Array-/IV-Kurvenpfad bleibt unveraendert.
 - **Edit-Strip statt Sprung:** Der Ghost-Stift oeffnet die schema-getriebenen
   Felder jetzt **innerhalb der Zeile**, vorbelegt aus dem juengsten Lauf, und
   stageed ueber den unveraenderten Weg manual-entry-Ingest → Dry-Run →
@@ -323,7 +378,26 @@ ersten Oeffnen von „All mirrored runs".
   blockierter Dry-Run ohne Issues wird angezeigt statt zu verschwinden, ein
   fehlgeschlagener Fetch des vorherigen Laufs blockt den Strip statt ein
   leeres Formular zu zeigen, und der Zeilenzustand ist nach Stage+Testtyp
-  geschluesselt.
+  geschluesselt. Ein in der PDB zurueckgezogener Lauf (`state='deleted'`)
+  bleibt nur in der aufklappbaren Historie sichtbar: Der Edit-Strip darf ihn
+  weder als juengsten Lauf vorbelegen noch nach einem asynchronen Fetch in
+  bereits eingegebene Werte laden. `requestedToDelete` bleibt bis zum
+  terminalen PDB-Zustand ein lebender Lauf.
+- **File-only statt halbem Edit-Strip:** Vor Tooling und Formular gilt derselbe
+  `manualEntryCapability()`-Check wie in `Add test result`. REQUIRED-
+  `object`/`testRun`, mehrdimensionale primitive Arrays oder ein Schema ohne
+  erfassbares Messfeld zeigen die benannten Blocker und eine direkte,
+  fokussierende Aktion zum bestehenden JSON-Datei-Drop. Kein roher
+  Objekt-Editor wird als Abkuerzung eingebaut.
+- **Dichte Formulare bleiben scanbar:** In der Worksheet-Variante bilden
+  Laufkopf, Conditions/Properties und Measurements klar getrennte kompakte
+  Flaechen. Schema-Beschreibungen, die sonst jede Messzeile verdoppeln,
+  bleiben per `aria-describedby` und Hover-Titel erreichbar, sind im
+  Ruhezustand aber visuell verborgen; Hinweise fuer Arrays und nicht
+  unterstuetzte Datentypen bleiben sichtbar, weil sie die Eingabehandlung
+  aendern. Kein Feld darf fuer die Verdichtung entfallen. Sekundaer- und
+  Primaeraktion (`Cancel`, `Stage test result`) stehen in derselben
+  abschliessenden Aktionsleiste.
 - Die frueheren Vollansichten sind nicht entfallen, sondern in ein
   eingeklapptes, lazy geladenes `All mirrored runs` unter dem Worksheet
   gewandert; die Datei-Drop-Karte bleibt unveraendert.
@@ -513,6 +587,18 @@ Push-Button. Stattdessen erklaert der Screen sichtbar: `Production writes are
 not enabled — stays staged (dummy-only scope)`. Farbe allein reicht fuer Ghost,
 Pending, Fehler oder Schreibschutz nie als Unterscheidungsmerkmal.
 
+Auf einer geoeffneten Komponentendetailseite startet jede workeraktive Action
+(`approved`, `submitted`, `failed`) einen begrenzten Poll des einzelnen
+Outbox-Statusdatensatzes (hoechstens 20 Minuten; normal sekundenweise, bei
+`failed` alle fuenf Sekunden). Das gilt auch nach Reload und wenn die Antwort
+einer bereits serverseitig gespeicherten Push-Transition verloren ging. Jede
+Statusaenderung laedt Stammdaten, Preview/Worksheet und Stage-Suggestion genau
+einmal gemeinsam neu. Nur `confirmed` und `cancelled` beenden die Beobachtung:
+`failed` ist nicht terminal, weil der Worker nach Backoff ueber `submitted`
+erneut versucht. Damit kann ein frisch bestaetigter Pflichttest ohne
+Navigation den Stage-Move freischalten; Draft/Validated/Approved/Submitted
+bleiben ausschliesslich Preview und duerfen das echte Gate nie erfuellen.
+
 Jede offene Test-Upload-Action zeigt zusaetzlich Komponente, Testtyp und die
 vorgeschlagenen Messwerte im selben kompakten Worksheet-Format (Arrays/Maps
 als Umfangs-Chip, nie Rohdaten); die Werte kommen aus den Preview-Ghost-
@@ -589,3 +675,14 @@ gar keiner Steuerung.
   umgekehrt.
 - Bei bewusster Abweichung von der Referenz: kurz in dieser Datei oder im
   Abschluss begruenden (analog zur Roadmap-Regel).
+
+### Klebe-Urteil: unmoegliche Messwerte (2026-08-27)
+
+Neben `No target`, `Missing readings` und `Not measured` gibt es einen vierten
+Grund fuer ein ausbleibendes Urteil: **`Readings contradict each other`**
+(`implausible_result`). Er erscheint, wenn alle Waagenwerte vorliegen, das
+daraus errechnete Klebegewicht aber negativ ist — physikalisch unmoeglich, in
+der Praxis zwei vertauschte Felder. Der Chip bleibt bernsteinfarben wie jeder
+andere unbekannte Ausgang; entscheidend ist, dass die Zeile **nicht** „zu
+wenig" sagt und damit dem Operator einen Fehler zuschreibt, den die Eingabe
+gemacht hat. Begruendung und Zahlen: [`11`](11-logistics-operations.md).

@@ -6,12 +6,9 @@
 > Spiegel an. Diese beiden Sätze zusammen erklären fast jeden Befund. Der Rest
 > dieses Dokuments macht sie nachvollziehbar.
 >
-> Stand: 2026-08-26, Arbeitskopie auf Branch `feat/real-data-sync-stats-tooling`.
-> `backend/app/attachment_store.py` wird parallel in einer anderen Session
-> bearbeitet; dokumentiert ist der Stand **mit** Drei-Phasen-Split
-> (plan/fetch/commit), `.part`-Staging und `OutageCircuitBreaker`. Wenn diese
-> drei Bausteine im Code fehlen oder anders heißen, ist dieses Dokument älter
-> als der Code.
+> Stand: 2026-08-27 auf `main`. Dokumentiert ist der Stand **mit**
+> Drei-Phasen-Split (plan/fetch/commit), `.part`-Staging,
+> `OutageCircuitBreaker` und getrenntem Blob-/Association-Index.
 >
 > Zuständigkeit laut `docs/00-doc-map.md`: dieses Dokument (Zeile seit
 > 2026-08-27 eingetragen). Die Metrologie ist bewusst ausgelagert:
@@ -25,30 +22,36 @@
    ist, steht im gespiegelten Evidence-Payload (`type` / `source`).
    Sonderfall seit 2026-08-27: eine **Ordner**-Freigabe antwortet mit einem
    **Tar-Archiv** statt mit der Datei (live gemessen). itkFlow packt genau
-   **ein** Mitglied im Speicher aus, nach einer festen Auswahlregel und hinter
-   einem vollständigen Satz Schutzregeln — Abschnitt 2.3a. `extractall` gibt
-   es nirgends, und kein Mitglied wird je unter seinem eigenen Namen
-   geschrieben.
+   **ein vollständiges** Mitglied im Speicher aus, nach einer festen
+   Auswahlregel und hinter einem vollständigen Satz Schutzregeln — Abschnitt
+   2.3a. Beim Vergleich mit dem bisher besten Mitglied überlappt höchstens das
+   feste 512-Byte-Sniff-Präfix des nächsten Kandidaten. `extractall` gibt es
+   nirgends, und kein Mitglied wird je unter seinem eigenen Namen geschrieben.
 2. Der Sync lädt die Bytes in einen **lokalen Ordner** (`attachment_dir`), ein
    Unterverzeichnis je Seriennummer. Die Datenbankzeile ist nur der Index.
 3. Die UI rendert Bilder **ausschließlich** aus diesem Ordner. Kein Bild wird
    beim Öffnen eines Screens aus der PDB oder von EOS geholt.
-4. Damit ein Bild sichtbar wird, müssen **vier** Dinge stimmen: Evidence
-   gespiegelt → Attachment heruntergeladen → Datei liegt im *richtigen* Ordner
-   → `content_type` beginnt mit `image/`. Fällt eines aus, ist die Kachel weg,
-   ohne dass irgendwo eine Fehlermeldung steht.
+4. Damit ein Bild sichtbar wird, müssen **fünf** Dinge stimmen: Evidence
+   gespiegelt → Deskriptor mit der Komponente/dem Lauf verknüpft → Blob
+   heruntergeladen → Datei liegt im konfigurierten Spiegel →
+   `content_type` beginnt mit `image/`. Ein Blob darf dabei von vielen
+   Komponenten und Läufen referenziert werden; seine Bytes liegen trotzdem nur
+   einmal auf der Platte.
 5. Häufigster praktischer Befund in der Entwicklungsumgebung: es gibt **zwei**
    Attachment-Wurzeln, weil `attachment_dir` unkonfiguriert relativ zum
    Arbeitsverzeichnis des Serverprozesses aufgelöst wird (Abschnitt 4.1).
-6. **Ein Bild kann gespiegelt und trotzdem unerreichbar sein.** Drei Ursachen
-   dieser Art sind am 2026-08-27 behoben worden, alle drei am Live-Spiegel
+6. **Ein Bild kann gespiegelt und trotzdem unerreichbar sein.** Vier Ursachen
+   dieser Art sind am 2026-08-27 behoben worden, alle vier am Live-Spiegel
    gemessen: das Listen-Limit zählte Attachment-**Zeilen** statt Komponenten
    (83 statt 279 Kacheln, Abschnitt 5.3), die Galerie einer Komponente kannte
    die Bilder ihrer **Kinder** nicht (3 von 432 Bildern liegen auf Modulen,
    241 auf deren direkten Kindern, Abschnitt 5.1), und eine zweite
    CERNBox-URL-Form wurde nie umgeschrieben (20 Zeilen, Abschnitt 2.3).
-   „Es sind keine Bilder da" hieß in allen drei Fällen: sie sind da, sie
-   stehen nur nicht auf dieser Seite.
+   Zusätzlich hatte ein wiederverwendeter Share-Code nur **eine**
+   `component_sn`/`test_run_ref`-Kombination: ein Download blieb zwar
+   dedupliziert, aber alle weiteren Zuordnungen verschwanden. Der additive
+   Referenzindex in Abschnitt 3.2 trennt deshalb Blob- von
+   Association-Identität.
 7. **Metrologie ist der Sonderfall, an dem diese Mechanik am wenigsten hilft:**
    104 Läufe, 104 Anhänge, **0 Bilder**, 80× derselbe Dateiname, 102 von 104
    mit demselben Titel und ein einziger Content-Type für alle. Gemessen und mit
@@ -244,17 +247,25 @@ gewinnt der kleinste Schlüssel `(Rang, Pfad)`:
 | Rang | Bedeutung |
 |---:|---|
 | 0 | genau der benannte Eintrag |
-| 1 | ein Bildformat, das der Spiegel speichern und ein Browser malen kann |
-| 2 | ein anderes Format, für das der Spiegel eine Endung schreibt |
-| 3 | alles übrige (landet endungslos, also unbenutzbar) |
+| 1 | Bytes, die als browserdarstellbares Bildformat gesnifft wurden |
+| 2 | Bytes, die als anderes echtes Bildformat gesnifft wurden (z. B. TIFF) |
+| 3 | ein anderes Format, für das der Spiegel eine Endung schreibt |
+| 4 | alles übrige (landet endungslos, also unbenutzbar) |
 
-Gleichstand wird über den Pfad gebrochen. Damit ist die Auswahl eine reine
-Funktion des **Inhalts** — die Reihenfolge, in der ein Host die Mitglieder
-streamt, kann nie ändern, welche Datei ein Operator bekommt. Für das Beispiel
-oben gewinnt `20USED50000029_2.JPG`: die `.CR2` sind Rang 3, die `.txt` Rang 2,
-und von den beiden JPEGs sortiert `_2` vor `_4`. **Live nachgemessen** mit dem
+Bildränge kommen aus den Magic Bytes, nicht aus der vom Host gewählten Endung:
+eine `.jpg` mit TIFF-Bytes bleibt Rang 2, eine `.tiff` mit JPEG-Bytes ist Rang
+1. Gleichstand wird über den normalisierten Pfad gebrochen. Für **verschiedene**
+Pfade ist die Auswahl damit unabhängig von der Streaming-Reihenfolge. Tar
+erlaubt jedoch denselben normalisierten Pfad mehrfach; dort gilt bewusst
+**first wins** und jede spätere Dublette wird ignoriert. Für das Beispiel oben
+gewinnt `20USED50000029_2.JPG`: die `.CR2` sind Rang 4, die `.txt` Rang 3, und
+von den beiden tatsächlich als JPEG gesnifften Mitgliedern sortiert `_2` vor
+`_4`. Ein lexikografisch früheres TIFF könnte eine browserfähige JPEG-/PNG-
+Auswahl nicht verdrängen.
+**Live nachgemessen** mit dem
 echten Code gegen das echte Archiv: ausgewählt `20USED50000029_2.JPG`,
-8 845 759 B, gesnifft `image/jpeg`, Ablage `<SN>/<code>.jpg`.
+8 845 759 B, gesnifft `image/jpeg`, Ablage
+`<SN>/share_link/<code>.jpg` (generisch: `<SN>/<source>/<code>.<ext>`).
 
 Nennt die URL **keinen** Eintrag (`/s/<token>` ohne Pfad), wird nur ein Archiv
 mit **genau einem** infrage kommenden Mitglied akzeptiert; sonst wird
@@ -271,9 +282,11 @@ Rotwerden bei Entfernen der Regel nachgewiesen wurde:
   Ablageweg wie jede andere Datei, dessen Dateiname aus dem PDB-Code plus
   Endungs-Allowlist entsteht. Ein Testfall prüft den **geparsten** Modulbaum
   auf diese Aufrufe.
-- **Nur reguläre Dateien.** Symlinks, Hardlinks, Zeichen-/Blockgeräte, FIFOs,
-  Verzeichnisse und GNU-Sparse-Einträge werden am **Typ** abgelehnt, bevor
-  Name oder Ziel überhaupt betrachtet werden.
+- **Nur reguläre, nicht-sparse Dateien.** Symlinks, Hardlinks,
+  Zeichen-/Blockgeräte, FIFOs und Verzeichnisse werden am **Typ** abgelehnt.
+  Zusätzlich wird jedes `TarInfo.issparse()` abgelehnt: PAX-Sparse kann sich
+  nämlich als normaler `REGTYPE`/`isreg()` präsentieren und würde eine reine
+  Typprüfung umgehen.
 - **Namensprüfung.** Abgelehnt werden `..` in jeder Position, führendes `/`,
   Backslash (Windows-Trenner), Doppelpunkt (Laufwerksbuchstabe, NTFS-Stream),
   NUL und jedes weitere Steuerzeichen. `./`-Präfixe werden normalisiert.
@@ -293,13 +306,26 @@ Rotwerden bei Entfernen der Regel nachgewiesen wurde:
   getrennte Dekompressionsgrenze ist nötig, weil `tarfile` GNU-/PAX-Metadaten
   verarbeitet, bevor sie als normale Mitglieder sichtbar würden.
 - **Streamen statt Materialisieren.** Das Archiv wird in einem Vorwärtsdurchlauf
-  direkt vom Socket gelesen; im Speicher liegt nie mehr als **ein** Mitglied.
-  Der bisher beste Kandidat wird freigegeben, *bevor* ein besserer gelesen wird.
+  direkt vom Socket gelesen; im Speicher liegt nie mehr als **ein vollständiges**
+  Mitglied plus das feste 512-Byte-Sniff-Präfix eines möglichen Nachfolgers.
+  Erst dieses Präfix bestimmt den echten MIME-Rang; der bisher beste Kandidat
+  wird freigegeben, *bevor* der restliche Körper eines besseren gelesen wird.
 - **Nur Tar und gzip-Tar.** bzip2 und xz sind durch Weglassen abgelehnt (nie
   beobachtet, und die extremsten Kompressionsraten). Ein gzip-Strom wird erst
   akzeptiert, wenn die `ustar`-Magic im **dekomprimierten** Präfix steht —
   sonst würde eine gzip-komprimierte *einzelne Datei* fälschlich als Archiv
-  gelesen und verloren gehen. ZIP wird nicht versucht: CERNBox liefert keines.
+  gelesen und verloren gehen. Optionale gzip-Felder (Extra/Dateiname/Kommentar)
+  dürfen dabei länger als das 512-Byte-Tar-Sniff-Fenster sein. Nur bei
+  erkannter gzip-Magic gelten zwei getrennte feste Deckel: bis zu 128 KiB für
+  den vollständigen gzip-Header und danach bis zu weitere 128 KiB komprimierte
+  Deflate-Daten, aus denen höchstens die ersten 262 Klarbytes entstehen. So
+  bleibt auch ein legaler Header, der exakt am ersten Deckel endet,
+  klassifizierbar. Ein dort nicht abgeschlossener Header oder ein danach noch
+  immer nicht entscheidbarer Strom wird abgelehnt, nie unbegrenzt gelesen oder
+  als opake Datei gespeichert. Eine gültige kurze gzip-Datei darf dagegen EOF
+  erreichen, eine längere liefert 262 Klarbytes ohne `ustar`; beide bleiben
+  bytegleich auf dem normalen Dateipfad. ZIP wird nicht versucht: CERNBox
+  liefert keines.
 - **Dieselben Prüfungen wie zuvor.** HTML-Abwehr, Größenlimit und
   Content-Sniffing laufen auf den **extrahierten** Bytes weiter. Ein Archiv ist
   ein neuer Transportweg, keine neue Vertrauensstufe.
@@ -378,7 +404,7 @@ weiterhin über die extrahierten Bytes.
 ### 3.1 Ablageort
 
 ```
-<attachment_dir>/<seriennummer>/<code><extension>
+<attachment_dir>/<seriennummer>/<source>/<code><extension>
 ```
 
 - `attachment_dir` ist ein Setting (`backend/app/config.py`,
@@ -386,32 +412,68 @@ weiterhin über die extrahierten Bytes.
   ausgelieferte Default —, gilt der relative Pfad `attachments/`**, den
   `attachment_root()` mit `Path.resolve()` gegen das **Arbeitsverzeichnis des
   Serverprozesses** auflöst. Siehe die Falle in Abschnitt 4.1.
-- Ein Verzeichnis je Seriennummer, damit man den Ordner öffnen und die Bilder
-  mit einem beliebigen Betrachter ansehen kann. Das ist ein ausdrückliches
-  Designziel (Modul-Docstring `attachment_store.py`), kein Zufall.
+- Ein Verzeichnis je Seriennummer und darin je Blob-Quelle, damit man den Ordner öffnen und die Bilder
+  mit einem beliebigen Betrachter ansehen kann. Ein **geteilter** Blob liegt
+  jedoch bewusst nur einmal unter der Seriennummer seines ersten erfolgreichen
+  Downloads; weitere Komponenten sehen ihn über Referenzen in der Datenbank,
+  nicht über duplizierte Dateien.
 - Die Bytes liegen **nicht** in der Datenbank. Backups müssen deshalb
   Datenbank **und** Attachment-Ordner umfassen (ADR 006, Konsequenzen).
 
 ### 3.2 Wie eine Datei adressiert wird
 
-- Dateiname = `pdb_code` + Extension. **Der von der PDB gelieferte Dateiname
-  wandert niemals in einen Pfad** — er ist untrusted Input und wird nur zur
+- Neuer Speicherpfad = `source`-Verzeichnis + `pdb_code` + Extension. Damit
+  koennen zwei physisch verschiedene Blobs mit demselben Code aus `pdb` und
+  `share_link` einander auch bei gleicher Extension nicht ueberschreiben.
+  **Der von der PDB gelieferte Dateiname
+  wandert niemals in einen Pfad** – er ist untrusted Input und wird nur zur
   Anzeige in der Datenbank gehalten.
 - Seriennummer und Code werden sanitisiert: alles außer `A-Za-z0-9_-` wird zu
-  `_` (`_SAFE_SN`, `_SAFE_CODE` in `storage_path()`).
+  `_` (`_SAFE_SN`, `_SAFE_CODE` in `storage_path()`). Der Quellenname wird
+  ebenfalls auf dieses Alphabet normalisiert; falls dabei Zeichen ersetzt
+  werden, verhindert ein Digest-Suffix, dass zwei verschiedene Quellen auf
+  dasselbe Verzeichnis abgebildet werden.
 - Die Extension stammt **nur** aus zwei Allowlists: der Content-Type-Tabelle
-  `_EXTENSION_BY_CONTENT_TYPE` (jpg/png/gif/webp/bmp/tif/svg/pdf/json/zip/
+  `_EXTENSION_BY_CONTENT_TYPE` (jpg/png/gif/webp/bmp/avif/tif/svg/pdf/json/zip/
   txt/csv) oder — wenn der Content-Type nichts hergibt — dem Suffix des
   PDB-Dateinamens, sofern dieses in `_TRUSTED_DATA_SUFFIXES`
   (`.dat .log .xml .root .tsv .md`) steht. Passt nichts, wird **ohne
   Extension** gespeichert. Nichts Ausführbares steht auf einer der Listen.
-- Die Datenbankzeile `test_run_attachment` (`backend/app/models.py`) ist der
-  Index: `component_sn`, `test_type`, `test_run_ref`, `source`, `pdb_code`,
-  `filename`, `content_type`, `title`, `size_bytes`, `relative_path`,
-  `downloaded_at`, `synced_at`. Eindeutig ist `(source, pdb_code)` — deshalb
-  wird dieselbe Datei, die an zwei Testläufen hängt, nur einmal geladen.
+- `test_run_attachment` (`backend/app/models.py`) ist der **kanonische
+  Blob-Index**: eindeutig ist `(source, pdb_code)`; `content_type`,
+  `size_bytes`, `relative_path` und `downloaded_at` beschreiben die genau
+  einmal gespeicherten Bytes. `component_sn`, `test_type`, `test_run_ref`,
+  `filename` und `title` bleiben als repräsentative Legacy-Felder erhalten,
+  sind aber nicht mehr die maßgebliche Zuordnung.
+- `test_run_attachment_reference` ist der **Association-Index** zum Blob:
+  `attachment_id`, `component_sn`, `test_type`, `test_run_ref`,
+  `filename`, `title`, `synced_at`. Eindeutig ist
+  `(attachment_id, component_sn, test_type, test_run_ref)`. Ein fehlender
+  Lauf wird als leerer String gespeichert und im Read-Model wieder zu
+  `None`, damit SQLite und PostgreSQL dieselbe Unique-Semantik haben.
+- Der Sync upsertet für **jeden** Deskriptor eine Referenz — auch wenn er den
+  Blob wiederverwendet oder dessen Download fehlschlägt. Dadurch bedeutet
+  Deduplizierung nur noch „ein Netzabruf/eine Datei", nicht „nur eine sichtbare
+  Komponente oder ein sichtbarer Lauf".
+- Beim **SQLite-/Desktop-Start** wird der neue Index einmalig aus vorhandenen
+  `test_run_attachment`-Zeilen **und** allen bereits lokal gespeicherten
+  Evidence-`attachments` zurückgefüllt. Das braucht keinen PDB-Kontakt und
+  kopiert keine Bytes. Die erste Anweisung einer eigenen Transaktion reserviert
+  den Migrationsmarker per `INSERT OR IGNORE`: von zwei parallel startenden
+  Sidecars scannt deshalb genau einer die großen Evidence-Payloads. Bei einem
+  behandelten Scanfehler wird der Marker in derselben Transaktion wieder
+  entfernt; ein Prozessabsturz rollt Claim und Backfill zusammen zurück. Alte
+  direkt erzeugte Zeilen bleiben über einen Legacy-Fallback lesbar.
+- Der Backfill ist bewusst SQLite-spezifisch. Eine bereits bestehende
+  PostgreSQL-/Compose-Datenbank erhält die neue Tabelle durch `create_all`,
+  rekonstruiert historische Mehrfachzuordnungen aber erst beim nächsten
+  Attachment-Re-Sync; dafür ist eine spätere Alembic-/JSONB-Migration nötig.
 - `relative_path` ist relativ zur Wurzel, damit ein Verschieben oder
-  Wiederherstellen des Ordners nicht jede Zeile ungültig macht.
+  Wiederherstellen des Ordners nicht jede Zeile ungültig macht. Bereits
+  indizierte Legacy-Zeilen behalten ihren flachen Pfad
+  `<seriennummer>/<code><extension>` unveraendert; `resolve_path()` liest
+  immer den gespeicherten Wert. Nur neue Downloads verwenden das
+  source-qualifizierte Layout.
 - Beim Ausliefern prüft `resolve_path()` die Containment-Bedingung **erneut**
   (`Path.is_relative_to(root)` plus `is_file()`), statt der Datenbank zu
   vertrauen: eine von Hand editierte Zeile darf nicht aus dem
@@ -422,7 +484,8 @@ weiterhin über die extrahierten Bytes.
 Genau eine Regel, im Modell (`TestRunAttachment.is_image`):
 
 ```python
-bool(self.content_type and self.content_type.startswith("image/"))
+content_type = (self.content_type or "").split(";", 1)[0].strip().lower()
+content_type.startswith("image/")
 ```
 
 Woher kommt `content_type`? In `_commit_outcomes` wird zuerst der Wert aus den
@@ -430,6 +493,14 @@ PDB-Metadaten geschrieben und **bei erfolgreichem Download** durch den
 tatsächlich beobachteten Typ ersetzt (`_reported_content_type` für itkdb-
 Antworten, `_response_content_type` für Share-Links). Der beobachtete Typ
 gewinnt bewusst, weil die Listenmetadaten der PDB oft nur `file` sagen.
+
+Ein SQLite-Start repariert ausserdem den historischen Reuse-Fehler, der einen
+bereits beobachteten Typ wieder auf `NULL` setzen konnte. Ausschliesslich fuer
+Zeilen mit abgeschlossenem Download und einem **exakten** gespeicherten
+Bildsuffix wird der Typ aus dem Ablagevertrag wiederhergestellt: JPEG/PNG,
+GIF/WebP/BMP/AVIF, TIFF und SVG. Das ist keine neue Byte-Heuristik: eine
+`operator-note.svg.txt`, eine nie geladene `.svg` oder ein bereits gesetzter
+Typ werden nicht angefasst. Zweites und jedes weitere Starten ist ein No-op.
 
 Zwei Konsequenzen, die man kennen muss:
 
@@ -466,8 +537,9 @@ Alle drei Quellen laufen durch dieselben Schutzmechanismen (ADR 006, Punkt 6):
   Datei, gilt zusätzlich der vollständige Regelsatz aus Abschnitt 2.3a: nie
   `extractall`, nur reguläre Dateien, Namensprüfung gegen Traversal und
   absolute Pfade, Deckel auf komprimierte Draht-Bytes, den dekomprimierten
-  Tar-Strom, deklarierte Bytes und Mitgliederzahl sowie ein einziges Mitglied
-  im Speicher. Die drei Prüfungen oben laufen
+  Tar-Strom, deklarierte Bytes und Mitgliederzahl sowie ein vollständiges
+  Mitglied plus ein festes 512-Byte-Sniff-Präfix im Speicher. Die drei
+  Prüfungen oben laufen
   danach unverändert über die extrahierten Bytes.
 - **Timeout.** `attachment_download_timeout_seconds`, Default 60 s.
 - **Atomarer Abschluss.** Bytes gehen zuerst in eine `.part`-Datei **neben**
@@ -476,6 +548,16 @@ Alle drei Quellen laufen durch dieselben Schutzmechanismen (ADR 006, Punkt 6):
   geschriebene Datei öffnen. Der `.part`-Name ist absichtlich deterministisch,
   damit ein durch Absturz verwaister Rest beim nächsten Versuch einfach
   überschrieben wird.
+- **Überlappende Syncs je Blob serialisiert.** Direkter Refresh und
+  Hintergrund-Sweep desselben Sidecars sperren nur ihre gemeinsamen
+  `(attachment_root, source, code)`-Schlüssel; verschiedene Dateien bleiben
+  parallel. Die Sperre reicht bis Commit/Rollback, damit der Wartende den
+  kanonischen Blob bereits sehen und wiederverwenden kann. So gibt es auch bei
+  zwei gleichzeitigen Aufrufen derselben Komponente nur einen Netzabruf, eine
+  Datei und keine konkurrierenden Schreibzugriffe auf den deterministischen
+  `.part`-Pfad. `force` laedt einen physischen Blob pro Aufruf erneut, aber
+  nicht einmal je Lauf-Deskriptor: mehrere Associations desselben
+  `(source, code)` teilen auch dann genau einen erfolgreichen Fetch.
 - **Pfad-Containment beim Schreiben.** `_write_temp_bytes` verweigert jeden
   Zielpfad außerhalb der Wurzel.
 - **Keine Netzwerkarbeit in offener Schreibtransaktion.** Der Download ist in
@@ -513,9 +595,12 @@ Alle drei Quellen laufen durch dieselben Schutzmechanismen (ADR 006, Punkt 6):
 ## 4. Warum Bilder ausschließlich lokal ausgeliefert werden
 
 Regel: **Kein geöffneter Screen holt jemals ein Bild aus der PDB oder von
-EOS.** Der Endpunkt `GET /api/components/{sn}/attachments/{code}` antwortet
-mit der Datei von der Platte oder mit 404 — niemals mit einem stillen
-Netzabruf. Die Gründe, in der Reihenfolge ihres Gewichts:
+EOS.** Der Endpunkt
+`GET /api/components/{sn}/attachments/{code}?source={source}` antwortet mit
+der exakt durch `(source, code)` bezeichneten Datei von der Platte oder mit
+404 – niemals mit einem stillen Netzabruf. Ohne `source` bleibt die Route fuer
+alte Bookmarks deterministisch kompatibel; neue Clients senden den Parameter
+immer. Die Gründe, in der Reihenfolge ihres Gewichts:
 
 1. **Ein `<img>`-Tag kann sich nicht authentifizieren.** PDB- und
    EOS-Zugriffe hängen an den *persönlichen* Zugangscodes des angemeldeten
@@ -545,8 +630,10 @@ Netzabruf. Die Gründe, in der Reihenfolge ihres Gewichts:
 
 Als direkte Folge enthält das öffentliche Read-Model
 (`attachment_read_model`) **weder den Speicherpfad noch irgendeine
-Quell-URL** — damit kann ein Share-Link (oder künftig eine signierte URL)
-nicht versehentlich über eine Antwort nach außen tropfen.
+Quell-URL** – damit kann ein Share-Link (oder künftig eine signierte URL)
+nicht versehentlich über eine Antwort nach außen tropfen. Der harmlose
+Quellen-**Marker** `source` ist dagegen Teil der oeffentlichen Blob-Identitaet
+und wird zusammen mit `code` ausgeliefert.
 
 ### 4.1 Falle: zwei Attachment-Wurzeln
 
@@ -599,11 +686,25 @@ Stand `frontend/src/screens/ComponentsScreen.tsx`, `frontend/src/TestResults.tsx
   Testlauf; `children` gruppiert zusätzlich die **Bild**-Attachments jedes
   **direkten** Kindbauteils (z. B. Sensor/Hybrid eines Moduls), je Kind mit
   `sn`, `component_type`, `type_code` und `local_name`
-  (`attachment_store.child_image_attachments`, eine Query für die ganze
-  Familie, ein Hop, nur Zeilen mit `relative_path` und `is_image`). Motivation
+  (`attachment_store.child_image_attachments`, ein konstanter Query-Satz für
+  die ganze Familie statt N+1, ein Hop, nur Zeilen mit `relative_path` und
+  `is_image`). Motivation
   laut Docstring: auf dem Owner-Spiegel liegen nur 3 von 432 Bildern auf einem
   Modul selbst, 241 auf direkten Sensor-Kindern — nach Seriennummer allein
   gefiltert waren diese für eine Modulseite unerreichbar.
+- Eigene Galerie, Kind-Galerie und Binary-Route lösen die Sichtbarkeit über
+  `test_run_attachment_reference.component_sn` auf. Direkt erzeugte alte
+  Blob-Zeilen ohne Referenz bleiben additiv über ihr repräsentatives
+  `component_sn` sichtbar. Die Galerie dedupliziert anschließend je
+  `(source, code)`, damit derselbe Blob bei zwei Läufen derselben Komponente
+  nur eine Kachel erzeugt.
+- Die Binary-URL enthält Komponente und Code sowie `source` als Queryparameter,
+  aber keinen Lauf. Damit bleiben gleiche Codes aus verschiedenen Quellen
+  getrennt adressierbar. Trägt derselbe Blob auf einer Komponente je Lauf
+  unterschiedliche Anzeige-Dateinamen, nimmt der `Content-Disposition`-Header
+  deterministisch die erste Association; Bytes, Content-Type und
+  Zugriffsprüfung bleiben identisch. Der Legacy-Aufruf ohne `source` bleibt
+  fuer bestehende Bookmarks erhalten.
 - Filter (serverseitig für `children`, clientseitig für `attachments`):
   `stored && is_image`. Alles andere (Instrumentdaten, PDFs, nicht geladene
   Dateien) erscheint hier **gar nicht**.
@@ -631,9 +732,16 @@ Kind-Bilder.
   `stored && is_image` als Vorschaubild, alles andere als Platzhalter mit
   Dateiname oder „Not downloaded yet".
 - Die Zuordnung Lauf → Attachment läuft über
-  `TestRunAttachment.test_run_ref == TestRunEvidence.external_ref`
-  (`api._attachment_rows_by_run`). Ein Attachment **ohne** `test_run_ref`
-  erscheint deshalb in keiner Laufkarte — wohl aber in der Galerie (5.1).
+  `TestRunAttachmentReference.(test_type, test_run_ref)` gegen
+  `TestRunEvidence.(test_type, external_ref)`
+  (`api._attachment_rows_by_run`). Der Testtyp gehört zum Schlüssel, weil
+  Custom-/Legacy-Evidence auch ohne Laufreferenz vorkommen darf; zwei solche
+  Tests dürfen ihre Anhänge nicht gegenseitig erben. Eine Legacy-Blob-Zeile
+  ohne Referenz bleibt über dieselben Felder lesbar.
+- Worksheet und Child-Worksheet liefern weiterhin nur
+  `attachment_count`, zählen jetzt aber denselben Association-Index — getrennt
+  nach Komponente, Testtyp und Lauf. Der physisch einmal vorhandene Blob zählt
+  daher in jedem Lauf, der ihn tatsächlich referenziert, genau einmal.
 - Diese Karten liegen an zwei Stellen, und beide brauchen seit dem
   Worksheet-Umbau (Spec §H) **einen Klick**:
   1. **Worksheet-Zeile aufklappen** — `ModuleWorksheet` lädt
@@ -645,32 +753,40 @@ Kind-Bilder.
      (`MirroredRunsSection`); der Inhalt wird erst beim ersten Öffnen geladen.
 - Der Umbau war Absicht (>100 Läufe waren als Zahlenwand unlesbar, docs/04),
   hat aber als Nebeneffekt genau diese Vorschaubilder hinter eine
-  Nutzeraktion geschoben. Der Umbau steckt in der Desktop-Bundle-Linie
-  0.2.x (`desktop/package.json` steht heute auf `0.2.3`); **welche
-  Patch-Version genau die Umstellung enthält, konnte ich nicht verifizieren —
-  offen.**
+  Nutzeraktion geschoben. Der zugehörige Commit `07a59d9` ist per
+  Tag-Nachfahrprüfung in `v0.2.2-alpha` enthalten; damit gilt das Verhalten ab
+  Desktop-Bundle 0.2.2. `desktop/package.json` steht heute auf `0.2.5`.
 
 ### 5.3 Thumbnails in Listen
 
 - `GET /api/components/thumbnails` liefert eine Abbildung
-  Seriennummer → **ein** Attachment-Code. Aufgenommen wird nur, was
-  `relative_path is not None`, Bild-Content-Type und `resolve_path() != None`
-  erfüllt; die Zeile mit der kleinsten `id` je Seriennummer gewinnt.
+  Seriennummer → **ein** Attachment-Locator `{source, code}`. Aufgenommen wird nur, was
+  `relative_path is not None`, einen vom Browser darstellbaren Content-Type
+  und `resolve_path() != None` erfüllt; unter diesen Kandidaten gewinnt der
+  Blob mit der kleinsten `id` je Seriennummer. Die Allowlist entspricht
+  `frontend/src/ui.ts`: JPEG/JPG, PNG, GIF, WebP, BMP, AVIF und SVG. Wie im
+  Frontend wird der Basistyp vor dem ersten `;` abgetrennt, getrimmt und
+  kleingeschrieben; fuehrende Leerzeichen und Leerraum vor MIME-Parametern
+  koennen ein browserfaehiges Bild deshalb nicht aus der Liste verstecken.
 - **`limit` begrenzt seit 2026-08-27 Komponenten, nicht Attachment-Zeilen**
-  (1..5000, Default 2000). Beide Einschränkungen stehen jetzt im SQL:
-  `lower(content_type) LIKE 'image/%'` (`attachment_store.is_image_sql()`;
-  kleingeschrieben, weil `LIKE` unter PostgreSQL case-sensitiv ist und unter
-  SQLite nicht) und `GROUP BY component_sn` / `MIN(id)`, **bevor** das Limit
-  greift.
+  (1..5000, Default 2000). `thumbnail_attachments` vereinigt im SQL die
+  Association-Kandidaten mit dem Legacy-Fallback, gruppiert dann nach
+  Seriennummer und wendet erst danach das Komponentenlimit an. Wiederholte
+  Lauf-Referenzen werden dadurch nicht vor dem Limit in Python materialisiert.
+  Der Filter ist bewusst enger als `is_image_sql()`: Ein älteres TIFF wird vor
+  `MIN(id)` ausgeschlossen, sodass eine spätere JPEG-/PNG-Vorschau gewinnt;
+  eine TIFF-only-Komponente liefert keine kaputte Listenkachel. In der Galerie
+  bleibt dasselbe TIFF dagegen als gespeicherter, nicht darstellbarer
+  Platzhalter sichtbar.
 - **Warum das ein Fehler war:** 3734 der 3772 Zeilen des Live-Spiegels haben
   eine Datei, und 2671 davon sind Instrument-`.txt`. Die ersten 2000 **Zeilen**
   (nach `component_sn, id`) erreichten nur **460 von 759** Seriennummern und
   ergaben **83** Kacheln, obwohl **279** Komponenten ein gespiegeltes Bild
   haben. Nach der Korrektur: **279**. (Gemessen am Live-Spiegel, nur lesend,
   mit demselben Statement, das der Endpunkt baut.)
-- **`GROUP BY`/`MIN(id)` statt Fensterfunktion:** identische Semantik — es ist
-  genau die Zeile, die die alte Sortierung als erste traf — aber ohne
-  Abhängigkeit von SQLite ≥ 3.25; PostgreSQL plant beides gleich.
+- **`UNION ALL` + `GROUP BY`/`MIN(id)` statt Fensterfunktion:** identische
+  Auswahlsemantik über neue Referenzen und alte repräsentative Zeilen, aber
+  ohne Abhängigkeit von SQLite ≥ 3.25.
 - Preis der strengen Ein-Zeile-Regel: fehlt **dieser** Datei die Platte, bleibt
   die Komponente diesmal ohne Kachel, auch wenn ein zweites Bild dort läge.
   Am Live-Spiegel trifft das auf **keine** der 279 Komponenten zu.
@@ -686,8 +802,10 @@ Kind-Bilder.
 - Nicht in Staged-/Ghost-Einträgen als Messwert — Ghost-Tests zeigen ihre
   Ingest-Evidenz, aber keine PDB-Attachments, die es noch nicht gibt.
 - Nicht im Worksheet-Gitter selbst (nur in der aufgeklappten Zeile).
-- Nicht in der Preview-Payload: `GET /api/components/{sn}/preview` trägt seit
-  dem Review-Nachzug keine gespiegelten Läufe mehr (docs/04).
+- Nicht als Datei oder vollständiger Lauf in der Preview-Payload:
+  `GET /api/components/{sn}/preview` trägt seit dem Review-Nachzug keine
+  gespiegelten Läufe mehr (docs/04), wohl aber den association-basierten
+  `attachment_count` der jeweils neuesten Worksheet-Läufe.
 - Nicht in Exporten/Statistiken.
 
 ## 5b. `is_image` beantwortet nicht die Frage der Anzeige (2026-08-27)
@@ -708,17 +826,18 @@ Deshalb prüfen beide Renderer (`ImagesSection` in `ComponentsScreen.tsx` und
 die Lauf-Thumbnails in `TestResults.tsx`) zusätzlich `isDisplayableImage()`
 aus `frontend/src/ui.ts` — eine Allowlist der Formate, auf die sich Browser
 einig sind (jpeg, png, gif, webp, bmp, avif, svg). Fällt ein Anhang durch,
-erscheint der bestehende Platzhalter „gespeichert, nicht darstellbar“:
-ehrlich darüber, dass die Datei da und abrufbar ist, nur nicht inline zeigbar.
+zeigen **beide** Renderer Dateiname und den expliziten Produkttext
+`Stored locally · preview unavailable`: ehrlich darüber, dass die Datei da und
+abrufbar ist, nur nicht inline zeigbar.
 
 **Der `content_type` bleibt dabei wahr.** Ein TIFF ist ein TIFF; der Typ wird
 nicht zurückgehalten, um einen Anzeigefehler verschwinden zu lassen. Wer die
 Allowlist erweitert, ändert nur die Anzeige, nie die Daten.
 
-Randnotiz aus der Messung: kein Bauteil im Spiegel hat *ausschließlich* ein
-TIFF, deshalb liefert die Thumbnail-Auswahl (`MIN(id)`) nie eine
-nicht-darstellbare Kachel aus — diese Karte trägt keinen Content-Type und
-könnte den Fall gar nicht abfangen.
+Die Thumbnail-Auswahl schließt TIFF bereits **vor** `MIN(id)` aus: ein späteres
+JPEG/PNG gewinnt deshalb gegen ein älteres TIFF, und eine TIFF-only-Komponente
+liefert keine kaputte Listenkachel. Galerie und Laufkarte behalten das TIFF
+als gespeicherten, nicht inline darstellbaren Platzhalter.
 
 ## 6. Fehlersuche: „Ich sehe keine Bilder"
 
@@ -827,10 +946,22 @@ liest jedoch `%LOCALAPPDATA%\itkflow\itkflow.db`; dort gemessen
 | Share-Link-URLs gesamt / davon Weboberflächen-Form / privat | 29 / 20 / 1 |
 | Deskriptoren hinter der einen Ordner-Freigabe | 87 auf 76 Komponenten, 20 Codes, **1 Token** |
 | Davon vor 2026-08-27 gespeichert | 0 |
+| Share-Link-Blobzeilen / darin repräsentierte Komponenten | 29 / 26 |
+| Share-Link-Deskriptor-Zuordnungen im Evidence-Mirror | 96 auf 83 Komponenten |
+| Bereits gespeicherte Share-Codes → reale Zuordnungen | 16 Blobs → 52 Zuordnungen auf 39 Komponenten |
 
-Die letzte Zeile erklärt den Unterschied zwischen „432 Bilder liegen im
-Spiegel" und „ein Modul zeigt sie": 422 der 432 kommen über EOS, fast alle auf
-Sensoren, und **kein** Modul kam vor 2026-08-27 an sie heran.
+Die Zeilen zu EOS und Kindbauteilen erklären den Unterschied zwischen „432
+Bilder liegen im Spiegel" und „ein Modul zeigt sie": 422 der 432 kommen über
+EOS, fast alle auf Sensoren, und **kein** Modul kam vor 2026-08-27 an sie
+heran.
+
+Die drei neuen Association-Zeilen messen einen anderen, inzwischen behobenen
+Fehler: `(source, code)` ist der richtige Schlüssel für Bytes, aber der falsche
+Schlüssel für Sichtbarkeit. Vor der Referenztabelle konnte jede Blobzeile nur
+eine `component_sn` halten, und ein späterer Reuse überschrieb zusätzlich ihre
+`test_run_ref`. Damit standen 52 reale Zuordnungen der bereits gespeicherten
+Share-Blobs nur 16 physischen Zeilen gegenüber; Galerie, Binary-Route und
+Laufkarten konnten die übrigen Zuordnungen nicht mehr erreichen.
 
 Diese Zahlen ändern sich mit jedem Sync. Sie sind ein Datenpunkt, keine
 Zusicherung.
@@ -858,9 +989,10 @@ Zusicherung.
   einmalig rund 1,5 GB, weil `?files=` den **ganzen** Unterordner packt
   (79 MB für ein 8,8-MB-Bild). Ein Weg, nur die eine Datei anzufordern, würde
   eine Auflistung der Freigabe voraussetzen — und die ist genau das, was die
-  DAV-Route mit 501 verweigert. Danach ist es gratis: der Natürliche Schlüssel
-  `(source, code)` lässt jede weitere Komponente die bereits gespiegelte Datei
-  wiederverwenden.
+  DAV-Route mit 501 verweigert. Danach ist es gratis: der natürliche
+  **Blob-Schlüssel** `(source, code)` lässt jede weitere Komponente die bereits
+  gespiegelte Datei wiederverwenden; ihre eigene
+  `test_run_attachment_reference` hält die Sichtbarkeit fest.
 - **Bewusst kein Cache.** Ein Archiv wird nie im Speicher gehalten. 87
   Deskriptoren fallen über `(source, code)` auf 20 Abrufe zusammen, und jeder
   Code steht für einen **eigenen** Unterordner — ein LRU-Cache über
@@ -877,8 +1009,8 @@ Zusicherung.
   zeigt auf einen persönlichen CERNBox-Bereich statt auf eine Freigabe. Sie
   wird ohne Request abgelehnt (Abschnitt 2.3); reparierbar wäre sie nur, indem
   jemand die Datei als öffentlichen Share neu verlinkt.
-- **Nicht verifiziert:** exakte Patch-Version (0.2.2 oder 0.2.3), mit der die
-  Laufansicht hinter „All mirrored runs" gewandert ist.
+- **Verifiziert:** der Worksheet-Umbau aus `07a59d9`, der die Laufansicht
+  hinter „All mirrored runs" verschoben hat, ist in `v0.2.2-alpha` enthalten.
 - **Offen:** ob der Fall „Datei gespeichert, aber `content_type` leer →
   unsichtbar" real vorkommt (Abschnitt 3.3).
 - **Erledigt/entkräftet (2026-08-27):** ein zuvor hier vermerkter Verdacht auf
@@ -886,17 +1018,25 @@ Zusicherung.
   (`{component_sn, attachments, children}` vs. alte Listenform) hat sich bei
   Gegenprüfung als bereits behoben erwiesen — `frontend/src/api.ts` und
   `ImagesSection` sind auf die neue Form verdrahtet (Abschnitt 5.1).
+- **Erledigt (2026-08-27):** Blob- und Association-Identität sind getrennt.
+  Der SQLite-Backfill rekonstruiert vorhandene Referenzen rein lokal aus
+  Blobzeilen und Evidence-Payloads; ein idempotenter Re-Sync lädt denselben
+  Share genau einmal, hält ihn aber auf allen Komponenten und Läufen sichtbar.
 - **Offen:** Zukunft der beiden Live-`/images`-Endpunkte (Abschnitt 4.2).
-- **Offen (aus docs/04 übernommen):** `.part`-Dedupe bei `force` mit geteilten
-  Attachment-Codes; `.part`-Aufräumen für aus der PDB verschwundene
-  Attachments.
+- **Erledigt (2026-08-27):** Gleichzeitige direkte und Background-Syncs eines
+  geteilten Attachment-Codes schreiben dank Blob-Key-Sperre nicht mehr
+  konkurrierend auf denselben deterministischen `.part`-Pfad (auch unter
+  `force` bleibt der Dateizugriff serialisiert; ein erzwungener Abruf darf
+  danach semantisch erneut laden).
+- **Offen:** Aufräumen verwaister alter `.part`-Dateien und Attachments, die aus
+  der PDB verschwunden sind.
 - **Erledigt (2026-08-27):** die Doc-Map-Zeile für dieses Dokument steht jetzt
   in `docs/00-doc-map.md`, zusammen mit der für
   [`13-metrology-artifacts.md`](13-metrology-artifacts.md).
 
 ## 10. Quellen
 
-Code (Stand 2026-08-26, Arbeitskopie):
+Code (Stand 2026-08-27, Arbeitskopie):
 
 - `backend/app/attachment_store.py` — Download-, Prüf- und Ablagepipeline
   (drei Phasen, Retry, Breaker, Share-Link-Kandidaten, EOS-Refresh, seit
@@ -910,7 +1050,10 @@ Code (Stand 2026-08-26, Arbeitskopie):
 - `backend/app/api.py` — `component_thumbnails`, `component_test_details`,
   `component_attachments`, `component_attachments_sync`,
   `component_attachment_binary`, `component_images*`
-- `backend/app/models.py` — `TestRunAttachment`, `is_image`
+- `backend/app/models.py` — `TestRunAttachment` (Blob),
+  `TestRunAttachmentReference` (Association), `is_image`
+- `backend/app/db.py` — einmaliger SQLite-Backfill der Associations aus
+  Blobzeilen und Evidence-Payloads
 - `backend/app/config.py`, `backend/app/sync_jobs.py`
 - `frontend/src/screens/ComponentsScreen.tsx` (`ImagesSection`,
   `MirroredRunsSection`), `frontend/src/TestResults.tsx` (`RunAttachments`),
