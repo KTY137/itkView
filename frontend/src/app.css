@@ -2457,6 +2457,32 @@ code {
   gap: 8px;
   flex-wrap: wrap;
 }
+.phase4-form-worksheet {
+  gap: 10px;
+}
+.phase4-form-worksheet > .phase4-form-grid,
+.phase4-form-worksheet > .phase4-subsection {
+  padding: 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface2);
+}
+.phase4-form-worksheet > .phase4-form-grid,
+.phase4-form-worksheet .phase4-subsection .phase4-form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px;
+}
+.phase4-form-worksheet .phase4-field {
+  gap: 3px;
+}
+.phase4-form-worksheet .phase4-subsection {
+  gap: 8px;
+}
+.phase4-form-worksheet .phase4-form-actions {
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--surface2);
+}
 .phase4-detail {
   padding: 16px 18px;
   overflow: visible;
@@ -2589,6 +2615,26 @@ code {
 }
 .add-test-result-entry > .section-title {
   margin-top: 0;
+}
+.file-choose-btn {
+  position: relative;
+  overflow: hidden;
+}
+.add-test-file-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.file-choose-btn:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.file-choose-btn[aria-disabled="true"] .add-test-file-input {
+  cursor: default;
 }
 .add-test-dropzone {
   min-height: 132px;
@@ -2822,6 +2868,10 @@ code {
   padding: 4px 0 10px;
 }
 @media (max-width: 760px) {
+  .phase4-form-worksheet > .phase4-form-grid,
+  .phase4-form-worksheet .phase4-subsection .phase4-form-grid {
+    grid-template-columns: 1fr;
+  }
   .phase4-field-wide {
     grid-column: span 1;
   }
@@ -3536,8 +3586,8 @@ g:hover > .curve-line {
 .ws-edit-strip {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: 8px;
+  padding: 10px;
   margin-top: 4px;
   border: 1px solid var(--accent);
   border-left-width: 3px;

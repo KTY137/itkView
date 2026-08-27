@@ -63,12 +63,30 @@ function asMap(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+function asFinitePair(value: unknown): readonly [number, number] | null {
+  if (
+    !Array.isArray(value) ||
+    value.length !== 2 ||
+    typeof value[0] !== "number" ||
+    typeof value[1] !== "number" ||
+    !Number.isFinite(value[0]) ||
+    !Number.isFinite(value[1])
+  ) {
+    return null;
+  }
+  return [value[0], value[1]];
+}
+
 /**
  * A value nested inside a map cell. Scalars read exactly as they do anywhere
  * else; a container gets its extent instead of `String(value)`, reusing the
  * worksheet's chip wording so both surfaces describe extent identically.
  */
 function formatNestedValue(value: unknown): string {
+  const pair = asFinitePair(value);
+  if (pair !== null) {
+    return t.testResults.numericPair(formatScalar(pair[0]), formatScalar(pair[1]));
+  }
   if (Array.isArray(value)) return t.worksheet.arrayPoints(value.length);
   const nested = asMap(value);
   if (nested !== null) return t.worksheet.mapEntries(Object.keys(nested).length);
@@ -172,6 +190,175 @@ function CurvePlot({ xs, ys, xLabel, yLabel }: {
   );
 }
 
+type MapPlotData =
+  | { kind: "categories"; keys: string[]; values: number[] }
+  | { kind: "pairs"; keys: string[]; first: number[]; second: number[] };
+
+/**
+ * A map is plotted only when every entry has one unambiguous numeric shape.
+ * Mixed maps stay tables: coercing a missing/string/container value into a
+ * point would fabricate data. Exact finite two-tuples remain schema-neutral
+ * numeric pairs; plain finite numbers are categorical values keyed by the map
+ * entry. The renderer must not infer physical axis semantics from shape alone.
+ */
+function mapPlotData(entries: Record<string, unknown>): MapPlotData | null {
+  const pairs = Object.entries(entries);
+  if (pairs.length === 0) return null;
+
+  if (pairs.every(([, value]) => typeof value === "number" && Number.isFinite(value))) {
+    return {
+      kind: "categories",
+      keys: pairs.map(([key]) => key),
+      values: pairs.map(([, value]) => value as number),
+    };
+  }
+
+  const numericPairs = pairs.map(([, value]) => asFinitePair(value));
+  if (numericPairs.every((value): value is readonly [number, number] => value !== null)) {
+    return {
+      kind: "pairs",
+      keys: pairs.map(([key]) => key),
+      first: numericPairs.map(([first]) => first),
+      second: numericPairs.map(([, second]) => second),
+    };
+  }
+
+  return null;
+}
+
+function mapPlots(run: DisplayTestRun) {
+  return Object.entries(run.results)
+    .map(([code, value]) => {
+      const entries = asMap(value);
+      return entries === null ? null : { code, data: mapPlotData(entries) };
+    })
+    .filter(
+      (entry): entry is { code: string; data: MapPlotData } =>
+        entry !== null && entry.data !== null,
+    );
+}
+
+function categoryTick(value: string): string {
+  return value.length > 12 ? `${value.slice(0, 10)}…` : value;
+}
+
+/** Numeric map values against their discrete keys. No line joins categories. */
+function CategoricalMapPlot({ data, valueLabel }: {
+  data: Extract<MapPlotData, { kind: "categories" }>;
+  valueLabel: string;
+}) {
+  const width = 320;
+  const height = 160;
+  const pad = { left: 38, right: 8, top: 10, bottom: 34 };
+  const yMin = Math.min(0, ...data.values);
+  const yMax = Math.max(0, ...data.values);
+  const ySpan = yMax - yMin || 1;
+  const plotWidth = width - pad.left - pad.right;
+  const xAt = (index: number) =>
+    data.values.length === 1
+      ? pad.left + plotWidth / 2
+      : pad.left + (index / (data.values.length - 1)) * plotWidth;
+  const yAt = (value: number) =>
+    height - pad.bottom - ((value - yMin) / ySpan) * (height - pad.top - pad.bottom);
+  const baseline = yAt(0);
+  const labelEvery = Math.max(1, Math.ceil(data.keys.length / 6));
+
+  return (
+    <figure className="curve">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label={t.testResults.categoryPlotAria(valueLabel, data.values.length)}
+      >
+        <line className="curve-axis" x1={pad.left} y1={baseline} x2={width - pad.right} y2={baseline} />
+        <line className="curve-axis" x1={pad.left} y1={pad.top} x2={pad.left} y2={height - pad.bottom} />
+        {data.values.map((value, index) => {
+          const x = xAt(index);
+          const y = yAt(value);
+          const showLabel = index === data.keys.length - 1 || index % labelEvery === 0;
+          return (
+            <g key={data.keys[index]}>
+              <line x1={x} y1={baseline} x2={x} y2={y} stroke="var(--series)" strokeWidth="1.5" />
+              <circle cx={x} cy={y} r="2.8" fill="var(--series)">
+                <title>{`${data.keys[index]}: ${formatScalar(value)}`}</title>
+              </circle>
+              {showLabel && (
+                <text className="curve-tick" x={x} y={height - 10} textAnchor="middle">
+                  {categoryTick(data.keys[index])}
+                </text>
+              )}
+            </g>
+          );
+        })}
+        <text className="curve-tick" x={pad.left - 4} y={pad.top + 8} textAnchor="end">
+          {formatScalar(yMax)}
+        </text>
+        <text className="curve-tick" x={pad.left - 4} y={height - pad.bottom} textAnchor="end">
+          {formatScalar(yMin)}
+        </text>
+      </svg>
+      <figcaption>
+        {t.testResults.categoryPlotCaption(valueLabel, data.values.length)}
+      </figcaption>
+    </figure>
+  );
+}
+
+/** Exact two-number map values as points. Position names and the raw ordered
+ * pair stay in each point title and in the complete table below. Without
+ * result-schema evidence, the axes are only first and second value. */
+function PairScatterPlot({ data, valueLabel }: {
+  data: Extract<MapPlotData, { kind: "pairs" }>;
+  valueLabel: string;
+}) {
+  const width = 320;
+  const height = 160;
+  const pad = { left: 38, right: 8, top: 10, bottom: 24 };
+  const rawXMin = Math.min(...data.first);
+  const rawXMax = Math.max(...data.first);
+  const rawYMin = Math.min(...data.second);
+  const rawYMax = Math.max(...data.second);
+  const xPadding = rawXMin === rawXMax ? Math.max(Math.abs(rawXMin) * 0.05, 1) : 0;
+  const yPadding = rawYMin === rawYMax ? Math.max(Math.abs(rawYMin) * 0.05, 1) : 0;
+  const xMin = rawXMin - xPadding;
+  const xMax = rawXMax + xPadding;
+  const yMin = rawYMin - yPadding;
+  const yMax = rawYMax + yPadding;
+  const xAt = (value: number) =>
+    pad.left + ((value - xMin) / (xMax - xMin)) * (width - pad.left - pad.right);
+  const yAt = (value: number) =>
+    height - pad.bottom - ((value - yMin) / (yMax - yMin)) * (height - pad.top - pad.bottom);
+
+  return (
+    <figure className="curve">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label={t.testResults.pairPlotAria(valueLabel, data.first.length)}
+      >
+        <line className="curve-axis" x1={pad.left} y1={height - pad.bottom} x2={width - pad.right} y2={height - pad.bottom} />
+        <line className="curve-axis" x1={pad.left} y1={pad.top} x2={pad.left} y2={height - pad.bottom} />
+        {data.first.map((first, index) => (
+          <circle
+            key={data.keys[index]}
+            cx={xAt(first)}
+            cy={yAt(data.second[index])}
+            r="3.2"
+            fill="var(--series)"
+          >
+            <title>{`${data.keys[index]}: ${t.testResults.numericPair(formatScalar(first), formatScalar(data.second[index]))}`}</title>
+          </circle>
+        ))}
+        <text className="curve-tick" x={pad.left} y={height - 8} textAnchor="start">{formatScalar(rawXMin)}</text>
+        <text className="curve-tick" x={width - pad.right} y={height - 8} textAnchor="end">{formatScalar(rawXMax)}</text>
+        <text className="curve-tick" x={pad.left - 4} y={pad.top + 8} textAnchor="end">{formatScalar(rawYMax)}</text>
+        <text className="curve-tick" x={pad.left - 4} y={height - pad.bottom} textAnchor="end">{formatScalar(rawYMin)}</text>
+      </svg>
+      <figcaption>{t.testResults.pairPlotCaption(valueLabel, data.first.length)}</figcaption>
+    </figure>
+  );
+}
+
 function label(run: DisplayTestRun, code: string): string {
   return run.result_meta[code]?.name ?? code;
 }
@@ -182,7 +369,9 @@ export function RunCurves({ run }: { run: DisplayTestRun }) {
     .map(([code, value]) => [code, asNumericArray(value)] as const)
     .filter((entry): entry is readonly [string, number[]] => entry[1] !== null);
 
-  if (arrays.length === 0) return null;
+  const plots = mapPlots(run);
+
+  if (arrays.length === 0 && plots.length === 0) return null;
 
   const byCode = new Map(arrays);
   const voltage = byCode.get("VOLTAGE");
@@ -190,12 +379,21 @@ export function RunCurves({ run }: { run: DisplayTestRun }) {
 
   if (voltage && current) {
     return (
-      <CurvePlot
-        xs={voltage}
-        ys={current}
-        xLabel={label(run, "VOLTAGE")}
-        yLabel={label(run, "CURRENT")}
-      />
+      <>
+        <CurvePlot
+          xs={voltage}
+          ys={current}
+          xLabel={label(run, "VOLTAGE")}
+          yLabel={label(run, "CURRENT")}
+        />
+        {plots.map(({ code, data }) =>
+          data.kind === "categories" ? (
+            <CategoricalMapPlot key={code} data={data} valueLabel={label(run, code)} />
+          ) : (
+            <PairScatterPlot key={code} data={data} valueLabel={label(run, code)} />
+          ),
+        )}
+      </>
     );
   }
 
@@ -212,6 +410,13 @@ export function RunCurves({ run }: { run: DisplayTestRun }) {
           yLabel={label(run, code)}
         />
       ))}
+      {plots.map(({ code, data }) =>
+        data.kind === "categories" ? (
+          <CategoricalMapPlot key={code} data={data} valueLabel={label(run, code)} />
+        ) : (
+          <PairScatterPlot key={code} data={data} valueLabel={label(run, code)} />
+        ),
+      )}
     </>
   );
 }
@@ -280,20 +485,32 @@ export function RunAttachments({ sn, attachments, onOpen }: {
           <button
             type="button"
             className="img-thumb"
-            key={attachment.code}
+            key={`${attachment.source}:${attachment.code}`}
             title={attachment.filename ?? attachment.code}
             onClick={() => onOpen(attachment)}
           >
             <img
-              src={componentAttachmentUrl(sn, attachment.code)}
+              src={componentAttachmentUrl(sn, attachment.code, attachment.source)}
               alt={attachment.title ?? attachment.filename ?? t.images.untitled}
               loading="lazy"
             />
           </button>
         ) : (
-          <span className="img-thumb placeholder" key={attachment.code}>
+          <span
+            className="img-thumb placeholder"
+            key={`${attachment.source}:${attachment.code}`}
+            title={attachment.filename ?? attachment.title ?? attachment.test_type ?? attachment.code}
+          >
             <span className="img-tag">
-              {attachment.stored ? attachment.filename : t.images.notStored}
+              {attachment.stored ? (
+                <>
+                  <span>
+                    {attachment.filename ?? attachment.title ?? attachment.test_type ?? attachment.code}
+                  </span>
+                  <br />
+                  <span>{t.images.storedLocally}</span>
+                </>
+              ) : t.images.notStored}
             </span>
           </span>
         ),

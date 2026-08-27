@@ -336,6 +336,23 @@ beforeEach(() => {
 });
 
 describe("staged measurement values", () => {
+  it("uses the source-qualified thumbnail locator for each component group", async () => {
+    vi.mocked(getComponentThumbnails).mockResolvedValue({
+      [DUMMY_SN]: { source: "share_link", code: "shared-code" },
+    });
+
+    await renderScreen();
+
+    const thumbnails = screen.getAllByAltText(/INST1-M-001/u);
+    expect(thumbnails.length).toBeGreaterThan(0);
+    for (const thumbnail of thumbnails) {
+      expect(thumbnail).toHaveAttribute(
+        "src",
+        `/api/components/${DUMMY_SN}/attachments/shared-code?source=share_link`,
+      );
+    }
+  });
+
   it("shows the complete staged server derivation on the approval card and in details", async () => {
     await renderScreen();
     const card = cardFor(501);

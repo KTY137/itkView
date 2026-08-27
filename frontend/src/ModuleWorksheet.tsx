@@ -48,7 +48,12 @@ import type { DerivedSource } from "./GlueDerivation";
 import ImageLightbox from "./ImageLightbox";
 import { t } from "./i18n";
 import { manualEntryPayload, useTestStaging } from "./testStaging";
-import TestForm, { measurementCollection, requiredCodes } from "./TestForm";
+import TestForm, {
+  manualEntryBlockerSummary,
+  manualEntryCapability,
+  measurementCollection,
+  requiredCodes,
+} from "./TestForm";
 import type { TestFormSubmitPayload } from "./TestForm";
 import { ToolFieldSection } from "./ToolFieldSelect";
 import { formatScalar, RunAttachments, RunConditions, RunCurves, RunScalars } from "./TestResults";
@@ -76,6 +81,8 @@ export type ModuleWorksheetProps = {
    * text instead of something that looks clickable and is not (review
    * finding I3). */
   onViewStaged?: () => void;
+  /** Move a file-only edit to the component's existing JSON upload entry. */
+  onUseFileUpload: (testType: string) => void;
 };
 
 const TABLE_COLUMNS = 5;
@@ -498,6 +505,7 @@ export default function ModuleWorksheet({
   editIntent = null,
   onStaged,
   onViewStaged,
+  onUseFileUpload,
 }: ModuleWorksheetProps) {
   const visibleGroups = useMemo(
     () => worksheet.groups.filter((group) => group.rows.length > 0),
@@ -681,7 +689,14 @@ export default function ModuleWorksheet({
   );
   const latestFullRun = useMemo(() => {
     if (editingTestType === null || runs === null) return null;
-    const candidates = runs.filter((run) => run.test_type === editingTestType);
+    // A withdrawn run remains visible in the expanded audit history, but it
+    // is no longer valid input for a new measurement. Keep the edit strip on
+    // the newest live run, matching the backend worksheet/stage-gate contract.
+    const candidates = runs.filter(
+      (run) =>
+        run.test_type === editingTestType &&
+        run.run_state !== WITHDRAWN_TEST_RUN_STATE,
+    );
     return candidates.length === 0 ? null : newestFirst(candidates)[0];
   }, [runs, editingTestType]);
   const prefilled = useMemo(
@@ -711,6 +726,11 @@ export default function ModuleWorksheet({
     if (matchedSchema === null || plan === null) return null;
     return { ...matchedSchema, schema: plan.definition };
   }, [matchedSchema, plan]);
+  const manualCapability = useMemo(
+    () =>
+      effectiveSchema === null ? null : manualEntryCapability(effectiveSchema.schema),
+    [effectiveSchema],
+  );
 
   // A tool field's previous value comes from the same prefill pass as every
   // other field — the strip must reopen showing the jig that was actually
@@ -738,6 +758,7 @@ export default function ModuleWorksheet({
     effectiveSchema !== null &&
     !(needsRunsForEdit && runs === null) &&
     !(needsRunsForEdit && runsError !== null) &&
+    manualCapability?.canEnter === true &&
     requiredPrefillDrops.length === 0;
 
   useEffect(() => {
@@ -990,16 +1011,47 @@ export default function ModuleWorksheet({
                                     {t.common.retry}
                                   </button>
                                 </div>
+                              ) : manualCapability?.canEnter === false ? (
+                                <div className="info-banner" role="status">
+                                  <span>
+                                    {t.worksheet.manualEntryBlocked(
+                                      row.test_type,
+                                      manualEntryBlockerSummary(manualCapability),
+                                    )}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={() => {
+                                      closeEdit();
+                                      onUseFileUpload(row.test_type);
+                                    }}
+                                  >
+                                    {t.worksheet.useFileUpload}
+                                  </button>
+                                </div>
                               ) : requiredPrefillDrops.length > 0 ? (
                                 // Review finding C1: a required field that
                                 // cannot be reproduced in this form must not
                                 // become a silent dead end — block the strip
                                 // and point at the file-drop path instead.
-                                <p className="error-text" role="alert">
-                                  {t.worksheet.prefillBlockedRequired(
-                                    requiredPrefillDrops.map((drop) => drop.name).join(", "),
-                                  )}
-                                </p>
+                                <div className="info-banner" role="status">
+                                  <span>
+                                    {t.worksheet.prefillBlockedRequired(
+                                      requiredPrefillDrops.map((drop) => drop.name).join(", "),
+                                    )}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={() => {
+                                      closeEdit();
+                                      onUseFileUpload(row.test_type);
+                                    }}
+                                  >
+                                    {t.worksheet.useFileUpload}
+                                  </button>
+                                </div>
                               ) : (
                                 <>
                                   {optionalPrefillDrops.length > 0 && (
@@ -1042,6 +1094,9 @@ export default function ModuleWorksheet({
                                     schema={effectiveSchema}
                                     labels={t.worksheet.testForm}
                                     disabled={stagingBusy !== null}
+                                    variant="worksheet"
+                                    cancelLabel={t.worksheet.cancelEdit}
+                                    onCancel={closeEdit}
                                     onSubmit={handleEditSubmit}
                                   />
                                 </>
@@ -1101,16 +1156,6 @@ export default function ModuleWorksheet({
                                   {stagingStageError}
                                 </p>
                               )}
-                              <div className="phase4-action-bar phase4-actions-end">
-                                <button
-                                  type="button"
-                                  className="btn"
-                                  disabled={stagingBusy !== null}
-                                  onClick={closeEdit}
-                                >
-                                  {t.worksheet.cancelEdit}
-                                </button>
-                              </div>
                             </div>
                           </td>
                         </tr>

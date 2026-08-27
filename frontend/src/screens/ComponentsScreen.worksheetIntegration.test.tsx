@@ -17,11 +17,11 @@
  * Fixtures live in `src/test/moduleWorksheetFixtures.ts` and follow the shapes
  * `app/preview.py` really emits (including a dict-valued metrology result).
  */
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { IngestFileCreate } from "../api";
+import type { IngestFileCreate, OutboxAction, TestTypeSchema } from "../api";
 import {
   getComponent,
   getComponentAttachments,
@@ -30,10 +30,13 @@ import {
   getComponentTests,
   getIngestPreview,
   getMe,
+  getOutboxAction,
   getStageSuggestion,
   getTestTypeSchemas,
   postIngestFile,
   postIngestOutboxProposal,
+  postOutboxAction,
+  postOutboxTransition,
 } from "../api";
 import { AuthProvider } from "../auth";
 import { t } from "../i18n";
@@ -69,10 +72,13 @@ vi.mock("../api", async (importOriginal) => ({
   getComponentTests: vi.fn(),
   getIngestPreview: vi.fn(),
   getMe: vi.fn(),
+  getOutboxAction: vi.fn(),
   getStageSuggestion: vi.fn(),
   getTestTypeSchemas: vi.fn(),
   postIngestFile: vi.fn(),
   postIngestOutboxProposal: vi.fn(),
+  postOutboxAction: vi.fn(),
+  postOutboxTransition: vi.fn(),
 }));
 
 /** Ordered record of the staging pipeline, so "in this order" is assertable. */
@@ -104,6 +110,17 @@ beforeEach(() => {
     pipeline.push(`propose:${id}`);
     return stagedAction;
   });
+  vi.mocked(getOutboxAction).mockResolvedValue({ ...stagedAction, status: "confirmed" });
+  vi.mocked(postOutboxAction).mockResolvedValue({
+    ...stagedAction,
+    id: 93,
+    kind: "stage_move",
+  });
+  vi.mocked(postOutboxTransition).mockImplementation(async (id, body) => ({
+    ...stagedAction,
+    id,
+    status: body.to,
+  }));
 });
 
 // ---- Shared harness ---------------------------------------------------------
@@ -270,7 +287,7 @@ describe("expanding a row", () => {
     // Attachments are read from the local mirror route, never from the PDB.
     expect(screen.getByAltText("IV sweep plot")).toHaveAttribute(
       "src",
-      `/api/components/${MODULE_SN}/attachments/att-iv-3`,
+      `/api/components/${MODULE_SN}/attachments/att-iv-3?source=pdb`,
     );
 
     // Proof that the collapsed-state sweep above is capable of failing: the
@@ -379,7 +396,9 @@ describe("staging an in-row edit", () => {
     // Ghost row appears — and is still there once the parent's preview refresh
     // has landed, i.e. the optimistic row hands over to the server's own view.
     expect(within(worksheet()).getByText(t.worksheet.stagedUpload(stagedAction.id))).toBeInTheDocument();
-    await waitFor(() => expect(getComponentPreview).toHaveBeenCalledTimes(2));
+    // Two bootstrap reads close the initial Preview/Staged/Suggestion race;
+    // the successful draft adds the third refresh.
+    await waitFor(() => expect(getComponentPreview).toHaveBeenCalledTimes(3));
     await waitFor(() =>
       expect(
         within(worksheet()).getByText(t.worksheet.stagedUpload(stagedAction.id)),
@@ -408,7 +427,7 @@ describe("staging an in-row edit", () => {
     expect(
       within(worksheet()).queryByText(t.worksheet.stagedUpload(stagedAction.id)),
     ).not.toBeInTheDocument();
-    expect(getComponentPreview).toHaveBeenCalledTimes(1);
+    expect(getComponentPreview).toHaveBeenCalledTimes(2);
     // The strip stays open so the operator can correct and retry.
     expect(screen.getByRole("button", { name: t.worksheet.testForm.submit })).toBeInTheDocument();
   });
@@ -466,6 +485,50 @@ describe("schema resolution across the screen/worksheet boundary", () => {
       screen.queryByRole("button", { name: t.worksheet.testForm.submit }),
     ).not.toBeInTheDocument();
   });
+
+  it("moves a file-only worksheet edit to the existing JSON drop and focuses it", async () => {
+    const fileOnlyMetrologySchema: TestTypeSchema = {
+      id: 19,
+      component_type: "MODULE",
+      test_code: "MODULE_METROLOGY",
+      name: "Module metrology",
+      synced_at: "2026-08-27T12:00:00Z",
+      schema: {
+        properties: [],
+        parameters: [
+          {
+            code: "HYBRID_GLUE_THICKNESS",
+            name: "Hybrid glue thickness [um]",
+            dataType: "object",
+            required: true,
+          },
+          { code: "SHIELDBOX_HEIGHT", name: "Shield box height [um]", dataType: "float" },
+        ],
+      },
+    };
+    vi.mocked(getTestTypeSchemas).mockResolvedValue([...testTypeSchemas, fileOnlyMetrologySchema]);
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const user = userEvent.setup();
+    await openModulePage();
+
+    const fileEntry = screen.getByLabelText(t.addTest.chooseFile);
+    await user.click(
+      within(worksheetRow("MODULE_METROLOGY")).getByRole("button", {
+        name: t.worksheet.editFor("MODULE_METROLOGY"),
+      }),
+    );
+
+    expect(await screen.findByText(/Hybrid glue thickness \[um\] \(HYBRID_GLUE_THICKNESS\)/u))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: t.worksheet.testForm.submit }))
+      .not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: t.worksheet.useFileUpload }));
+
+    await waitFor(() => expect(document.activeElement).toBe(fileEntry));
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "center" });
+  });
 });
 
 // ---- 5. Requirements ghost pencil → worksheet edit strip --------------------
@@ -505,28 +568,416 @@ describe("required-tests ghost pencil", () => {
     await user.click(requirementsPencil);
     expect(await screen.findByLabelText(/Weight of glue under hybrid 1/u)).toBeInTheDocument();
   });
+
+  it("rechecks the suggestion after the initial staged snapshot closes a worker-confirmation race", async () => {
+    const readySuggestion = {
+      ...stageSuggestion,
+      move_suggested: true,
+      suggested_stage: "STITCH_BONDING",
+      checks: stageSuggestion.checks.map((check) =>
+        check.test_type === "GLUE_WEIGHT" ? { ...check, status: "passed" as const } : check,
+      ),
+      blocking: [],
+    };
+    const confirmedPreview = previewPayload();
+    const glueRow = confirmedPreview.worksheet.groups
+      .flatMap((group) => group.rows)
+      .find((row) => row.test_type === "GLUE_WEIGHT");
+    if (glueRow === undefined) throw new Error("GLUE_WEIGHT fixture row missing");
+    glueRow.status = "passed";
+    vi.mocked(getComponentPreview)
+      .mockResolvedValueOnce(previewPayload())
+      .mockResolvedValue(confirmedPreview);
+    vi.mocked(getComponentStaged).mockResolvedValue([]);
+    // The first request represents a read begun just before confirmation. The
+    // staged snapshot already sees the terminal action gone, so the detail
+    // panel must make a second, sequenced suggestion read.
+    vi.mocked(getStageSuggestion)
+      .mockResolvedValueOnce(stageSuggestion)
+      .mockResolvedValue(readySuggestion);
+
+    await openModulePage();
+
+    expect(await screen.findByRole("button", {
+      name: t.components.stageProposeMove("Stitch Bonding"),
+    })).toBeInTheDocument();
+    expect(getStageSuggestion).toHaveBeenCalledTimes(2);
+    expect(getComponentPreview).toHaveBeenCalledTimes(2);
+    await waitFor(() =>
+      expect(within(worksheetRow("GLUE_WEIGHT")).getByText(t.worksheet.statusPassed))
+        .toBeInTheDocument(),
+    );
+  });
+
+  it("resumes a failed worker action after reload and follows its retry to confirmation", async () => {
+    let workerStatus: OutboxAction["status"] = "failed";
+    let statusPolls = 0;
+    const failedAction: OutboxAction = {
+      ...stagedAction,
+      status: "failed",
+      error: "PDB unavailable: temporary test outage",
+      payload: {
+        ...stagedAction.payload,
+        component_sn: MODULE_SN,
+        test_type: "GLUE_WEIGHT",
+        passed: true,
+      },
+    };
+    const readySuggestion = {
+      ...stageSuggestion,
+      move_suggested: true,
+      suggested_stage: "STITCH_BONDING",
+      checks: stageSuggestion.checks.map((check) =>
+        check.test_type === "GLUE_WEIGHT" ? { ...check, status: "passed" as const } : check,
+      ),
+      blocking: [],
+    };
+    const confirmedPreview = previewPayload();
+    const glueRow = confirmedPreview.worksheet.groups
+      .flatMap((group) => group.rows)
+      .find((row) => row.test_type === "GLUE_WEIGHT");
+    if (glueRow === undefined) throw new Error("GLUE_WEIGHT fixture row missing");
+    glueRow.status = "passed";
+
+    vi.mocked(getComponentPreview).mockImplementation(async () =>
+      workerStatus === "confirmed"
+        ? confirmedPreview
+        : previewPayload({
+            stagedByRow: {
+              GLUE_WEIGHT: [{ outbox_action_id: failedAction.id, status: workerStatus }],
+            },
+            stagedActions: [{
+              ...stagedActionMetadata,
+              status: workerStatus,
+              summary: "Upload GLUE_WEIGHT",
+              test_type: "GLUE_WEIGHT",
+            }],
+          }),
+    );
+    vi.mocked(getComponentStaged).mockImplementation(async () =>
+      workerStatus === "confirmed" ? [] : [{ ...failedAction, status: workerStatus }],
+    );
+    vi.mocked(getStageSuggestion).mockImplementation(async () =>
+      workerStatus === "confirmed" ? readySuggestion : stageSuggestion,
+    );
+    vi.mocked(getOutboxAction).mockImplementation(async () => {
+      statusPolls += 1;
+      workerStatus = statusPolls === 1 ? "submitted" : "confirmed";
+      return {
+        ...failedAction,
+        status: workerStatus,
+        error: null,
+        external_ref: workerStatus === "confirmed" ? "PDB-RUN-GLUE-RETRY" : null,
+      };
+    });
+
+    await openModulePage();
+
+    expect(await screen.findByRole(
+      "button",
+      { name: t.components.stageProposeMove("Stitch Bonding") },
+      { timeout: 4_000 },
+    )).toBeInTheDocument();
+    expect(getOutboxAction).toHaveBeenCalledTimes(2);
+    expect(within(worksheetRow("GLUE_WEIGHT")).getByText(t.worksheet.statusPassed))
+      .toBeInTheDocument();
+  });
+
+  it("refreshes a stale draft immediately when a lost Push response is worker-active", async () => {
+    const user = userEvent.setup();
+    let workerStatus: OutboxAction["status"] = "draft";
+    let statusReads = 0;
+    let confirmWorker: (() => void) | undefined;
+    const glueDraft: OutboxAction = {
+      ...stagedAction,
+      payload: {
+        ...stagedAction.payload,
+        component_sn: MODULE_SN,
+        test_type: "GLUE_WEIGHT",
+        passed: true,
+      },
+    };
+    const readySuggestion = {
+      ...stageSuggestion,
+      move_suggested: true,
+      suggested_stage: "STITCH_BONDING",
+      checks: stageSuggestion.checks.map((check) =>
+        check.test_type === "GLUE_WEIGHT" ? { ...check, status: "passed" as const } : check,
+      ),
+      blocking: [],
+    };
+    const confirmedPreview = previewPayload();
+    const glueRow = confirmedPreview.worksheet.groups
+      .flatMap((group) => group.rows)
+      .find((row) => row.test_type === "GLUE_WEIGHT");
+    if (glueRow === undefined) throw new Error("GLUE_WEIGHT fixture row missing");
+    glueRow.status = "passed";
+
+    vi.mocked(getComponentPreview).mockImplementation(async () =>
+      workerStatus === "confirmed"
+        ? confirmedPreview
+        : previewPayload({
+            stagedByRow: {
+              GLUE_WEIGHT: [{ outbox_action_id: glueDraft.id, status: workerStatus }],
+            },
+            stagedActions: [{
+              ...stagedActionMetadata,
+              status: workerStatus,
+              summary: "Upload GLUE_WEIGHT",
+              test_type: "GLUE_WEIGHT",
+            }],
+          }),
+    );
+    vi.mocked(getComponentStaged).mockImplementation(async () =>
+      workerStatus === "confirmed" ? [] : [{ ...glueDraft, status: workerStatus }],
+    );
+    vi.mocked(getStageSuggestion).mockImplementation(async () =>
+      workerStatus === "confirmed" ? readySuggestion : stageSuggestion,
+    );
+    vi.mocked(postOutboxTransition).mockImplementation(async (id, body) => {
+      if (body.to === "submitted") {
+        // The server accepted the transition, but the response never reached
+        // the browser. The authoritative recovery read sees it as active.
+        workerStatus = "submitted";
+        throw new Error("submitted transition response lost");
+      }
+      workerStatus = body.to;
+      return { ...glueDraft, id, status: body.to };
+    });
+    vi.mocked(getOutboxAction).mockImplementation(async () => {
+      statusReads += 1;
+      if (statusReads === 1) return { ...glueDraft, status: "submitted" };
+      return new Promise<OutboxAction>((resolve) => {
+        confirmWorker = () => {
+          workerStatus = "confirmed";
+          resolve({
+            ...glueDraft,
+            status: "confirmed",
+            external_ref: "PDB-RUN-GLUE-LOST-RESPONSE",
+          });
+        };
+      });
+    });
+
+    await openModulePage();
+    await user.click(await screen.findByRole("button", {
+      name: t.components.previewStaged(1),
+    }));
+    await user.click(screen.getByRole("button", { name: t.components.previewPush }));
+
+    // The recovery read returns the same status used to seed the watcher, so
+    // polling alone would not refresh until another transition. The explicit
+    // active-branch refresh must replace the stale Draft immediately.
+    expect((await screen.findAllByText(t.components.previewStatuses.submitted)).length)
+      .toBeGreaterThan(0);
+    await waitFor(() => expect(getOutboxAction).toHaveBeenCalledTimes(2));
+    await act(async () => confirmWorker?.());
+
+    expect(await screen.findByRole(
+      "button",
+      { name: t.components.stageProposeMove("Stitch Bonding") },
+      { timeout: 3_000 },
+    )).toBeInTheDocument();
+    expect(postOutboxTransition).toHaveBeenCalledTimes(3);
+    expect(getOutboxAction).toHaveBeenCalledTimes(2);
+    expect(within(worksheetRow("GLUE_WEIGHT")).getByText(t.worksheet.statusPassed))
+      .toBeInTheDocument();
+  });
+
+  it("stages the required run, waits for worker confirmation, re-evaluates the open page, and proposes the now-valid stage move", async () => {
+    const user = userEvent.setup();
+    let draftCreated = false;
+    let workerStatus: OutboxAction["status"] = "draft";
+    let statusPolls = 0;
+    const glueDraft: OutboxAction = {
+      ...stagedAction,
+      payload: {
+        ingest_file_id: ingestFile.id,
+        component_sn: MODULE_SN,
+        test_type: "GLUE_WEIGHT",
+        passed: true,
+      },
+    };
+    const readySuggestion = {
+      ...stageSuggestion,
+      move_suggested: true,
+      suggested_stage: "STITCH_BONDING",
+      checks: stageSuggestion.checks.map((check) =>
+        check.test_type === "GLUE_WEIGHT" ? { ...check, status: "passed" as const } : check,
+      ),
+      blocking: [],
+    };
+    const confirmedPreview = previewPayload();
+    const confirmedGlueRow = confirmedPreview.worksheet.groups
+      .flatMap((group) => group.rows)
+      .find((row) => row.test_type === "GLUE_WEIGHT");
+    if (confirmedGlueRow === undefined) throw new Error("GLUE_WEIGHT fixture row missing");
+    // A freshly confirmed local upload is valid stage evidence before the
+    // next mirror sync, but it is not yet a mirrored `latest` run.
+    confirmedGlueRow.status = "passed";
+
+    vi.mocked(postIngestFile).mockImplementation(async (body: IngestFileCreate) => {
+      pipeline.push(`ingest:${body.filename}`);
+      return { ...ingestFile, filename: body.filename, test_type: "GLUE_WEIGHT" };
+    });
+    vi.mocked(getIngestPreview).mockImplementation(async (id: number) => {
+      pipeline.push(`dry-run:${id}`);
+      return {
+        ...cleanDryRun,
+        test_type: "GLUE_WEIGHT",
+        n_properties: 0,
+        results: [{ name: "GW_GLUE_H1", kind: "scalar", value: "0.245" }],
+      };
+    });
+    vi.mocked(postIngestOutboxProposal).mockImplementation(async (id: number) => {
+      pipeline.push(`propose:${id}`);
+      draftCreated = true;
+      return glueDraft;
+    });
+    vi.mocked(getComponentPreview).mockImplementation(async () => {
+      if (!draftCreated) return previewPayload();
+      if (workerStatus === "confirmed") return confirmedPreview;
+      return previewPayload({
+        stagedByRow: {
+          GLUE_WEIGHT: [{ outbox_action_id: glueDraft.id, status: workerStatus }],
+        },
+        stagedActions: [
+          {
+            ...stagedActionMetadata,
+            status: workerStatus,
+            summary: "Upload GLUE_WEIGHT",
+            test_type: "GLUE_WEIGHT",
+          },
+        ],
+      });
+    });
+    vi.mocked(getComponentStaged).mockImplementation(async () =>
+      !draftCreated || workerStatus === "confirmed"
+        ? []
+        : [{ ...glueDraft, status: workerStatus }],
+    );
+    vi.mocked(getStageSuggestion).mockImplementation(async () =>
+      workerStatus === "confirmed" ? readySuggestion : stageSuggestion,
+    );
+    vi.mocked(postOutboxTransition).mockImplementation(async (id, body) => {
+      workerStatus = body.to;
+      return { ...glueDraft, id, status: body.to };
+    });
+    vi.mocked(getOutboxAction).mockImplementation(async () => {
+      statusPolls += 1;
+      if (statusPolls === 1) {
+        workerStatus = "failed";
+        return {
+          ...glueDraft,
+          status: "failed",
+          error: "PDB unavailable: temporary test outage",
+        };
+      }
+      if (statusPolls === 2) {
+        workerStatus = "submitted";
+        return { ...glueDraft, status: "submitted", attempts: 2 };
+      }
+      workerStatus = "confirmed";
+      return {
+        ...glueDraft,
+        status: "confirmed",
+        external_ref: "PDB-RUN-GLUE-1",
+      };
+    });
+    vi.mocked(postOutboxAction).mockImplementation(async (body) => ({
+      ...glueDraft,
+      id: 93,
+      kind: body.kind,
+      payload: body.payload,
+      status: "draft",
+    }));
+
+    await openModulePage();
+    await user.click(
+      screen.getByRole("button", { name: t.components.recordTestFor("GLUE_WEIGHT") }),
+    );
+    fireEvent.change(await screen.findByLabelText(/Weight of glue under hybrid 1/u), {
+      target: { value: "0.245" },
+    });
+    fireEvent.change(screen.getByLabelText(/Run number/u), { target: { value: "4" } });
+    fireEvent.change(screen.getByLabelText(/Measurement date/u), {
+      target: { value: "2026-08-26T10:00" },
+    });
+    await user.click(screen.getByRole("button", { name: t.worksheet.testForm.submit }));
+
+    await waitFor(() => expect(postIngestOutboxProposal).toHaveBeenCalledTimes(1));
+    expect(pipeline).toEqual([
+      `ingest:${t.worksheet.manualFilename("GLUE_WEIGHT")}`,
+      `dry-run:${ingestFile.id}`,
+      `propose:${ingestFile.id}`,
+    ]);
+    expect(postIngestFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filename: "GLUE_WEIGHT-manual.json",
+        component_sn: MODULE_SN,
+        test_type: "GLUE_WEIGHT",
+        parser: "manual-entry",
+        payload: expect.objectContaining({
+          component: MODULE_SN,
+          testType: "GLUE_WEIGHT",
+          results: { GW_GLUE_H1: 0.245 },
+        }),
+      }),
+    );
+
+    // A draft is a preview only: it must not unlock the real stage gate.
+    expect(screen.queryByRole("button", {
+      name: t.components.stageProposeMove("Stitch Bonding"),
+    })).not.toBeInTheDocument();
+    expect(await screen.findByText(t.components.stageBlocked)).toBeInTheDocument();
+
+    await user.click(await screen.findByRole("button", {
+      name: t.components.previewStaged(1),
+    }));
+    await user.click(screen.getByRole("button", { name: t.components.previewPush }));
+    await waitFor(() => expect(postOutboxTransition).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(postOutboxTransition).mock.calls.map(([, body]) => body.to)).toEqual([
+      "validated",
+      "approved",
+      "submitted",
+    ]);
+
+    const proposeMove = await screen.findByRole(
+      "button",
+      { name: t.components.stageProposeMove("Stitch Bonding") },
+      { timeout: 9_000 },
+    );
+    // `failed` is deliberately non-terminal: the worker retries it through
+    // `submitted`, and the open detail page must keep watching to confirmation.
+    expect(getOutboxAction).toHaveBeenCalledTimes(3);
+    expect(within(worksheetRow("GLUE_WEIGHT")).getByText(t.worksheet.statusPassed))
+      .toBeInTheDocument();
+    expect(within(worksheet()).queryByText(t.worksheet.stagedUpload(glueDraft.id)))
+      .not.toBeInTheDocument();
+
+    await user.click(proposeMove);
+    await waitFor(() => expect(postOutboxAction).toHaveBeenCalledWith({
+      institute_code: INSTITUTE_CODE,
+      kind: "stage_move",
+      payload: {
+        sn: MODULE_SN,
+        from_stage: "GLUED",
+        to_stage: "STITCH_BONDING",
+      },
+      created_by: operatorMe.email,
+    }));
+  }, 15_000);
 });
 
-// ---- Finding: dict-valued results in the expanded run detail ----------------
+// ---- Dict-valued results in the expanded run detail -------------------------
 
-describe("expanded run detail for a dict-valued (map) result — known gap", () => {
+describe("expanded run detail for a dict-valued (map) result", () => {
   /**
-   * FINDING (not fixed here: `TestResults.tsx` is owned by another agent).
-   *
-   * `TestResults.RunScalars` treats every non-numeric-array result as a scalar
-   * and formats it with `formatScalar`, which falls through to `String(value)`
-   * for a dict. A real MODULE_METROLOGY run — whose per-position results are
-   * dicts, see `app/preview.py::_worksheet_latest_run` and
-   * `backend/tests/test_preview_worksheet.py::
-   * test_dict_valued_results_are_summarised_as_a_map_not_a_scalar` — therefore
-   * renders as the literal text "[object Object]" once the row is expanded.
-   * The compact worksheet row is correct ("⌁ 3 entries"); only the expanded
-   * detail loses the data.
-   *
-   * This test pins the expected behaviour: the operator must see the measured
-   * per-position values (or at least an honest summary), never "[object Object]".
+   * A real MODULE_METROLOGY result is a per-position map. The expanded detail
+   * keeps its complete position/value table and adds a generated plot only
+   * because every value in this fixture is finite and numeric.
    */
-  it("shows the per-position values instead of [object Object]", async () => {
+  it("shows every position and the generated categorical plot", async () => {
     const user = userEvent.setup();
     await openModulePage();
 
@@ -537,9 +988,15 @@ describe("expanded run detail for a dict-valued (map) result — known gap", () 
     );
 
     await screen.findByText("Hybrid glue thickness [um]");
-    // Verified 2026-08-26 by running this block unskipped: it currently finds
-    // TWO "[object Object]" nodes (the filled map and the empty one).
     expect(screen.queryAllByText("[object Object]")).toEqual([]);
-    expect(screen.getByText(/ABC_R5H1_0/u)).toBeInTheDocument();
+    expect(screen.getAllByText(/ABC_R5H1_0/u).length).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("img", {
+        name: t.testResults.categoryPlotAria(
+          "Hybrid glue thickness [um]",
+          Object.keys(METROLOGY_THICKNESS).length,
+        ),
+      }),
+    ).toBeInTheDocument();
   });
 });

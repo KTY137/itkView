@@ -16,11 +16,14 @@ import type {
 import { makeDemoProductionStats, makeDemoStatsDimensions } from "../demoData";
 import { formatCount, t } from "../i18n";
 import {
+  collectiveCurveCandidates,
   compactNumber,
   curveGeometry,
   defaultXResult,
   histogramBins,
+  pairedCurves,
 } from "../measurements";
+import type { CollectiveCurveFamily } from "../measurements";
 import StageLegend from "../StageLegend";
 import { roleLabel, stageChipClass, stageLabel } from "../ui";
 
@@ -228,11 +231,170 @@ export default function StatisticsScreen() {
   );
 }
 
-/** Mirrored measurement aggregation: every run of one result code in a single
- * chart. Which test types and result codes exist is discovered from the data
- * (hard rule #4) — nothing here knows what an "IV" test is called. */
+/** Measurement dimensions are loaded once for the explicit IV/CV panels and
+ * the generic explorer. Every dataset and result code still comes from the
+ * local mirror; the screen carries no institute-specific test map. */
 function MeasurementsSection() {
   const [dims, setDims] = useState<MeasurementDimensions | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    getMeasurementDimensions(ctrl.signal)
+      .then((data) => {
+        setDims(data);
+        setError(null);
+      })
+      .catch((err: unknown) => {
+        if (ctrl.signal.aborted) return;
+        setDims({ test_types: [] });
+        setError(errorMessage(err));
+      });
+    return () => ctrl.abort();
+  }, []);
+
+  return (
+    <>
+      <section aria-labelledby="collective-curves-title">
+        <h2 className="section-title" id="collective-curves-title">
+          {t.stats.collectiveCurvesTitle}
+        </h2>
+        <p className="state-note">{t.stats.collectiveCurvesSubtitle}</p>
+        {error !== null && (
+          <p className="sr-only" role="alert">
+            {`${t.stats.measurementLoadError}: ${error}`}
+          </p>
+        )}
+        <div className="charts">
+          <CollectiveCurveCard family="iv" dimensions={dims} dimensionsError={error} />
+          <CollectiveCurveCard family="cv" dimensions={dims} dimensionsError={error} />
+        </div>
+      </section>
+      {dims !== null && error === null && <MeasurementExplorer dimensions={dims} />}
+    </>
+  );
+}
+
+function CollectiveCurveCard({
+  family,
+  dimensions,
+  dimensionsError,
+}: {
+  family: CollectiveCurveFamily;
+  dimensions: MeasurementDimensions | null;
+  dimensionsError: string | null;
+}) {
+  const candidates = useMemo(
+    () => (dimensions === null ? [] : collectiveCurveCandidates(dimensions, family)),
+    [dimensions, family],
+  );
+  const [selectedKey, setSelectedKey] = useState("");
+  const selected =
+    candidates.find((candidate) => candidate.testType === selectedKey) ?? candidates[0];
+  const [series, setSeries] = useState<MeasurementSeries | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (selected === undefined) {
+      setSeries(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+    const ctrl = new AbortController();
+    setSeries(null);
+    setError(null);
+    setLoading(true);
+    getMeasurementSeries(
+      {
+        test_type: selected.testType,
+        result: selected.yResult.code,
+        x_result: selected.xResult.code,
+      },
+      ctrl.signal,
+    )
+      .then((data) => {
+        setSeries(data);
+        setLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (ctrl.signal.aborted) return;
+        setError(errorMessage(err));
+        setLoading(false);
+      });
+    return () => ctrl.abort();
+  }, [selected?.testType, selected?.xResult.code, selected?.yResult.code]);
+
+  const title = family === "iv" ? t.stats.collectiveIvTitle : t.stats.collectiveCvTitle;
+  const subtitle =
+    family === "iv" ? t.stats.collectiveIvSubtitle : t.stats.collectiveCvSubtitle;
+  const empty = family === "iv" ? t.stats.collectiveIvEmpty : t.stats.collectiveCvEmpty;
+  const paired = useMemo(() => pairedCurves(series?.curves ?? []), [series]);
+  const excluded = (series?.curves.length ?? 0) - paired.length;
+  const returnedRunCount = series?.curves.length ?? 0;
+  // Keep the collective cap notice outside CurveOverlay so it remains visible
+  // even when every returned run is excluded before a plot can render.
+  const pairedSeries = series === null ? null : { ...series, curves: paired, truncated: false };
+
+  return (
+    <section className="chart-card">
+      <h2>{title}</h2>
+      <p className="state-note">{subtitle}</p>
+      {dimensionsError !== null ? (
+        <p className="state-note">
+          {`${t.stats.measurementLoadError}: ${dimensionsError}`}
+        </p>
+      ) : dimensions === null ? (
+        <p className="state-note" role="status">{t.common.loading}</p>
+      ) : selected === undefined ? (
+        <p className="state-note">{empty}</p>
+      ) : (
+        <>
+          <div className="toolbar stats-filters">
+            <label className="field">
+              <span className="field-label">{t.stats.collectiveDatasetLabel}</span>
+              <select
+                className="select-input"
+                value={selected.testType}
+                onChange={(event) => setSelectedKey(event.target.value)}
+              >
+                {candidates.map((candidate) => (
+                  <option key={candidate.testType} value={candidate.testType}>
+                    {candidate.testType}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <p className="state-note">
+            {t.stats.collectivePairing(selected.yResult.code, selected.xResult.code)}
+          </p>
+          {error !== null ? (
+            <p className="state-note" role="alert">
+              {`${t.stats.measurementLoadError}: ${error}`}
+            </p>
+          ) : loading || pairedSeries === null ? (
+            <p className="state-note" role="status">{t.common.loading}</p>
+          ) : pairedSeries.kind === "array" && paired.length > 0 ? (
+            <CurveOverlay series={pairedSeries} />
+          ) : (
+            <p className="state-note">{t.stats.collectiveNoPairedRuns}</p>
+          )}
+          {excluded > 0 && (
+            <p className="state-note">{t.stats.collectiveExcluded(excluded)}</p>
+          )}
+          {series?.truncated && (
+            <p className="state-note">{t.stats.collectiveTruncated(returnedRunCount)}</p>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+/** Generic measurement explorer, retained beside the explicit shortcuts. */
+function MeasurementExplorer({ dimensions: dims }: { dimensions: MeasurementDimensions }) {
   const [testType, setTestType] = useState<string>("");
   const [resultCode, setResultCode] = useState<string>("");
   const [xCode, setXCode] = useState<string>("");
@@ -241,26 +403,27 @@ function MeasurementsSection() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    const ctrl = new AbortController();
-    getMeasurementDimensions(ctrl.signal)
-      .then((data) => {
-        setDims(data);
-        const first = data.test_types[0];
-        if (first !== undefined) {
-          setTestType((current) => (current === "" ? first.test_type : current));
-        }
-      })
-      .catch(() => setDims({ test_types: [] }));
-    return () => ctrl.abort();
-  }, []);
+    const first = dims.test_types[0];
+    if (first !== undefined) {
+      setTestType((current) =>
+        dims.test_types.some((entry) => entry.test_type === current)
+          ? current
+          : first.test_type,
+      );
+    }
+  }, [dims]);
 
   const results = useMemo(
-    () => dims?.test_types.find((entry) => entry.test_type === testType)?.results ?? [],
+    () => dims.test_types.find((entry) => entry.test_type === testType)?.results ?? [],
     [dims, testType],
   );
 
   useEffect(() => {
-    if (results.length === 0) return;
+    if (results.length === 0) {
+      setResultCode("");
+      setSeries(null);
+      return;
+    }
     setResultCode((current) =>
       results.some((entry) => entry.code === current) ? current : results[0].code,
     );
@@ -275,6 +438,7 @@ function MeasurementsSection() {
   useEffect(() => {
     if (testType === "" || resultCode === "") return;
     const ctrl = new AbortController();
+    setSeries(null);
     setLoading(true);
     setError(null);
     getMeasurementSeries(
@@ -287,68 +451,74 @@ function MeasurementsSection() {
       })
       .catch((err: unknown) => {
         if (ctrl.signal.aborted) return;
-        if (err instanceof ApiError && err.isNetwork) setSeries(null);
-        else setError(errorMessage(err));
+        setError(errorMessage(err));
         setLoading(false);
       });
     return () => ctrl.abort();
   }, [testType, resultCode, xCode]);
 
-  if (dims === null || dims.test_types.length === 0) return null;
   const arrayCodes = results.filter((entry) => entry.kind === "array");
 
   return (
     <section className="chart-card">
       <h2>{t.stats.measurementsTitle}</h2>
       <p className="state-note">{t.stats.measurementsSubtitle}</p>
-      <div className="toolbar stats-filters">
-        <label className="field">
-          <span className="field-label">{t.stats.measurementTestLabel}</span>
-          <select className="select-input" value={testType} onChange={(e) => setTestType(e.target.value)}>
-            {dims.test_types.map((entry) => (
-              <option key={entry.test_type} value={entry.test_type}>
-                {entry.test_type}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          <span className="field-label">{t.stats.measurementResultLabel}</span>
-          <select className="select-input" value={resultCode} onChange={(e) => setResultCode(e.target.value)}>
-            {results.map((entry) => (
-              <option key={entry.code} value={entry.code}>
-                {entry.name ?? entry.code}
-              </option>
-            ))}
-          </select>
-        </label>
-        {series?.kind === "array" && arrayCodes.length > 1 && (
-          <label className="field">
-            <span className="field-label">{t.stats.measurementXLabel}</span>
-            <select className="select-input" value={xCode} onChange={(e) => setXCode(e.target.value)}>
-              <option value="">{t.stats.measurementXIndex}</option>
-              {arrayCodes
-                .filter((entry) => entry.code !== resultCode)
-                .map((entry) => (
+      {dims.test_types.length === 0 ? (
+        <p className="state-note">{t.stats.measurementEmpty}</p>
+      ) : (
+        <>
+          <div className="toolbar stats-filters">
+            <label className="field">
+              <span className="field-label">{t.stats.measurementTestLabel}</span>
+              <select className="select-input" value={testType} onChange={(e) => setTestType(e.target.value)}>
+                {dims.test_types.map((entry) => (
+                  <option key={entry.test_type} value={entry.test_type}>
+                    {entry.test_type}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span className="field-label">{t.stats.measurementResultLabel}</span>
+              <select className="select-input" value={resultCode} onChange={(e) => setResultCode(e.target.value)}>
+                {results.map((entry) => (
                   <option key={entry.code} value={entry.code}>
                     {entry.name ?? entry.code}
                   </option>
                 ))}
-            </select>
-          </label>
-        )}
-      </div>
+              </select>
+            </label>
+            {series?.kind === "array" && arrayCodes.length > 1 && (
+              <label className="field">
+                <span className="field-label">{t.stats.measurementXLabel}</span>
+                <select className="select-input" value={xCode} onChange={(e) => setXCode(e.target.value)}>
+                  <option value="">{t.stats.measurementXIndex}</option>
+                  {arrayCodes
+                    .filter((entry) => entry.code !== resultCode)
+                    .map((entry) => (
+                      <option key={entry.code} value={entry.code}>
+                        {entry.name ?? entry.code}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            )}
+          </div>
 
-      {error !== null ? (
-        <p className="state-note">{`${t.stats.measurementLoadError}: ${error}`}</p>
-      ) : loading || series === null ? (
-        <p className="state-note">{t.common.loading}</p>
-      ) : series.kind === "array" && series.curves.length > 0 ? (
-        <CurveOverlay series={series} />
-      ) : series.kind === "scalar" && series.values.length > 0 ? (
-        <ScalarDistribution series={series} />
-      ) : (
-        <p className="state-note">{t.stats.measurementEmpty}</p>
+          {error !== null ? (
+            <p className="state-note" role="alert">
+              {`${t.stats.measurementLoadError}: ${error}`}
+            </p>
+          ) : loading || series === null ? (
+            <p className="state-note" role="status">{t.common.loading}</p>
+          ) : series.kind === "array" && series.curves.length > 0 ? (
+            <CurveOverlay series={series} />
+          ) : series.kind === "scalar" && series.values.length > 0 ? (
+            <ScalarDistribution series={series} />
+          ) : (
+            <p className="state-note">{t.stats.measurementEmpty}</p>
+          )}
+        </>
       )}
     </section>
   );
@@ -373,16 +543,16 @@ function CurveOverlay({ series }: { series: MeasurementSeries }) {
 
   return (
     <>
-      <div className="curve-legend" aria-hidden="true">
+      <div className="curve-legend">
         <span className="curve-key">
-          <svg width="18" height="6">
+          <svg width="18" height="6" aria-hidden="true" focusable="false">
             <line x1="0" y1="3" x2="18" y2="3" className="curve-line" />
           </svg>
           {t.stats.measurementPassed(passed)}
         </span>
         {failed > 0 && (
           <span className="curve-key">
-            <svg width="18" height="6">
+            <svg width="18" height="6" aria-hidden="true" focusable="false">
               <line x1="0" y1="3" x2="18" y2="3" className="curve-line failed" />
             </svg>
             {t.stats.measurementFailed(failed)}
@@ -395,7 +565,7 @@ function CurveOverlay({ series }: { series: MeasurementSeries }) {
           viewBox={`-56 -8 ${CURVE_W + 72} ${CURVE_H + 40}`}
           className="curve-chart"
           role="img"
-          aria-label={`${yLabel} vs ${xLabel} — ${t.stats.measurementCurves(series.curves.length)}`}
+          aria-label={`${yLabel} vs ${xLabel} — ${t.stats.measurementCurves(series.curves.length)}; ${t.stats.measurementPassed(passed)}; ${t.stats.measurementFailed(failed)}`}
         >
           <g className="curve-grid">
             {[0.25, 0.5, 0.75].map((fraction) => (

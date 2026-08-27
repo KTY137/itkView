@@ -980,6 +980,8 @@ export function getComponentPreview(
 }
 
 export type TestRunAttachment = {
+  /** Storage namespace; attachment codes are unique only within one source. */
+  source: string;
   code: string;
   test_type: string;
   test_run_ref: string | null;
@@ -1008,7 +1010,12 @@ export type TestRunDetail = {
   attachments: TestRunAttachment[];
 };
 
-/** Serial number -> attachment code, for one locally stored image per component.
+export type ComponentThumbnail = {
+  source: string;
+  code: string;
+};
+
+/** Serial number -> source-qualified attachment, one stored image per component.
  *
  * One request for a whole list: a per-row lookup would open a connection per
  * module only to learn that most have no picture. The server's `limit`
@@ -1017,11 +1024,13 @@ export type TestRunDetail = {
 export function getComponentThumbnails(
   instituteCode?: string,
   signal?: AbortSignal,
-): Promise<Record<string, string>> {
+): Promise<Record<string, ComponentThumbnail>> {
   const query = instituteCode
     ? `?institute_code=${encodeURIComponent(instituteCode)}`
     : "";
-  return request<Record<string, string>>(`/api/components/thumbnails${query}`, { signal });
+  return request<Record<string, ComponentThumbnail>>(`/api/components/thumbnails${query}`, {
+    signal,
+  });
 }
 
 /** Mirrored test runs with their measured values. Local only — never hits the PDB. */
@@ -1062,8 +1071,8 @@ export function getComponentAttachments(
 }
 
 /** URL of one locally mirrored attachment. 404 until it has been synced. */
-export function componentAttachmentUrl(sn: string, code: string): string {
-  return `/api/components/${encodeURIComponent(sn)}/attachments/${encodeURIComponent(code)}`;
+export function componentAttachmentUrl(sn: string, code: string, source: string): string {
+  return `/api/components/${encodeURIComponent(sn)}/attachments/${encodeURIComponent(code)}?source=${encodeURIComponent(source)}`;
 }
 
 /** Open (not yet confirmed/cancelled) outbox actions targeting this component. */
@@ -1441,6 +1450,13 @@ export function postAssemblyAction(body: AssemblyDraft): Promise<AssemblyStageRe
 
 export function getOutbox(status?: string, signal?: AbortSignal): Promise<OutboxAction[]> {
   return request<OutboxAction[]>(`/api/outbox${queryString({ status })}`, { signal });
+}
+
+/** Read one action including terminal worker states such as `confirmed`.
+ * Component-scoped staged endpoints intentionally omit terminal actions, so
+ * this is the authoritative status record for bounded confirmation polling. */
+export function getOutboxAction(id: number, signal?: AbortSignal): Promise<OutboxAction> {
+  return request<OutboxAction>(`/api/outbox/${id}`, { signal });
 }
 
 export function getAudit(limit = 100, signal?: AbortSignal): Promise<AuditEvent[]> {

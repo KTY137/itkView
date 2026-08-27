@@ -366,6 +366,26 @@ const en = {
     noneReached: (stage: string) => `No component has reached ${stage} yet.`,
     noDwell: "Not enough stage transitions to measure dwell time.",
     noRework: "No rework recorded.",
+    collectiveCurvesTitle: "Collective IV and CV curves",
+    collectiveCurvesSubtitle:
+      "Each panel overlays one compatible mirrored PDB schema. Schemas stay separate because units and sweep protocols can differ.",
+    collectiveIvTitle: "Collective IV curves",
+    collectiveIvSubtitle: "Current against voltage, one line per mirrored test run.",
+    collectiveCvTitle: "Collective CV curves",
+    collectiveCvSubtitle: "Capacitance against voltage, one line per mirrored test run.",
+    collectiveDatasetLabel: "PDB test schema",
+    collectiveIvEmpty:
+      "No mirrored test schema contains paired current and voltage arrays yet.",
+    collectiveCvEmpty:
+      "No mirrored test schema contains paired capacitance and voltage arrays yet.",
+    collectivePairing: (y: string, x: string) =>
+      `${y} vs ${x} · only same-length array pairs are drawn.`,
+    collectiveNoPairedRuns:
+      "The schema exists, but no mirrored run contains a same-length pair for these axes.",
+    collectiveExcluded: (n: number) =>
+      `${n} ${n === 1 ? "run was" : "runs were"} excluded because ${n === 1 ? "its" : "their"} axis arrays could not be paired.`,
+    collectiveTruncated: (n: number) =>
+      `The endpoint checked the newest ${n} ${n === 1 ? "run" : "runs"}; older runs were not returned.`,
     measurementsTitle: "Measurements",
     measurementsSubtitle:
       "Mirrored test-run measurements across the institute — every run in one chart.",
@@ -375,7 +395,7 @@ const en = {
     measurementXIndex: "Sample index",
     measurementLoadError: "Could not load measurements",
     measurementEmpty: "No mirrored measurements for this selection yet. Run a test evidence sync first.",
-    measurementCurves: (n: number) => `${n} runs overlaid`,
+    measurementCurves: (n: number) => `${n} ${n === 1 ? "run" : "runs"} overlaid`,
     measurementPassed: (n: number) => `passed (${n})`,
     measurementFailed: (n: number) => `failed (${n})`,
     measurementTruncated: (n: number) => `Showing the newest ${n} runs — older runs are not drawn.`,
@@ -563,6 +583,9 @@ const en = {
     pinnedTestType: (testType: string) => `Pinned test: ${testType}`,
     pinnedSchemaMissing: (testType: string) =>
       `No mirrored schema is available for ${testType}. Sync schemas to continue.`,
+    manualEntryBlocked: (testType: string, fields: string) =>
+      `${testType} cannot be entered safely with these controls. Upload its JSON result file to preserve these fields: ${fields}.`,
+    useFileUpload: "Use JSON file upload",
     syncSchemas: "Sync schemas from PDB",
     syncingSchemas: "Syncing schemas...",
     schemasLoading: "Loading test-type schemas...",
@@ -631,7 +654,7 @@ const en = {
     untitled: "image",
     close: "Close",
     notStored: "Not downloaded yet",
-    storedLocally: "Stored locally",
+    storedLocally: "Stored locally · preview unavailable",
   },
   testResults: {
     title: "Test results",
@@ -649,6 +672,15 @@ const en = {
     valueMissing: "not measured",
     conditions: "Conditions",
     curvePoints: (count: number) => `${count} points`,
+    categoryPlotAria: (result: string, count: number) =>
+      `Generated categorical plot for ${result}, ${count} points`,
+    categoryPlotCaption: (result: string, count: number) =>
+      `${result} / position or key · ${count} points`,
+    pairPlotAria: (result: string, count: number) =>
+      `Generated numeric-pair scatter plot for ${result}, ${count} points`,
+    pairPlotCaption: (result: string, count: number) =>
+      `${result} · second value / first value · ${count} points`,
+    numericPair: (first: string, second: string) => `[${first}, ${second}]`,
     voltage: "Voltage [V]",
     current: "Current [nA]",
   },
@@ -702,6 +734,9 @@ const en = {
       `${fields} from the previous run could not be reproduced in this form and will not be part of this staged upload.`,
     prefillBlockedRequired: (fields: string) =>
       `${fields} cannot be reproduced in this form and are required by the schema, so recording here is disabled to avoid silently dropping them. Use the file-drop upload above instead.`,
+    manualEntryBlocked: (testType: string, fields: string) =>
+      `${testType} cannot be entered safely with these controls. Upload its JSON result file to preserve these fields: ${fields}.`,
+    useFileUpload: "Use JSON file upload",
     editIntentMissing: (testType: string) => `No worksheet row for ${testType} yet.`,
     // Child evidence: most of a module's history is measured on its sensor,
     // hybrid and powerboard (and for an R5 ring module on its half-modules),

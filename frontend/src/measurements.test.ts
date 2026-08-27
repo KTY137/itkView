@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import type { MeasurementCurve, MeasurementValue } from "./api";
 import {
+  collectiveCurveCandidates,
   compactNumber,
   curveGeometry,
   defaultXResult,
   histogramBins,
+  pairedCurves,
 } from "./measurements";
 
 function curve(y: number[], x: number[] | null = null): MeasurementCurve {
@@ -101,5 +103,107 @@ describe("defaultXResult", () => {
 
   it("returns null when no other array exists", () => {
     expect(defaultXResult([{ code: "BOW", kind: "scalar" }], "BOW")).toBeNull();
+  });
+});
+
+describe("collectiveCurveCandidates", () => {
+  const dimensions = {
+    test_types: [
+      {
+        test_type: "SENSOR_IV_A",
+        results: [
+          { code: "SHUNT_VOLTAGE", name: "Shunt voltage", kind: "array" as const, runs: 12 },
+          { code: "VOLTAGE", name: "Voltage [V]", kind: "array" as const, runs: 12 },
+          { code: "CURRENT_RMS", name: "Current RMS", kind: "array" as const, runs: 12 },
+          { code: "CURRENT", name: "Current [nA]", kind: "array" as const, runs: 11 },
+        ],
+      },
+      {
+        test_type: "SENSOR_CV_B",
+        results: [
+          { code: "BIAS_VOLTAGE", name: "Voltage", kind: "array" as const, runs: 20 },
+          { code: "CAP", name: "Capacitance", kind: "array" as const, runs: 18 },
+        ],
+      },
+      {
+        test_type: "STRIP_SCAN",
+        results: [
+          { code: "CURRENT", name: "Current", kind: "array" as const, runs: 99 },
+          { code: "PROBE", name: "Probe index", kind: "array" as const, runs: 99 },
+        ],
+      },
+    ],
+  };
+
+  it("finds current/voltage and capacitance/voltage pairs without exact test-type codes", () => {
+    const iv = collectiveCurveCandidates(dimensions, "iv");
+    expect(iv).toHaveLength(1);
+    expect(iv[0]).toMatchObject({
+      testType: "SENSOR_IV_A",
+      xResult: { code: "VOLTAGE" },
+      yResult: { code: "CURRENT" },
+      runs: 11,
+    });
+
+    const cv = collectiveCurveCandidates(dimensions, "cv");
+    expect(cv).toHaveLength(1);
+    expect(cv[0]).toMatchObject({
+      testType: "SENSOR_CV_B",
+      xResult: { code: "BIAS_VOLTAGE" },
+      yResult: { code: "CAP" },
+      runs: 18,
+    });
+  });
+
+  it("does not mistake an unpaired strip-current array for an IV curve", () => {
+    expect(
+      collectiveCurveCandidates(
+        { test_types: [dimensions.test_types[2]] },
+        "iv",
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not label unrelated current/voltage samples as an IV sweep", () => {
+    const unrelated = {
+      test_types: [
+        {
+          test_type: "CURRENT_STABILITY",
+          results: [
+            { code: "CURRENT", name: "Current", kind: "array" as const, runs: 10 },
+            { code: "SHUNT_VOLTAGE", name: "Shunt voltage", kind: "array" as const, runs: 10 },
+          ],
+        },
+      ],
+    };
+    expect(collectiveCurveCandidates(unrelated, "iv")).toEqual([]);
+  });
+
+  it("accepts a legacy generic schema when both axes carry the IV marker", () => {
+    const legacy = {
+      test_types: [
+        {
+          test_type: "MANUFACTURING",
+          results: [
+            { code: "IV_CURRENT", name: "Leakage current", kind: "array" as const, runs: 7 },
+            { code: "IV_VOLTAGE", name: "Bias voltage", kind: "array" as const, runs: 7 },
+          ],
+        },
+      ],
+    };
+    expect(collectiveCurveCandidates(legacy, "iv")[0]).toMatchObject({
+      testType: "MANUFACTURING",
+      xResult: { code: "IV_VOLTAGE" },
+      yResult: { code: "IV_CURRENT" },
+    });
+  });
+});
+
+describe("pairedCurves", () => {
+  it("keeps only same-length explicit x/y pairs", () => {
+    const paired = curve([1, 2], [0, 10]);
+    const indexOnly = curve([1, 2]);
+    const mismatch = curve([1, 2], [0]);
+    expect(pairedCurves([paired, indexOnly, mismatch])).toEqual([paired]);
   });
 });

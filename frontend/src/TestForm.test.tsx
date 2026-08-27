@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { TestSchemaDefinition, TestTypeSchema } from "./api";
-import TestForm from "./TestForm";
+import TestForm, { manualEntryCapability } from "./TestForm";
 import type { TestFormLabels } from "./TestForm";
 import {
   glueWeightMirrorDefinition,
@@ -64,6 +64,87 @@ const schema: TestTypeSchema = {
     ],
   },
 };
+
+describe("manualEntryCapability", () => {
+  const scalarResult = { code: "VALUE", name: "Value", dataType: "float" };
+
+  it("blocks required object and testRun fields even when a scalar result is enterable", () => {
+    const capability = manualEntryCapability({
+      properties: [
+        { code: "DCS", name: "DCS settings", dataType: "object", required: true },
+        { code: "SOURCE_RUN", name: "Source run", dataType: "testRun", required: true },
+      ],
+      parameters: [scalarResult],
+    });
+
+    expect(capability.canEnter).toBe(false);
+    expect(capability.blockers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "DCS", reason: "required-unsupported-type" }),
+        expect.objectContaining({ code: "SOURCE_RUN", reason: "required-unsupported-type" }),
+      ]),
+    );
+  });
+
+  it.each([undefined, null, 0, 1])(
+    "allows a primitive array with arrayDimensions %s",
+    (arrayDimensions) => {
+      const capability = manualEntryCapability({
+        parameters: [
+          {
+            code: "CURRENT",
+            name: "Current",
+            dataType: "float",
+            valueType: "array",
+            ...(arrayDimensions === undefined ? {} : { arrayDimensions }),
+          },
+        ],
+      });
+
+      expect(capability).toEqual({ canEnter: true, blockers: [] });
+    },
+  );
+
+  it.each([2, 3, "2"])(
+    "keeps a primitive array with unsafe arrayDimensions %s file-only",
+    (arrayDimensions) => {
+      const capability = manualEntryCapability({
+        parameters: [
+          scalarResult,
+          {
+            code: "CURRENT",
+            name: "Current",
+            dataType: "float",
+            valueType: "array",
+            arrayDimensions,
+          },
+        ],
+      });
+
+      expect(capability.canEnter).toBe(false);
+      expect(capability.blockers).toContainEqual(
+        expect.objectContaining({ code: "CURRENT", reason: "unsupported-array-shape" }),
+      );
+    },
+  );
+
+  it("allows optional unsupported fields when another measurement is enterable", () => {
+    expect(
+      manualEntryCapability({
+        properties: [{ code: "OPTIONAL_MAP", dataType: "object" }],
+        parameters: [scalarResult],
+      }),
+    ).toEqual({ canEnter: true, blockers: [] });
+  });
+
+  it("blocks a schema whose only measurements are unsupported, even when optional", () => {
+    const capability = manualEntryCapability(hybridTestsSummaryMirrorDefinition);
+
+    expect(capability.canEnter).toBe(false);
+    expect(capability.blockers.length).toBeGreaterThan(0);
+    expect(capability.blockers.every((blocker) => blocker.section === "results")).toBe(true);
+  });
+});
 
 describe("TestForm", () => {
   it("submits the schema values as one canonical test-run payload", async () => {
@@ -177,6 +258,8 @@ describe("TestForm", () => {
   it("blocks missing required fields, non-integers, and arrays with internal blank lines", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
     render(
       <TestForm
         component="20USEM00000001"
@@ -193,6 +276,8 @@ describe("TestForm", () => {
     expect(screen.getByText("Count is required.")).toBeInTheDocument();
     expect(screen.getByText("Voltage is required.")).toBeInTheDocument();
     expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByLabelText(/^Run number/)).toHaveFocus();
+    expect(scrollIntoView).toHaveBeenLastCalledWith({ block: "nearest" });
 
     await user.type(screen.getByLabelText(/^Run number/), "5");
     fireEvent.change(screen.getByLabelText(/^Measured at/), {
@@ -206,6 +291,7 @@ describe("TestForm", () => {
     expect(screen.getByText("Count must be an integer.")).toBeInTheDocument();
     expect(screen.getByText("Voltage must be a finite decimal on line 2.")).toBeInTheDocument();
     expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByLabelText(/^Count/)).toHaveFocus();
 
     await user.clear(screen.getByLabelText(/^Count/));
     await user.type(screen.getByLabelText(/^Count/), "9007199254740993");
@@ -268,6 +354,32 @@ describe("TestForm on mirrored PDB definitions", () => {
       properties: { GW_METHOD: "stencil" },
       results: { GW_SENSOR: 10.945 },
     });
+  });
+
+  it("keeps worksheet descriptions accessible without repeating them in the dense layout", async () => {
+    const user = userEvent.setup();
+    const onCancel = vi.fn();
+    const { container } = render(
+      <TestForm
+        component="20USEM00000435"
+        schema={mirroredSchema(glueWeightMirrorDefinition)}
+        labels={labels}
+        onSubmit={vi.fn()}
+        variant="worksheet"
+        cancelLabel="Cancel"
+        onCancel={onCancel}
+      />,
+    );
+
+    expect(container.querySelector("form")).toHaveClass("phase4-form-worksheet");
+    expect(screen.getByLabelText(/^Weight of sensor \[g\]/)).toHaveAttribute(
+      "title",
+      "Weight of bare sensor [g]",
+    );
+    expect(screen.getByText("Weight of bare sensor [g]")).toHaveClass("sr-only");
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onCancel).toHaveBeenCalledOnce();
   });
 
   it("keeps a populated `results` block ahead of `parameters`, each field once", () => {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { NavIntent, ScreenId } from "../App";
 import AddTestResult from "../AddTestResult";
@@ -15,6 +15,7 @@ import {
   getComponentStaged,
   getComponentThumbnails,
   getInstitutes,
+  getOutboxAction,
   getStageSuggestion,
   getTestTypeSchemas,
   postComponentSyncEvidence,
@@ -29,6 +30,7 @@ import type {
   ComponentPreview,
   ComponentPreviewAction,
   ComponentPreviewTest,
+  ComponentThumbnail,
   Institute,
   OutboxAction,
   RequirementCheck,
@@ -62,6 +64,23 @@ import RegisterModuleForm from "./RegisterModuleForm";
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+// `pushToPdb` deliberately stops at `submitted`; the worker owns the actual
+// PDB write. Watch only the tiny action-status record, for a bounded period,
+// then re-read the component surfaces once the worker has answered.
+const OUTBOX_CONFIRMATION_FIRST_POLL_MS = 350;
+const OUTBOX_CONFIRMATION_POLL_MS = 1_000;
+const OUTBOX_FAILURE_POLL_MS = 5_000;
+const OUTBOX_CONFIRMATION_MAX_WATCH_MS = 20 * 60 * 1_000;
+const WORKER_WATCH_STATUSES: ReadonlySet<OutboxAction["status"]> = new Set([
+  "approved",
+  "submitted",
+  "failed",
+]);
+const WORKER_SETTLED_STATUSES: ReadonlySet<OutboxAction["status"]> = new Set([
+  "confirmed",
+  "cancelled",
+]);
 
 /** Client-side sort for the component list. "default" keeps the server order
  * (local name first, then serial number). */
@@ -147,9 +166,9 @@ export default function ComponentsScreen({
   const [newInstitutePrefix, setNewInstitutePrefix] = useState("");
   const [creatingInstitute, setCreatingInstitute] = useState(false);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
-  // Serial number -> attachment code for one locally stored image, fetched
-  // once for the whole list rather than per row.
-  const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
+  // Serial number -> source-qualified attachment for one locally stored image,
+  // fetched once for the whole list rather than per row.
+  const [thumbnails, setThumbnails] = useState<Record<string, ComponentThumbnail>>({});
   // If this screen mounts after a job already finished, its initial list fetch
   // already sees the committed snapshot and needs no second request.
   const reloadedSyncJob = useRef<number | null>(
@@ -689,7 +708,11 @@ export default function ComponentsScreen({
                     {thumbnails[c.sn] !== undefined && (
                       <img
                         className="row-thumb"
-                        src={componentAttachmentUrl(c.sn, thumbnails[c.sn])}
+                        src={componentAttachmentUrl(
+                          c.sn,
+                          thumbnails[c.sn].code,
+                          thumbnails[c.sn].source,
+                        )}
                         alt=""
                         loading="lazy"
                       />
@@ -765,6 +788,7 @@ export function ComponentDetailPanel({
   const [demo, setDemo] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [suggestion, setSuggestion] = useState<StageSuggestion | null>(null);
+  const [suggestionReloadKey, setSuggestionReloadKey] = useState(0);
   const [evidenceSyncing, setEvidenceSyncing] = useState(false);
   const [evidenceNotice, setEvidenceNotice] = useState<string | null>(null);
   const [previewMode, setPreviewMode] = useState<StagedPreviewMode>(() =>
@@ -780,6 +804,15 @@ export function ComponentDetailPanel({
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewTab, setPreviewTab] = useState<"current" | "staged">("current");
   const [previewReloadKey, setPreviewReloadKey] = useState(0);
+  const [confirmationWatch, setConfirmationWatch] = useState<{
+    sn: string;
+    ids: number[];
+  }>({ sn, ids: [] });
+  const confirmationStatuses = useRef<{
+    sn: string;
+    byId: Map<number, OutboxAction["status"]>;
+    deadlineById: Map<number, number>;
+  }>({ sn, byId: new Map(), deadlineById: new Map() });
   const [testSchemas, setTestSchemas] = useState<TestTypeSchema[]>([]);
   const [testSchemasLoading, setTestSchemasLoading] = useState(false);
   const [testSchemasSyncing, setTestSchemasSyncing] = useState(false);
@@ -799,15 +832,45 @@ export function ComponentDetailPanel({
   // handleRecordTest.
   const [worksheetEditIntent, setWorksheetEditIntent] = useState<RecordTestIntent | null>(null);
   const worksheetEditTokenRef = useRef(0);
+  const [fileUploadIntent, setFileUploadIntent] = useState<RecordTestIntent | null>(null);
+  const fileUploadTokenRef = useRef(0);
   const testSchemaSyncRequest = useRef(0);
   const currentTestSchemaComponentType = useRef<string | null>(null);
   const seenEvidenceJob = useRef<number | null>(evidenceJobId);
+  const sequencedSuggestionSn = useRef<string | null>(null);
   const testSchemaComponentType = detail?.component_type ?? null;
   currentTestSchemaComponentType.current = testSchemaComponentType;
   const canWriteComponent =
     canWrite &&
     detail !== null &&
     (user?.institute_code === null || user?.institute_code === detail.institute_code);
+
+  const watchWorkerActions = useCallback((actions: readonly OutboxAction[]) => {
+    if (actions.length === 0) return;
+    if (confirmationStatuses.current.sn !== sn) {
+      confirmationStatuses.current = { sn, byId: new Map(), deadlineById: new Map() };
+    }
+    for (const action of actions) {
+      if (!confirmationStatuses.current.byId.has(action.id)) {
+        confirmationStatuses.current.byId.set(action.id, action.status);
+      }
+      if (!confirmationStatuses.current.deadlineById.has(action.id)) {
+        confirmationStatuses.current.deadlineById.set(
+          action.id,
+          Date.now() + OUTBOX_CONFIRMATION_MAX_WATCH_MS,
+        );
+      }
+    }
+    setConfirmationWatch((current) => {
+      const existing = current.sn === sn ? current.ids : [];
+      const next = [...existing];
+      for (const action of actions) {
+        if (!next.includes(action.id)) next.push(action.id);
+      }
+      if (current.sn === sn && next.length === existing.length) return current;
+      return { sn, ids: next };
+    });
+  }, [sn]);
 
   async function handleSyncEvidence() {
     setEvidenceSyncing(true);
@@ -861,7 +924,7 @@ export function ComponentDetailPanel({
         /* offline / unknown component: section stays hidden */
       });
     return () => ctrl.abort();
-  }, [sn, reloadKey]);
+  }, [sn, reloadKey, suggestionReloadKey]);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -874,6 +937,19 @@ export function ComponentDetailPanel({
       .then(([previewData, staged]) => {
         setPreview(previewData);
         setPreviewOutbox(staged);
+        watchWorkerActions(
+          staged.filter((action) => WORKER_WATCH_STATUSES.has(action.status)),
+        );
+        if (sequencedSuggestionSn.current !== sn) {
+          sequencedSuggestionSn.current = sn;
+          // Close the initial-load race where the first suggestion read
+          // started before a worker confirmation but the staged read already
+          // sees the action gone. Re-read both snapshots once so the worksheet
+          // cannot remain older than the now-current suggestion. Later worker
+          // transitions are observed by the status watcher.
+          setSuggestionReloadKey((key) => key + 1);
+          setPreviewReloadKey((key) => key + 1);
+        }
         setPreviewLoading(false);
       })
       .catch((caught: unknown) => {
@@ -884,7 +960,107 @@ export function ComponentDetailPanel({
         setPreviewLoading(false);
       });
     return () => ctrl.abort();
-  }, [previewReloadKey, sn]);
+  }, [previewReloadKey, sn, watchWorkerActions]);
+
+  const watchedActionIds = confirmationWatch.sn === sn ? confirmationWatch.ids : [];
+  const watchedActionKey = watchedActionIds.join(",");
+  useEffect(() => {
+    if (watchedActionKey === "") return;
+    const actionIds = watchedActionKey.split(",").map(Number);
+    const ctrl = new AbortController();
+    let timer: number | null = null;
+    // Remember the last known worker state so a transition refreshes the page
+    // exactly once, including retryable `failed -> submitted` progress.
+    if (confirmationStatuses.current.sn !== sn) {
+      confirmationStatuses.current = { sn, byId: new Map(), deadlineById: new Map() };
+    }
+    const lastStatuses = confirmationStatuses.current.byId;
+    const deadlines = confirmationStatuses.current.deadlineById;
+    for (const id of actionIds) {
+      if (!lastStatuses.has(id)) lastStatuses.set(id, "submitted");
+      if (!deadlines.has(id)) {
+        deadlines.set(id, Date.now() + OUTBOX_CONFIRMATION_MAX_WATCH_MS);
+      }
+    }
+
+    const removeWatchedIds = (ids: ReadonlySet<number>) => {
+      if (ids.size === 0) return;
+      for (const id of ids) {
+        lastStatuses.delete(id);
+        deadlines.delete(id);
+      }
+      setConfirmationWatch((current) =>
+        current.sn === sn
+          ? { sn, ids: current.ids.filter((id) => !ids.has(id)) }
+          : current,
+      );
+    };
+
+    const schedule = (delay: number, ids: readonly number[]) => {
+      if (ids.length === 0) return;
+      const remaining = Math.min(
+        ...ids.map((id) => (deadlines.get(id) ?? Date.now()) - Date.now()),
+      );
+      timer = window.setTimeout(
+        () => void poll(),
+        Math.max(0, Math.min(delay, remaining)),
+      );
+    };
+
+    const poll = async () => {
+      const now = Date.now();
+      const expiredIds = new Set(
+        actionIds.filter((id) => (deadlines.get(id) ?? now) <= now),
+      );
+      removeWatchedIds(expiredIds);
+      const liveIds = actionIds.filter((id) => !expiredIds.has(id));
+      if (liveIds.length === 0) return;
+      try {
+        const actions = await Promise.all(
+          liveIds.map((id) => getOutboxAction(id, ctrl.signal)),
+        );
+        if (ctrl.signal.aborted) return;
+        let statusChanged = false;
+        for (const action of actions) {
+          if (lastStatuses.get(action.id) !== action.status) statusChanged = true;
+          lastStatuses.set(action.id, action.status);
+        }
+        const settledIds = new Set(
+          actions
+            .filter((action) => WORKER_SETTLED_STATUSES.has(action.status))
+            .map((action) => action.id),
+        );
+        removeWatchedIds(settledIds);
+        if (statusChanged) {
+          // Confirmed uploads only become stage evidence at the worker's
+          // terminal transition. Refresh all three readers together on every
+          // worker status change so failures/retries are honest too; drafts
+          // and submitted actions still never satisfy the gate.
+          setReloadKey((key) => key + 1);
+          setPreviewReloadKey((key) => key + 1);
+        }
+        const remainingIds = liveIds.filter((id) => !settledIds.has(id));
+        if (remainingIds.length > 0) {
+          schedule(
+            actions.some((action) => action.status === "failed")
+              ? OUTBOX_FAILURE_POLL_MS
+              : OUTBOX_CONFIRMATION_POLL_MS,
+            remainingIds,
+          );
+        }
+      } catch {
+        if (!ctrl.signal.aborted) {
+          schedule(OUTBOX_CONFIRMATION_POLL_MS, liveIds);
+        }
+      }
+    };
+
+    schedule(OUTBOX_CONFIRMATION_FIRST_POLL_MS, actionIds);
+    return () => {
+      ctrl.abort();
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [sn, watchedActionKey]);
 
   useEffect(() => {
     setPreviewTab("current");
@@ -1014,6 +1190,11 @@ export function ComponentDetailPanel({
     setPreviewReloadKey((key) => key + 1);
   }
 
+  function refreshComponentReaders() {
+    setReloadKey((key) => key + 1);
+    setPreviewReloadKey((key) => key + 1);
+  }
+
   function handleWorksheetStaged(outboxActionId: number) {
     showToast(t.addTest.stagedToast(outboxActionId));
     setReloadKey((key) => key + 1);
@@ -1054,6 +1235,11 @@ export function ComponentDetailPanel({
     setWorksheetEditIntent({ testType, token: worksheetEditTokenRef.current });
   }
 
+  function handleUseFileUpload(testType: string) {
+    fileUploadTokenRef.current += 1;
+    setFileUploadIntent({ testType, token: fileUploadTokenRef.current });
+  }
+
   // Spec §H3: the worksheet is the primary test view in all three preview
   // modes (tabs, inline, off), so the same element mounts in every branch.
   const worksheetSection = hasWorksheet ? (
@@ -1067,6 +1253,7 @@ export function ComponentDetailPanel({
       canWrite={canWriteComponent && !demo}
       refreshKey={reloadKey}
       editIntent={worksheetEditIntent}
+      onUseFileUpload={handleUseFileUpload}
       onStaged={handleWorksheetStaged}
       onViewStaged={onNavigate === undefined ? undefined : () => onNavigate("staged")}
     />
@@ -1249,6 +1436,7 @@ export function ComponentDetailPanel({
                 pinnedTestType={pinnedTestType ?? undefined}
                 intentToken={testIntentToken}
                 initialTestType={initialTestType ?? undefined}
+                fileUploadIntent={fileUploadIntent ?? undefined}
                 onSyncSchemas={handleSyncTestSchemas}
                 onRefresh={() => {
                   setReloadKey((key) => key + 1);
@@ -1283,6 +1471,8 @@ export function ComponentDetailPanel({
                 outboxActions={previewOutbox}
                 canWrite={canWriteComponent}
                 onChanged={refreshPreview}
+                onWorkerActive={(action) => watchWorkerActions([action])}
+                onWorkerSettled={refreshComponentReaders}
               />
               {worksheetSection}
               {hasWorksheet ? (
@@ -1420,11 +1610,15 @@ function StagedActionsPanel({
   outboxActions,
   canWrite,
   onChanged,
+  onWorkerActive,
+  onWorkerSettled,
 }: {
   actions: ComponentPreviewAction[];
   outboxActions: OutboxAction[];
   canWrite: boolean;
   onChanged: () => void;
+  onWorkerActive: (action: OutboxAction) => void;
+  onWorkerSettled: () => void;
 }) {
   const { user, showToast } = useAuth();
   const [busy, setBusy] = useState<{ id: number; kind: "push" | "discard" } | null>(null);
@@ -1443,10 +1637,33 @@ function StagedActionsPanel({
     setBusy({ id: metadata.id, kind: "push" });
     setNotice(null);
     try {
-      await pushToPdb(action, user?.email ?? "ui-user");
+      const submitted = await pushToPdb(action, user?.email ?? "ui-user");
+      onWorkerActive(submitted);
       showToast(t.components.previewPushed(metadata.summary));
       onChanged();
     } catch (caught) {
+      // A transition response can be lost after the server committed it. Read
+      // the authoritative row once: approved/submitted/failed are worker-owned
+      // and must keep refreshing this open detail even though Push reported an
+      // error locally. Draft/validated simply remain available for retry.
+      void getOutboxAction(action.id)
+        .then((latest) => {
+          if (WORKER_WATCH_STATUSES.has(latest.status)) {
+            onWorkerActive(latest);
+            // The panel still renders the pre-Push snapshot. Polling starts
+            // from this authoritative status and therefore sees no change on
+            // its first read; refresh now so Draft cannot linger as actionable.
+            onChanged();
+          } else if (WORKER_SETTLED_STATUSES.has(latest.status)) {
+            onWorkerSettled();
+          } else {
+            onChanged();
+          }
+        })
+        .catch(() => {
+          /* The original Push error remains the actionable message. */
+          onChanged();
+        });
       setNotice(`${t.components.previewPushFailed}: ${errorMessage(caught)}`);
     } finally {
       setBusy(null);
@@ -1549,8 +1766,11 @@ function UnavailableStageSection() {
   );
 }
 
-function displayableImages(attachments: readonly TestRunAttachment[]): TestRunAttachment[] {
-  return attachments.filter((attachment) => attachment.stored && isDisplayableImage(attachment));
+function storedImages(attachments: readonly TestRunAttachment[]): TestRunAttachment[] {
+  return attachments.filter((attachment) => {
+    const contentType = (attachment.content_type ?? "").split(";")[0].trim().toLowerCase();
+    return attachment.stored && (attachment.is_image || contentType.startsWith("image/"));
+  });
 }
 
 /** A grid of locally mirrored images, all belonging to the serial `sn`. */
@@ -1565,21 +1785,35 @@ function ImageGrid({
 }) {
   return (
     <div className="img-grid">
-      {images.map((img) => (
-        <button
-          type="button"
-          className="img-thumb"
-          key={img.code}
-          title={img.title ?? img.filename ?? img.test_type}
-          onClick={() => onOpen(sn, img)}
-        >
-          <img
-            src={componentAttachmentUrl(sn, img.code)}
-            alt={img.title ?? img.filename ?? t.images.untitled}
-          />
-          <span className="img-tag">{img.test_type}</span>
-        </button>
-      ))}
+      {images.map((img) =>
+        isDisplayableImage(img) ? (
+          <button
+            type="button"
+            className="img-thumb"
+            key={`${img.source}:${img.code}`}
+            title={img.title ?? img.filename ?? img.test_type}
+            onClick={() => onOpen(sn, img)}
+          >
+            <img
+              src={componentAttachmentUrl(sn, img.code, img.source)}
+              alt={img.title ?? img.filename ?? t.images.untitled}
+            />
+            <span className="img-tag">{img.test_type}</span>
+          </button>
+        ) : (
+          <span
+            className="img-thumb placeholder"
+            key={`${img.source}:${img.code}`}
+            title={img.title ?? img.filename ?? img.test_type}
+          >
+            <span className="img-tag">
+              <span>{img.filename ?? img.title ?? img.test_type}</span>
+              <br />
+              <span>{t.images.storedLocally}</span>
+            </span>
+          </span>
+        ),
+      )}
     </div>
   );
 }
@@ -1608,10 +1842,10 @@ function ImagesSection({ sn, refreshKey }: { sn: string; refreshKey: number }) {
     setLightbox(null);
     getComponentAttachments(sn, ctrl.signal)
       .then((family) => {
-        setImages(displayableImages(family.attachments));
+        setImages(storedImages(family.attachments));
         setChildren(
           family.children
-            .map((child) => ({ ...child, attachments: displayableImages(child.attachments) }))
+            .map((child) => ({ ...child, attachments: storedImages(child.attachments) }))
             .filter((child) => child.attachments.length > 0),
         );
       })
