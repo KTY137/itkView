@@ -4,7 +4,7 @@ The bytes live on disk, not in the database: the mirror stays small, and a
 person can open the folder and look at the pictures with any viewer. Layout is
 one directory per serial number, which is what makes that browsing useful:
 
-    <attachment_dir>/20USEM20000041/<pdb-code>.jpg
+    <attachment_dir>/20USEM20000041/pdb/<pdb-code>.jpg
 
 File names come from the PDB and are therefore untrusted. They are never used
 to build a path — the storage name is the PDB attachment code (a hex handle)
@@ -29,6 +29,7 @@ selection obeys is written down at ``_archive_member`` and its neighbours.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import logging
 import os
 import re
@@ -37,18 +38,27 @@ import zlib
 from collections.abc import Callable, Mapping
 from contextlib import closing
 from dataclasses import dataclass
+from io import BytesIO
 from ipaddress import ip_address
 from pathlib import Path
+from threading import Lock, RLock
 from time import sleep
 from typing import Any, Literal
 from urllib.error import HTTPError
 from urllib.parse import unquote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from weakref import WeakValueDictionary
 
-from sqlalchemy import func, select
+from sqlalchemy import case, event, exists, func, select
 from sqlalchemy.orm import Session, aliased
 
-from app.models import Component, TestRunAttachment, TestRunEvidence, utcnow
+from app.models import (
+    Component,
+    TestRunAttachment,
+    TestRunAttachmentReference,
+    TestRunEvidence,
+    utcnow,
+)
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +82,7 @@ _EXTENSION_BY_CONTENT_TYPE = {
     "image/gif": ".gif",
     "image/webp": ".webp",
     "image/bmp": ".bmp",
+    "image/avif": ".avif",
     "image/tiff": ".tif",
     "image/svg+xml": ".svg",
     "application/pdf": ".pdf",
@@ -99,6 +110,7 @@ _CONTENT_TYPE_BY_EXTENSION = {
     ".gif": "image/gif",
     ".webp": "image/webp",
     ".bmp": "image/bmp",
+    ".avif": "image/avif",
     ".tif": "image/tiff",
     ".tiff": "image/tiff",
     ".svg": "image/svg+xml",
@@ -109,8 +121,41 @@ _CONTENT_TYPE_BY_EXTENSION = {
     ".csv": "text/csv",
 }
 
+# Keep this in lockstep with frontend/src/ui.ts DISPLAYABLE_IMAGE_TYPES. The
+# broader `image/*` predicate remains correct for galleries, where TIFF is a
+# truthful stored-image placeholder; list thumbnails must be paintable by the
+# browser because they have no placeholder UI.
+_DISPLAYABLE_IMAGE_CONTENT_TYPES = frozenset(
+    {
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+        "image/avif",
+        "image/svg+xml",
+    }
+)
+
 _SAFE_CODE = re.compile(r"[^A-Za-z0-9_-]")
 _SAFE_SN = re.compile(r"[^A-Za-z0-9_-]")
+
+
+class _AttachmentKeyLock:
+    """Weak-referenceable lock for one physical attachment identity."""
+
+    __slots__ = ("lock", "__weakref__")
+
+    def __init__(self) -> None:
+        self.lock = RLock()
+
+
+_ATTACHMENT_KEY_LOCKS: WeakValueDictionary[
+    tuple[str, str, str], _AttachmentKeyLock
+] = WeakValueDictionary()
+_ATTACHMENT_KEY_LOCKS_GUARD = Lock()
+_ATTACHMENT_LOCK_RELEASES_INFO_KEY = "_itkflow_attachment_lock_releases"
 
 
 @dataclass(frozen=True)
@@ -124,12 +169,135 @@ class AttachmentSyncStats:
         return self.downloaded + self.reused + self.failed
 
 
+@dataclass(frozen=True)
+class AttachmentView:
+    """Association metadata paired with its one physical attachment blob.
+
+    The public API historically consumed ``TestRunAttachment`` rows directly.
+    This small view preserves that attribute-shaped contract while separating
+    the two identities the old row had conflated: ``blob`` says which bytes
+    exist once, while the remaining fields say which component/test run
+    references those bytes.
+    """
+
+    blob: TestRunAttachment
+    component_sn: str
+    test_type: str
+    test_run_ref: str | None
+    filename: str | None
+    title: str | None
+
+    @property
+    def id(self) -> int:
+        return self.blob.id
+
+    @property
+    def source(self) -> str:
+        return self.blob.source
+
+    @property
+    def pdb_code(self) -> str:
+        return self.blob.pdb_code
+
+    @property
+    def content_type(self) -> str | None:
+        return self.blob.content_type
+
+    @property
+    def size_bytes(self) -> int | None:
+        return self.blob.size_bytes
+
+    @property
+    def relative_path(self) -> str | None:
+        return self.blob.relative_path
+
+    @property
+    def is_image(self) -> bool:
+        return self.blob.is_image
+
+
 def attachment_root(settings: Any) -> Path:
     """The configured attachment directory, created if needed."""
     configured = getattr(settings, "attachment_dir", None)
     root = Path(configured) if configured else Path(DEFAULT_ATTACHMENT_DIRNAME)
     root.mkdir(parents=True, exist_ok=True)
     return root.resolve()
+
+
+def _acquire_attachment_key_locks(
+    root: Path, descriptors: list[dict[str, Any]]
+) -> list[_AttachmentKeyLock]:
+    """Serialize overlapping blob downloads without serializing unrelated ones.
+
+    A component refresh and a background sweep can plan the same absent blob
+    concurrently. Besides racing the database unique key, two refreshes of the
+    same component then write the same deterministic .part path. Locks are
+    acquired in sorted order to avoid deadlocks when two components share more
+    than one code. The weak registry does not retain one lock forever for every
+    attachment the mirror has ever seen.
+    """
+    root_key = os.path.normcase(str(root))
+    keys = sorted(
+        {
+            (root_key, str(descriptor["source"]), str(descriptor["code"]))
+            for descriptor in descriptors
+        }
+    )
+    with _ATTACHMENT_KEY_LOCKS_GUARD:
+        locks: list[_AttachmentKeyLock] = []
+        for key in keys:
+            lock = _ATTACHMENT_KEY_LOCKS.get(key)
+            if lock is None:
+                lock = _AttachmentKeyLock()
+                _ATTACHMENT_KEY_LOCKS[key] = lock
+            locks.append(lock)
+    for item in locks:
+        item.lock.acquire()
+    return locks
+
+
+def _release_attachment_key_locks(locks: list[_AttachmentKeyLock]) -> None:
+    for item in reversed(locks):
+        item.lock.release()
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _release_attachment_locks_at_registered_root(
+    session: Session, transaction: Any
+) -> None:
+    """Release only batches registered for this exact root transaction.
+
+    SQLAlchemy also emits ``after_transaction_end`` for flush subtransactions
+    and SAVEPOINTs. A fixed class listener with mutable ``Session.info`` state
+    avoids both early release and dynamically removing an event listener while
+    its dispatch collection is being iterated (which SQLAlchemy forbids).
+    """
+    pending = session.info.get(_ATTACHMENT_LOCK_RELEASES_INFO_KEY)
+    if not pending:
+        return
+    remaining = []
+    for expected_transaction, locks in pending:
+        if transaction is expected_transaction:
+            _release_attachment_key_locks(locks)
+        else:
+            remaining.append((expected_transaction, locks))
+    if remaining:
+        session.info[_ATTACHMENT_LOCK_RELEASES_INFO_KEY] = remaining
+    else:
+        session.info.pop(_ATTACHMENT_LOCK_RELEASES_INFO_KEY, None)
+
+
+def _release_attachment_key_locks_after_transaction(
+    session: Session, locks: list[_AttachmentKeyLock]
+) -> None:
+    """Keep locks until another session can observe the committed blob row."""
+    root_transaction = session.get_transaction()
+    if root_transaction is None:
+        _release_attachment_key_locks(locks)
+        return
+    session.info.setdefault(_ATTACHMENT_LOCK_RELEASES_INFO_KEY, []).append(
+        (root_transaction, locks)
+    )
 
 
 def _extension_for(content_type: str | None, filename: str | None) -> str:
@@ -146,16 +314,37 @@ def _extension_for(content_type: str | None, filename: str | None) -> str:
     return ""
 
 
+def _safe_source_segment(source: str) -> str:
+    """Return a path-safe, identity-preserving source directory name.
+
+    The current source names already consist only of safe characters and stay
+    readable. If a future source contains punctuation or Unicode, a digest
+    prevents two names that sanitise alike from targeting the same file.
+    """
+    raw_source = source
+    safe_source = _SAFE_CODE.sub("_", raw_source)
+    if raw_source and safe_source == raw_source:
+        return safe_source
+    digest = hashlib.sha256(raw_source.encode("utf-8")).hexdigest()[:12]
+    return f"{safe_source or 'unknown'}-{digest}"
+
+
 def storage_path(
-    component_sn: str, pdb_code: str, content_type: str | None, filename: str | None
+    component_sn: str,
+    pdb_code: str,
+    content_type: str | None,
+    filename: str | None,
+    *,
+    source: str,
 ) -> str:
-    """Relative storage path for one attachment. Never derived from a PDB name."""
+    """Relative path for a new blob, qualified by its public source identity."""
     safe_sn = _SAFE_SN.sub("_", component_sn or "unknown")
+    safe_source = _safe_source_segment(source)
     safe_code = _SAFE_CODE.sub("_", pdb_code)
-    return f"{safe_sn}/{safe_code}{_extension_for(content_type, filename)}"
+    return f"{safe_sn}/{safe_source}/{safe_code}{_extension_for(content_type, filename)}"
 
 
-def resolve_path(settings: Any, attachment: TestRunAttachment) -> Path | None:
+def resolve_path(settings: Any, attachment: TestRunAttachment | AttachmentView) -> Path | None:
     """Absolute path of a stored attachment, or None if it is not on disk.
 
     Containment is re-checked here rather than trusted from the database: a row
@@ -170,17 +359,121 @@ def resolve_path(settings: Any, attachment: TestRunAttachment) -> Path | None:
     return candidate
 
 
-def known_attachments(session: Session, component_sn: str) -> list[TestRunAttachment]:
-    return list(
-        session.scalars(
-            select(TestRunAttachment)
-            .where(TestRunAttachment.component_sn == component_sn)
-            .order_by(TestRunAttachment.test_type, TestRunAttachment.id)
+def _reference_view(
+    attachment: TestRunAttachment,
+    reference: TestRunAttachmentReference | None = None,
+) -> AttachmentView:
+    if reference is None:
+        return AttachmentView(
+            blob=attachment,
+            component_sn=attachment.component_sn,
+            test_type=attachment.test_type,
+            test_run_ref=attachment.test_run_ref,
+            filename=attachment.filename,
+            title=attachment.title,
         )
+    return AttachmentView(
+        blob=attachment,
+        component_sn=reference.component_sn,
+        test_type=reference.test_type,
+        test_run_ref=reference.test_run_ref or None,
+        filename=reference.filename,
+        title=reference.title,
     )
 
 
-def is_image_sql():
+def attachment_references_for_components(
+    session: Session,
+    component_sns: list[str] | tuple[str, ...],
+    *,
+    stored_images_only: bool = False,
+) -> dict[str, list[AttachmentView]]:
+    """All attachment associations for several components in constant queries.
+
+    New rows come from ``test_run_attachment_reference``.  Directly-created
+    legacy rows (old databases and focused fixtures) remain readable whenever
+    no association exists for that same blob/component pair.  The fallback is
+    deliberately additive: once a real association exists, stale representative
+    fields on the blob can no longer invent a second run association.
+    """
+    serials = tuple(dict.fromkeys(component_sns))
+    grouped: dict[str, list[AttachmentView]] = {sn: [] for sn in serials}
+    if not serials:
+        return grouped
+    dialect_name = session.get_bind().dialect.name
+
+    reference_statement = (
+        select(TestRunAttachmentReference, TestRunAttachment)
+        .join(
+            TestRunAttachment,
+            TestRunAttachment.id == TestRunAttachmentReference.attachment_id,
+        )
+        .where(TestRunAttachmentReference.component_sn.in_(serials))
+        .order_by(
+            TestRunAttachmentReference.component_sn,
+            TestRunAttachmentReference.test_type,
+            TestRunAttachmentReference.test_run_ref,
+            TestRunAttachmentReference.id,
+        )
+    )
+    if stored_images_only:
+        reference_statement = reference_statement.where(
+            TestRunAttachment.relative_path.is_not(None),
+            is_image_sql(dialect_name),
+        )
+    rows = session.execute(reference_statement)
+    for reference, attachment in rows:
+        grouped[reference.component_sn].append(_reference_view(attachment, reference))
+
+    matching_reference = exists().where(
+        TestRunAttachmentReference.attachment_id == TestRunAttachment.id,
+        TestRunAttachmentReference.component_sn == TestRunAttachment.component_sn,
+    )
+    legacy_statement = (
+        select(TestRunAttachment)
+        .where(
+            TestRunAttachment.component_sn.in_(serials),
+            ~matching_reference,
+        )
+        .order_by(
+            TestRunAttachment.component_sn,
+            TestRunAttachment.test_type,
+            TestRunAttachment.id,
+        )
+    )
+    if stored_images_only:
+        legacy_statement = legacy_statement.where(
+            TestRunAttachment.relative_path.is_not(None),
+            is_image_sql(dialect_name),
+        )
+    legacy_rows = session.scalars(legacy_statement)
+    for attachment in legacy_rows:
+        grouped[attachment.component_sn].append(_reference_view(attachment))
+    return grouped
+
+
+def attachment_references(session: Session, component_sn: str) -> list[AttachmentView]:
+    """Every run association for one component, including legacy fallback."""
+    return attachment_references_for_components(session, [component_sn])[component_sn]
+
+
+def known_attachments(session: Session, component_sn: str) -> list[AttachmentView]:
+    """One gallery/index entry per physical blob referenced by a component."""
+    unique: dict[tuple[str, str], AttachmentView] = {}
+    for attachment in attachment_references(session, component_sn):
+        unique.setdefault((attachment.source, attachment.pdb_code), attachment)
+    return list(unique.values())
+
+
+def _trim_content_type_sql(value, dialect_name: str):
+    """Trim HTTP whitespace on both supported SQL engines."""
+    whitespace = " \t\r\n\f\v"
+    if dialect_name == "postgresql":
+        return func.btrim(value, whitespace)
+    return func.trim(value, whitespace)
+
+
+def is_image_sql(dialect_name: str):
     """SQL form of ``TestRunAttachment.is_image``, for filtering in the database.
 
     The Python property answers per row; a listing endpoint has to ask the
@@ -189,12 +482,51 @@ def is_image_sql():
     case-sensitive on PostgreSQL and case-insensitive on SQLite — the same
     statement must select the same rows on both.
     """
-    return func.lower(TestRunAttachment.content_type).like("image/%")
+    normalized = _trim_content_type_sql(
+        TestRunAttachment.content_type, dialect_name
+    )
+    return func.lower(normalized).like("image/%")
+
+
+def _base_content_type_sql(dialect_name: str):
+    """Normalised MIME base type, before parameters, for supported databases.
+
+    Python and the frontend both split on the first semicolon and trim the
+    resulting base type. SQL must do the same *before* choosing ``MIN(id)``;
+    otherwise a valid value such as ``" image/jpeg ; charset=binary"`` is
+    paintable in a detail gallery but silently excluded from list thumbnails.
+    SQLite and PostgreSQL expose different delimiter functions, so this small
+    adapter keeps the public selection semantics identical on both engines.
+    """
+    raw = TestRunAttachment.content_type
+    if dialect_name == "postgresql":
+        base = func.split_part(raw, ";", 1)
+    else:
+        # SQLite is the desktop/dev database. Keep it as the conservative
+        # fallback too: unsupported dialects are outside the deployment
+        # contract, while ``instr``/``substr`` are widely available.
+        semicolon = func.instr(raw, ";")
+        base = case(
+            (semicolon > 0, func.substr(raw, 1, semicolon - 1)),
+            else_=raw,
+        )
+    return func.lower(_trim_content_type_sql(base, dialect_name))
+
+
+def is_displayable_image_sql(dialect_name: str):
+    """SQL predicate for browser-paintable image MIME types.
+
+    MIME comparison is case-insensitive, trims leading/trailing whitespace
+    from the base type and permits parameters after a semicolon, matching the
+    frontend's split/trim/lower normalisation.
+    """
+    normalized = _base_content_type_sql(dialect_name)
+    return normalized.in_(sorted(_DISPLAYABLE_IMAGE_CONTENT_TYPES))
 
 
 def child_image_attachments(
     session: Session, parent_sn: str
-) -> list[tuple[Component, list[TestRunAttachment]]]:
+) -> list[tuple[Component, list[AttachmentView]]]:
     """Stored images of a component's *direct* children, grouped per child.
 
     An operator works on a module while the photographs hang on the parts
@@ -208,29 +540,187 @@ def child_image_attachments(
     page would cost far more than it shows. Grandchildren are deliberately not
     walked — one hop is the assembly relation the page already displays.
 
-    One query for the whole family, never one per child.
+    A constant query set for the whole family, never one per child.
     """
     parent = aliased(Component)
-    rows = session.execute(
-        select(Component, TestRunAttachment)
-        .join(TestRunAttachment, TestRunAttachment.component_sn == Component.sn)
-        .where(
-            Component.parent_id
-            == select(parent.id).where(parent.sn == parent_sn).scalar_subquery(),
-            TestRunAttachment.relative_path.is_not(None),
-            is_image_sql(),
+    children = list(
+        session.scalars(
+            select(Component)
+            .where(
+                Component.parent_id
+                == select(parent.id).where(parent.sn == parent_sn).scalar_subquery()
+            )
+            .order_by(Component.sn)
         )
-        .order_by(Component.sn, TestRunAttachment.id)
     )
-    grouped: list[tuple[Component, list[TestRunAttachment]]] = []
-    for child, attachment in rows:
-        if not grouped or grouped[-1][0].sn != child.sn:
-            grouped.append((child, []))
-        grouped[-1][1].append(attachment)
+    by_component = attachment_references_for_components(
+        session,
+        [child.sn for child in children],
+        stored_images_only=True,
+    )
+    grouped: list[tuple[Component, list[AttachmentView]]] = []
+    for child in children:
+        unique: dict[tuple[str, str], AttachmentView] = {}
+        for attachment in by_component[child.sn]:
+            if attachment.relative_path is None or not attachment.is_image:
+                continue
+            unique.setdefault((attachment.source, attachment.pdb_code), attachment)
+        if unique:
+            grouped.append((child, list(unique.values())))
     return grouped
 
 
-def attachment_read_model(settings: Any, attachment: TestRunAttachment) -> dict[str, Any]:
+def attachment_counts_by_run(
+    session: Session, component_sns: list[str] | tuple[str, ...]
+) -> dict[str, dict[str, dict[str | None, int]]]:
+    """Association counts keyed by component, test type and then run.
+
+    A run reference is normally globally unique, but legacy/custom evidence
+    may have no reference at all. Keeping the component in the key prevents
+    several children's empty-reference buckets from leaking into one another;
+    keeping the test type prevents two no-run associations on one component
+    from being credited to both worksheet rows.
+    """
+    counts: dict[str, dict[str, dict[str | None, int]]] = {
+        component_sn: {} for component_sn in dict.fromkeys(component_sns)
+    }
+    for component_sn, attachments in attachment_references_for_components(
+        session, component_sns
+    ).items():
+        for attachment in attachments:
+            by_run = counts[component_sn].setdefault(attachment.test_type, {})
+            by_run[attachment.test_run_ref] = (
+                by_run.get(attachment.test_run_ref, 0) + 1
+            )
+    return counts
+
+
+def attachment_for_component(
+    session: Session,
+    component_sn: str,
+    pdb_code: str,
+    *,
+    source: str | None = None,
+) -> AttachmentView | None:
+    """Resolve a binary route through an association, then legacy fields.
+
+    ``source`` completes the blob's public identity. It stays optional so old
+    bookmarked URLs remain usable; a new client always supplies it and can
+    therefore address both blobs even if two sources reuse the same code.
+    """
+    reference_statement = (
+        select(TestRunAttachmentReference, TestRunAttachment)
+        .join(
+            TestRunAttachment,
+            TestRunAttachment.id == TestRunAttachmentReference.attachment_id,
+        )
+        .where(
+            TestRunAttachmentReference.component_sn == component_sn,
+            TestRunAttachment.pdb_code == pdb_code,
+        )
+        .order_by(TestRunAttachmentReference.id)
+        .limit(1)
+    )
+    if source is not None:
+        reference_statement = reference_statement.where(
+            TestRunAttachment.source == source
+        )
+    row = session.execute(reference_statement).first()
+    if row is not None:
+        reference, attachment = row
+        return _reference_view(attachment, reference)
+    legacy_statement = (
+        select(TestRunAttachment)
+        .where(
+            TestRunAttachment.component_sn == component_sn,
+            TestRunAttachment.pdb_code == pdb_code,
+        )
+        .order_by(TestRunAttachment.id)
+        .limit(1)
+    )
+    if source is not None:
+        legacy_statement = legacy_statement.where(
+            TestRunAttachment.source == source
+        )
+    attachment = session.scalar(legacy_statement)
+    return _reference_view(attachment) if attachment is not None else None
+
+
+def thumbnail_attachments(
+    session: Session,
+    *,
+    institute_code: str | None = None,
+    limit: int = 2000,
+) -> list[tuple[str, TestRunAttachment]]:
+    """One browser-displayable stored blob per component, with legacy fallback.
+
+    Physical blobs are deduplicated globally, so grouping on the blob's legacy
+    ``component_sn`` loses every additional component reference. The union,
+    grouping and component limit therefore all stay in SQL: repeated run
+    associations cannot make the endpoint materialise an unbounded candidate
+    set before applying its public limit. Filtering unsupported formats before
+    ``MIN(id)`` lets a later JPEG/PNG win over an older TIFF.
+    """
+    capped_limit = max(1, min(limit, 5000))
+    dialect_name = session.get_bind().dialect.name
+    reference_statement = (
+        select(
+            TestRunAttachmentReference.component_sn.label("component_sn"),
+            TestRunAttachment.id.label("attachment_id"),
+        )
+        .join(
+            TestRunAttachment,
+            TestRunAttachment.id == TestRunAttachmentReference.attachment_id,
+        )
+        .where(
+            TestRunAttachment.relative_path.is_not(None),
+            is_displayable_image_sql(dialect_name),
+        )
+    )
+    if institute_code:
+        reference_statement = reference_statement.join(
+            Component, Component.sn == TestRunAttachmentReference.component_sn
+        ).where(Component.institute_code == institute_code)
+
+    matching_reference = exists().where(
+        TestRunAttachmentReference.attachment_id == TestRunAttachment.id,
+        TestRunAttachmentReference.component_sn == TestRunAttachment.component_sn,
+    )
+    legacy_statement = select(
+        TestRunAttachment.component_sn.label("component_sn"),
+        TestRunAttachment.id.label("attachment_id"),
+    ).where(
+        TestRunAttachment.relative_path.is_not(None),
+        is_displayable_image_sql(dialect_name),
+        ~matching_reference,
+    )
+    if institute_code:
+        legacy_statement = legacy_statement.join(
+            Component, Component.sn == TestRunAttachment.component_sn
+        ).where(Component.institute_code == institute_code)
+    candidates = reference_statement.union_all(legacy_statement).subquery()
+    chosen = (
+        select(
+            candidates.c.component_sn,
+            func.min(candidates.c.attachment_id).label("attachment_id"),
+        )
+        .group_by(candidates.c.component_sn)
+        .order_by(candidates.c.component_sn)
+        .limit(capped_limit)
+        .subquery()
+    )
+    return list(
+        session.execute(
+            select(chosen.c.component_sn, TestRunAttachment)
+            .join(TestRunAttachment, TestRunAttachment.id == chosen.c.attachment_id)
+            .order_by(chosen.c.component_sn)
+        )
+    )
+
+
+def attachment_read_model(
+    settings: Any, attachment: TestRunAttachment | AttachmentView
+) -> dict[str, Any]:
     """Return the public, local-only representation of a mirrored attachment.
 
     Deliberately omit the storage path and any remote source URL.  Both the
@@ -239,6 +729,7 @@ def attachment_read_model(settings: Any, attachment: TestRunAttachment) -> dict[
     read models by accident.
     """
     return {
+        "source": attachment.source,
         "code": attachment.pdb_code,
         "test_type": attachment.test_type,
         "test_run_ref": attachment.test_run_ref,
@@ -275,6 +766,13 @@ def _upsert_row(
     title: str | None,
     source: str = "pdb",
 ) -> TestRunAttachment:
+    """Upsert the one physical blob row for ``(source, pdb_code)``.
+
+    Component/run metadata on this legacy row is only a representative kept
+    for backwards compatibility.  It must never be overwritten on reuse:
+    the authoritative many-to-one associations live in
+    ``TestRunAttachmentReference``.
+    """
     existing = _existing_attachment_row(session, source, pdb_code)
     if existing is None:
         existing = TestRunAttachment(
@@ -283,9 +781,11 @@ def _upsert_row(
             test_run_ref=test_run_ref,
             source=source,
             pdb_code=pdb_code,
+            filename=filename,
+            content_type=content_type,
+            title=title,
         )
         session.add(existing)
-    existing.filename = filename
     # A PDB listing usually declares no content type at all. The real one is
     # sniffed from the response when the file is downloaded, and `is_image`
     # derives from it — so letting a later listing overwrite a type the
@@ -295,11 +795,50 @@ def _upsert_row(
     # before the line that writes the sniffed type back.
     if existing.downloaded_at is None or content_type is not None:
         existing.content_type = content_type
-    existing.title = title
-    existing.test_type = test_type
-    existing.test_run_ref = test_run_ref
     existing.synced_at = utcnow()
     return existing
+
+
+def _upsert_reference(
+    session: Session,
+    attachment: TestRunAttachment,
+    *,
+    component_sn: str,
+    test_type: str,
+    test_run_ref: str | None,
+    filename: str | None,
+    title: str | None,
+) -> TestRunAttachmentReference:
+    """Upsert one component/test-run association to a physical blob."""
+    run_key = test_run_ref or ""
+    identity = [
+        TestRunAttachmentReference.attachment_id == attachment.id,
+        TestRunAttachmentReference.component_sn == component_sn,
+        TestRunAttachmentReference.test_run_ref == run_key,
+    ]
+    if not run_key:
+        # A real run id is the stable upstream identity and its test type is
+        # updateable metadata. Without one, test type is the only field that
+        # keeps two valid associations on the same component distinct.
+        identity.append(TestRunAttachmentReference.test_type == test_type)
+    reference = session.scalar(
+        select(TestRunAttachmentReference)
+        .where(*identity)
+        .order_by(TestRunAttachmentReference.id)
+    )
+    if reference is None:
+        reference = TestRunAttachmentReference(
+            attachment_id=attachment.id,
+            component_sn=component_sn,
+            test_run_ref=run_key,
+            test_type=test_type,
+        )
+        session.add(reference)
+    reference.test_type = test_type
+    reference.filename = filename
+    reference.title = title
+    reference.synced_at = utcnow()
+    return reference
 
 
 def pending_attachments(session: Session, component_sn: str) -> list[dict[str, Any]]:
@@ -632,9 +1171,24 @@ def _response_content_type(response: Any) -> str | None:
 
 # Enough to cover the ustar magic at offset 257 of the first header block.
 _ARCHIVE_SNIFF_BYTES = 512
+# A gzip header can legally carry optional extra/name/comment fields before
+# the deflate stream. Inspect a larger but still fixed prefix only after gzip
+# magic was seen; ordinary files retain the small 512-byte sniff. Headers that
+# do not terminate inside this ceiling are refused instead of being stored as
+# an opaque pseudo-file. A separate bounded probe follows the complete header:
+# otherwise a legal header ending at the ceiling would leave no compressed
+# bytes from which to distinguish a tar from an ordinary gzip file.
+_GZIP_ARCHIVE_SNIFF_BYTES = 128 * 1024
+_GZIP_DEFLATE_SNIFF_BYTES = 128 * 1024
 _USTAR_MAGIC_OFFSET = 257
 _USTAR_MAGIC = b"ustar"
 _GZIP_MAGIC = b"\x1f\x8b"
+
+# Enough bytes for every magic check below. This is the only part of a new
+# candidate held alongside the current best full member while its rank is
+# decided.
+_MEMBER_CONTENT_SNIFF_BYTES = 512
+_MEMBER_READ_CHUNK_BYTES = 64 * 1024
 
 # A share folder holds a handful of files. Thousands of members is not a
 # folder share, it is either a mistake or an attempt to make this loop the
@@ -765,6 +1319,68 @@ def _archive_stream_mode(head: bytes) -> str | None:
     return None
 
 
+def _gzip_header_end(head: bytes) -> int | None:
+    """Offset after a complete gzip header, bounded by the supplied prefix."""
+    if len(head) < 10 or head[: len(_GZIP_MAGIC)] != _GZIP_MAGIC:
+        return None
+    flags = head[3]
+    offset = 10
+    if flags & 0x04:  # FEXTRA
+        if len(head) < offset + 2:
+            return None
+        extra_size = int.from_bytes(head[offset : offset + 2], "little")
+        offset += 2 + extra_size
+        if len(head) < offset:
+            return None
+    for flag in (0x08, 0x10):  # FNAME, FCOMMENT
+        if flags & flag:
+            terminator = head.find(b"\x00", offset)
+            if terminator < 0:
+                return None
+            offset = terminator + 1
+    if flags & 0x02:  # FHCRC
+        offset += 2
+    return offset if len(head) >= offset else None
+
+
+def _sniff_archive_stream_mode(stream: _CappedStream) -> str | None:
+    """Detect tar transports with separate bounded header/deflate probes."""
+    head = stream.peek(_ARCHIVE_SNIFF_BYTES)
+    mode = _archive_stream_mode(head)
+    if mode is not None or head[: len(_GZIP_MAGIC)] != _GZIP_MAGIC:
+        return mode
+
+    header_probe = stream.peek(_GZIP_ARCHIVE_SNIFF_BYTES)
+    header_end = _gzip_header_end(header_probe)
+    if header_end is None:
+        raise _ArchiveRefused("the gzip header exceeded its byte budget or was incomplete")
+
+    # The header may end on the final byte of its own budget. Probe a second,
+    # independent and bounded region for enough deflate output to classify the
+    # payload. A valid short ordinary gzip reaches EOF; a longer ordinary gzip
+    # yields the full prefix without the ustar magic. An undecidable stream is
+    # refused rather than silently stored as an opaque successful attachment.
+    extended = stream.peek(header_end + _GZIP_DEFLATE_SNIFF_BYTES)
+    try:
+        detector = zlib.decompressobj(wbits=31)
+        prefix = detector.decompress(
+            extended, _USTAR_MAGIC_OFFSET + len(_USTAR_MAGIC)
+        )
+    except zlib.error:
+        # Gzip magic alone does not make arbitrary bytes an archive. Preserve
+        # the ordinary-file path for a malformed/non-gzip payload, as before.
+        return None
+    if prefix[
+        _USTAR_MAGIC_OFFSET : _USTAR_MAGIC_OFFSET + len(_USTAR_MAGIC)
+    ] == _USTAR_MAGIC:
+        return "r|gz"
+    if len(prefix) >= _USTAR_MAGIC_OFFSET + len(_USTAR_MAGIC) or detector.eof:
+        return None
+    raise _ArchiveRefused(
+        "the gzip payload did not yield enough bytes inside its sniff budget"
+    )
+
+
 def safe_archive_member_name(info: Any) -> str | None:
     """Normalise one archive member's name, or refuse it.
 
@@ -778,6 +1394,11 @@ def safe_archive_member_name(info: Any) -> str | None:
     one that a single missing line would silently remove.
     """
     if getattr(info, "type", None) not in (tarfile.REGTYPE, tarfile.AREGTYPE):
+        return None
+    # PAX sparse entries can present as REGTYPE/isreg(), unlike the dedicated
+    # GNU sparse type. `issparse()` is therefore a separate mandatory guard.
+    is_sparse = getattr(info, "issparse", None)
+    if callable(is_sparse) and is_sparse():
         return None
     name = getattr(info, "name", None)
     if not isinstance(name, str) or not name:
@@ -812,29 +1433,36 @@ def _member_is_in_scope(name: str, wanted: str) -> bool:
     return name == wanted or name.startswith(wanted + "/")
 
 
-def _member_rank(name: str, wanted: str) -> int:
+def _member_rank(name: str, wanted: str, content_type: str | None) -> int:
     """Preference order among members that are all legitimate candidates.
 
-    Lower wins; ties are broken by the member path, so the choice is a pure
-    function of the archive and never of the order a host happens to stream
-    it in. Being explicit here is the whole point: a folder share can hold
-    several files, and a wrong file stored under the right attachment code
-    would look correct forever.
+    Lower wins; ties between distinct members are broken by the member path.
+    Duplicate normalised paths are handled before this function and keep their
+    first eligible occurrence. Being explicit here is the whole point: a
+    folder share can hold several files, and a wrong file stored under the
+    right attachment code would look correct forever.
 
       0  the entry the descriptor named, exactly
-      1  an image format the mirror can store and a browser can paint
-      2  any other format the mirror is willing to write an extension for
-      3  everything else (stored without an extension, so nothing can open it)
+      1  bytes sniffed as an image format a browser can paint
+      2  bytes sniffed as another real image format (for example TIFF)
+      3  any other format the mirror is willing to write an extension for
+      4  everything else (stored without an extension, so nothing can open it)
     """
     if wanted and name == wanted:
         return 0
     suffix = Path(name).suffix.lower()
-    content_type = _CONTENT_TYPE_BY_EXTENSION.get(suffix)
-    if content_type and content_type.startswith("image/"):
+    if content_type in _DISPLAYABLE_IMAGE_CONTENT_TYPES:
         return 1
-    if content_type or suffix in _TRUSTED_DATA_SUFFIXES:
+    if content_type and content_type.startswith("image/"):
         return 2
-    return 3
+    declared_type = _CONTENT_TYPE_BY_EXTENSION.get(suffix)
+    if (
+        content_type
+        or suffix in _TRUSTED_DATA_SUFFIXES
+        or (declared_type is not None and not declared_type.startswith("image/"))
+    ):
+        return 3
+    return 4
 
 
 def _sniffed_content_type(data: bytes) -> str | None:
@@ -848,6 +1476,18 @@ def _sniffed_content_type(data: bytes) -> str | None:
             return content_type
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
+    if len(data) >= 16 and data[4:8] == b"ftyp":
+        box_size = int.from_bytes(data[:4], "big")
+        box_end = min(len(data), box_size) if box_size >= 16 else len(data)
+        brands = [data[8:12]]
+        brands.extend(data[index : index + 4] for index in range(16, box_end, 4))
+        if any(brand in {b"avif", b"avis"} for brand in brands):
+            return "image/avif"
+    sample = data.lstrip()
+    if sample.startswith(b"\xef\xbb\xbf"):
+        sample = sample[3:].lstrip()
+    if re.match(br"<svg(?:\s|>)", sample, flags=re.IGNORECASE):
+        return "image/svg+xml"
     return None
 
 
@@ -863,10 +1503,10 @@ def _archive_member(
     """Select and read **one** member of a streamed archive. Never extracts.
 
     Single forward pass: the archive is read straight off the socket and is
-    never materialised, so memory is bounded by one member, not by the
-    archive. The best candidate seen so far is kept in memory and dropped
-    *before* a strictly better one is read, which keeps the peak at one
-    member even when several qualify.
+    never materialised, so memory is bounded by one full member plus a fixed
+    sniff prefix, not by the archive. The best candidate seen so far is kept
+    while at most 512 bytes of a possible successor establish its MIME rank,
+    then dropped *before* the successor's remaining body is read.
 
     Returns the chosen member's normalised path and its bytes, or ``None``
     when nothing in the archive is the file that was asked for. Raises
@@ -919,6 +1559,7 @@ def _walk_archive(
     eligible = 0
     members = 0
     declared_total = 0
+    seen_paths: set[str] = set()
 
     for info in archive:
         members += 1
@@ -939,17 +1580,51 @@ def _walk_archive(
         # an oversized one costs nothing but its header.
         if size > max_bytes:
             continue
+        # Tar permits duplicate names. Treat the first eligible occurrence as
+        # authoritative so byte-distinct duplicates cannot change the result
+        # later merely because their sniffed MIME rank differs.
+        if name in seen_paths:
+            continue
+        seen_paths.add(name)
         eligible += 1
 
-        key = (_member_rank(name, wanted), name)
-        if best_key is not None and key >= best_key:
+        # An exact path has rank 0; every other member has a best possible rank
+        # of 1. If even that optimistic key cannot win, tarfile can stream past
+        # the member without allocating any of its payload.
+        optimistic_key = (0 if wanted and name == wanted else 1, name)
+        if best_key is not None and optimistic_key >= best_key:
             continue
         handle = archive.extractfile(info)
         if handle is None:
             continue
-        # Release the weaker candidate before reading the better one.
+        prefix_size = min(size, _MEMBER_CONTENT_SNIFF_BYTES)
+        prefix = handle.read(prefix_size)
+        if not isinstance(prefix, (bytes, bytearray)) or len(prefix) != prefix_size:
+            raise _ArchiveRefused("an archive member did not deliver its declared size")
+        prefix = bytes(prefix)
+        key = (_member_rank(name, wanted, _sniffed_content_type(prefix)), name)
+        if best_key is not None and key >= best_key:
+            continue
+
+        # Release the weaker candidate before reading the better one's body.
+        # Only the fixed-size sniff prefix overlaps it in memory.
         best_key, best_name, best_bytes = None, "", None
-        data = handle.read(max_bytes + 1)
+        payload = BytesIO()
+        payload.write(prefix)
+        remaining = size - len(prefix)
+        while remaining:
+            chunk = handle.read(min(remaining, _MEMBER_READ_CHUNK_BYTES))
+            if not isinstance(chunk, (bytes, bytearray)) or not chunk:
+                raise _ArchiveRefused(
+                    "an archive member did not deliver its declared size"
+                )
+            if len(chunk) > remaining:
+                raise _ArchiveRefused(
+                    "an archive member delivered more than its declared size"
+                )
+            payload.write(chunk)
+            remaining -= len(chunk)
+        data = payload.getvalue()
         if len(data) != size:
             # Defence in depth, and honest about it: the streaming reader used
             # here raises on a short member before this line can see one, so
@@ -1116,7 +1791,7 @@ def _fetch_share_link(
                 if not isinstance(final_url, str) or not _safe_http_url(final_url):
                     continue
                 stream = _CappedStream(response, archive_budget)
-                mode = _archive_stream_mode(stream.peek(_ARCHIVE_SNIFF_BYTES))
+                mode = _sniff_archive_stream_mode(stream)
                 if mode is None:
                     data = stream.read(max_bytes + 1)
                     content_type = _response_content_type(response)
@@ -1505,6 +2180,7 @@ def _fetch_all(
     commits.
     """
     outcomes: list[_FetchOutcome] = []
+    downloaded_keys: set[tuple[str, str]] = set()
 
     def note(outcome: _FetchOutcome) -> None:
         outcomes.append(outcome)
@@ -1551,10 +2227,12 @@ def _fetch_all(
                 _beat(heartbeat)
                 continue
 
-        # Resolved either before this call (a previous sweep) or by an
-        # earlier descriptor in this same call (two test runs can list the
-        # same attachment code) — `force` re-fetches either way.
-        if not force and resolved.get(key):
+        # A forced sweep re-fetches each physical blob once, not once per run
+        # association. Reusing a successful fetch from this same call also
+        # prevents two outcomes from sharing the same deterministic `.part`
+        # path. If the first descriptor failed, the next one still gets its
+        # own attempt because the key has not entered `downloaded_keys`.
+        if key in downloaded_keys or (not force and resolved.get(key)):
             note(_FetchOutcome(descriptor, "reused"))
             _beat(heartbeat)
             continue
@@ -1607,7 +2285,11 @@ def _fetch_all(
         # extension and what the API later serves.
         content_type = reported_type or descriptor["content_type"]
         relative_path = storage_path(
-            component_sn, descriptor["code"], content_type, descriptor["filename"]
+            component_sn,
+            descriptor["code"],
+            content_type,
+            descriptor["filename"],
+            source=descriptor["source"],
         )
         try:
             temp_path = _write_temp_bytes(root, relative_path, data)
@@ -1618,6 +2300,7 @@ def _fetch_all(
             continue
 
         resolved[key] = True
+        downloaded_keys.add(key)
         note(
             _FetchOutcome(
                 descriptor,
@@ -1661,6 +2344,18 @@ def _commit_outcomes(
         # sharing this (source, code) — the same attachment listed under two
         # test runs — must see this row already persisted, not add a
         # duplicate.
+        session.flush()
+        _upsert_reference(
+            session,
+            row,
+            component_sn=descriptor["component_sn"],
+            test_type=descriptor["test_type"],
+            test_run_ref=descriptor["test_run_ref"],
+            filename=descriptor["filename"],
+            title=descriptor["title"],
+        )
+        # The same descriptor can occur twice in one payload; make the new
+        # association visible to the next autoflush-disabled lookup too.
         session.flush()
 
         if item.outcome == "reused":
@@ -1747,24 +2442,41 @@ def download_attachments(
         int(getattr(settings, "sync_page_max_attempts", DEFAULT_DOWNLOAD_MAX_ATTEMPTS)),
     )
 
-    # Phase 1 - plan (read-only).
-    resolved = _plan_resolved(session, settings, descriptors)
+    # The same physical key can arrive through a direct refresh while the
+    # background sweep is already handling it. Hold only those overlapping
+    # keys, and hold them through the caller's transaction end: releasing
+    # after flush but before commit would let the waiter plan against a row
+    # that is not visible yet and fetch the same bytes again.
+    key_locks = _acquire_attachment_key_locks(root, descriptors)
+    outcomes: list[_FetchOutcome] = []
+    try:
+        # Phase 1 - plan (read-only).
+        resolved = _plan_resolved(session, settings, descriptors)
 
-    # Phase 2 - fetch (network only; no session write is even possible here,
-    # since this helper is never handed a session).
-    outcomes = _fetch_all(
-        gateway,
-        descriptors,
-        resolved,
-        component_sn=component_sn,
-        root=root,
-        force=force,
-        timeout=timeout,
-        max_bytes=max_bytes,
-        max_attempts=max_attempts,
-        heartbeat=heartbeat,
-        breaker=breaker,
-    )
+        # Phase 2 - fetch (network only; no session write is even possible
+        # here, since this helper is never handed a session).
+        outcomes = _fetch_all(
+            gateway,
+            descriptors,
+            resolved,
+            component_sn=component_sn,
+            root=root,
+            force=force,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            max_attempts=max_attempts,
+            heartbeat=heartbeat,
+            breaker=breaker,
+        )
 
-    # Phase 3 - commit (short, network-free transaction).
-    return _commit_outcomes(session, root, outcomes)
+        # Phase 3 - commit (short, network-free transaction).
+        stats = _commit_outcomes(session, root, outcomes)
+    except Exception:
+        for outcome in outcomes:
+            if outcome.temp_path is not None:
+                outcome.temp_path.unlink(missing_ok=True)
+        _release_attachment_key_locks(key_locks)
+        raise
+
+    _release_attachment_key_locks_after_transaction(session, key_locks)
+    return stats

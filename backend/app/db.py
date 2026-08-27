@@ -239,21 +239,42 @@ def ensure_phase0_sqlite_schema(engine: Engine) -> None:
                     "next evidence sync",
                     flush=True,
                 )
+        attachment_reference_tables = (
+            "test_run_attachment" in tables
+            and "test_run_attachment_reference" in tables
+        )
+        if attachment_reference_tables:
+            # Create the generic marker table in the ordinary additive-schema
+            # transaction. The expensive association scan claims its row in a
+            # fresh transaction below, where that INSERT is the first statement.
+            connection.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS itkflow_schema_migration ("
+                    "name VARCHAR(120) PRIMARY KEY, applied_at DATETIME NOT NULL"
+                    ")"
+                )
+            )
         if "test_run_attachment" in tables:
             # Repair rows whose content type a re-sweep blanked (a PDB listing
             # declares none, and the reuse path used to overwrite the type the
             # download had sniffed). `is_image` derives from content_type, so
             # those rows went invisible in every gallery although their bytes
-            # were untouched. The stored file name still carries the extension
-            # that only a real image type could have produced, so the type is
-            # recoverable without contacting the PDB. Downloaded rows only —
-            # a row that was never fetched has nothing to recover from.
+            # were untouched. The stored path still carries an exact suffix
+            # from the mirror's established image allowlist, so the historical
+            # type can be restored without opening the file or contacting the
+            # PDB. Downloaded rows only — a row that was never fetched has
+            # nothing to recover from.
             for suffix, content_type in (
                 (".jpg", "image/jpeg"),
                 (".jpeg", "image/jpeg"),
                 (".png", "image/png"),
+                (".gif", "image/gif"),
+                (".webp", "image/webp"),
+                (".bmp", "image/bmp"),
+                (".avif", "image/avif"),
                 (".tif", "image/tiff"),
                 (".tiff", "image/tiff"),
+                (".svg", "image/svg+xml"),
             ):
                 connection.execute(
                     text(
@@ -263,3 +284,115 @@ def ensure_phase0_sqlite_schema(engine: Engine) -> None:
                     ),
                     {"content_type": content_type, "pattern": f"%{suffix}"},
                 )
+
+    if attachment_reference_tables:
+        _backfill_sqlite_attachment_references(engine)
+
+
+def _backfill_sqlite_attachment_references(engine: Engine) -> None:
+    """Claim and run the one-shot Evidence-to-association backfill.
+
+    This is deliberately a fresh transaction. Its first statement is the
+    marker INSERT, so concurrent sidecars cannot both establish an older read
+    snapshot and then race a check-before-insert. The winner keeps that write
+    claim through the scan; the loser waits for the commit, gets rowcount zero
+    and returns without parsing the Evidence JSON.
+    """
+    migration_name = "attachment_references_v1"
+    with engine.begin() as connection:
+        claim = connection.execute(
+            text(
+                "INSERT OR IGNORE INTO itkflow_schema_migration (name, applied_at) "
+                "VALUES (:name, CURRENT_TIMESTAMP)"
+            ),
+            {"name": migration_name},
+        )
+        if claim.rowcount != 1:
+            return
+
+        try:
+            # A savepoint lets a handled JSON1/SQL failure remove its marker
+            # without committing any partial blob/reference rows. A process
+            # crash rolls the whole outer transaction (including the claim)
+            # back automatically.
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "CREATE TEMP TABLE itkflow_attachment_descriptor_backfill AS "
+                        "SELECT e.id AS evidence_id, e.component_sn AS component_sn, "
+                        "e.test_type AS test_type, COALESCE(e.external_ref, '') AS run_ref, "
+                        "CASE WHEN json_extract(item.value, '$.source') = 'share_link' "
+                        "THEN 'share_link' ELSE 'pdb' END AS source, "
+                        "CAST(json_extract(item.value, '$.code') AS TEXT) AS pdb_code, "
+                        "CAST(json_extract(item.value, '$.filename') AS TEXT) AS filename, "
+                        "CAST(json_extract(item.value, '$.content_type') AS TEXT) "
+                        "AS content_type, "
+                        "CAST(json_extract(item.value, '$.title') AS TEXT) AS title, "
+                        "COALESCE(e.synced_at, CURRENT_TIMESTAMP) AS synced_at "
+                        "FROM test_run_evidence AS e, "
+                        "json_each(e.payload, '$.attachments') AS item "
+                        "WHERE json_extract(item.value, '$.code') IS NOT NULL"
+                    )
+                )
+                # Some old Evidence descriptors never reached the download
+                # phase, so create their not-yet-stored blob index too.
+                connection.execute(
+                    text(
+                        "INSERT OR IGNORE INTO test_run_attachment "
+                        "(component_sn, test_type, test_run_ref, source, pdb_code, "
+                        "filename, content_type, title, synced_at) "
+                        "SELECT component_sn, test_type, NULLIF(run_ref, ''), source, "
+                        "pdb_code, filename, content_type, title, synced_at "
+                        "FROM itkflow_attachment_descriptor_backfill "
+                        "WHERE pdb_code <> '' ORDER BY evidence_id"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT OR IGNORE INTO test_run_attachment_reference "
+                        "(attachment_id, component_sn, test_type, test_run_ref, "
+                        "filename, title, synced_at) "
+                        "SELECT attachment.id, descriptor.component_sn, "
+                        "descriptor.test_type, descriptor.run_ref, "
+                        "descriptor.filename, descriptor.title, descriptor.synced_at "
+                        "FROM itkflow_attachment_descriptor_backfill AS descriptor "
+                        "JOIN test_run_attachment AS attachment "
+                        "ON attachment.source = descriptor.source "
+                        "AND attachment.pdb_code = descriptor.pdb_code "
+                        "WHERE descriptor.pdb_code <> ''"
+                    )
+                )
+                # Rows created directly by older fixtures/tools may have no
+                # Evidence descriptor. Preserve their one legacy association,
+                # unless Evidence already supplied that blob/component.
+                connection.execute(
+                    text(
+                        "INSERT OR IGNORE INTO test_run_attachment_reference "
+                        "(attachment_id, component_sn, test_type, test_run_ref, "
+                        "filename, title, synced_at) "
+                        "SELECT attachment.id, attachment.component_sn, "
+                        "attachment.test_type, COALESCE(attachment.test_run_ref, ''), "
+                        "attachment.filename, attachment.title, attachment.synced_at "
+                        "FROM test_run_attachment AS attachment "
+                        "WHERE NOT EXISTS ("
+                        "SELECT 1 FROM test_run_attachment_reference AS reference "
+                        "WHERE reference.attachment_id = attachment.id "
+                        "AND reference.component_sn = attachment.component_sn"
+                        ")"
+                    )
+                )
+        except OperationalError as error:
+            connection.execute(
+                text("DELETE FROM itkflow_schema_migration WHERE name = :name"),
+                {"name": migration_name},
+            )
+            print(
+                "[schema] could not backfill attachment references "
+                f"({error.orig}); legacy rows remain readable and the next "
+                "evidence sync will create associations",
+                flush=True,
+            )
+        finally:
+            connection.execute(
+                text("DROP TABLE IF EXISTS itkflow_attachment_descriptor_backfill")
+            )

@@ -174,6 +174,7 @@ class ComponentPreviewActionOut(BaseModel):
 class TestRunAttachmentOut(BaseModel):
     """One mirrored attachment. `stored` distinguishes "known" from "on disk"."""
 
+    source: str
     code: str
     test_type: str
     test_run_ref: str | None
@@ -183,6 +184,13 @@ class TestRunAttachmentOut(BaseModel):
     size_bytes: int | None
     stored: bool
     is_image: bool
+
+
+class AttachmentLocatorOut(BaseModel):
+    """Public identity of one physical attachment blob."""
+
+    source: str
+    code: str
 
 
 class ChildAttachmentsOut(BaseModel):

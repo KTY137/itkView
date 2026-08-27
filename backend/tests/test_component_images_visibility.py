@@ -21,7 +21,7 @@ from sqlalchemy import event
 
 from app.config import Settings
 from app.main import create_app
-from app.models import Component, TestRunAttachment
+from app.models import Component, TestRunAttachment, TestRunAttachmentReference
 from app.pdb_credentials import generate_pdb_credential_encryption_key
 
 JPEG = b"\xff\xd8\xff\xe0itkflow"
@@ -71,19 +71,19 @@ def _attachment(session, attachments_dir, sn, code, *, content_type, suffix, on_
         target = attachments_dir / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(JPEG)
-    session.add(
-        TestRunAttachment(
-            component_sn=sn,
-            test_type="VISUAL_INSPECTION",
-            test_run_ref=f"RUN-{code}",
-            source="pdb",
-            pdb_code=code,
-            filename=f"picture{suffix}",
-            content_type=content_type,
-            size_bytes=len(JPEG),
-            relative_path=relative,
-        )
+    attachment = TestRunAttachment(
+        component_sn=sn,
+        test_type="VISUAL_INSPECTION",
+        test_run_ref=f"RUN-{code}",
+        source="pdb",
+        pdb_code=code,
+        filename=f"picture{suffix}",
+        content_type=content_type,
+        size_bytes=len(JPEG),
+        relative_path=relative,
     )
+    session.add(attachment)
+    return attachment
 
 
 def _image(session, attachments_dir, sn, code, on_disk=True):
@@ -138,7 +138,10 @@ def test_the_thumbnail_limit_bounds_components_not_attachment_rows(
     thumbnails = response.json()
     assert len(thumbnails) == 4, thumbnails
     assert sorted(thumbnails) == [f"20USES4000{index:04d}" for index in range(4)]
-    assert sorted(thumbnails.values()) == [f"photo-{index}" for index in range(4)]
+    assert sorted(locator["code"] for locator in thumbnails.values()) == [
+        f"photo-{index}" for index in range(4)
+    ]
+    assert {locator["source"] for locator in thumbnails.values()} == {"pdb"}
 
 
 def test_a_smaller_limit_returns_fewer_components_not_fewer_rows(
@@ -165,7 +168,9 @@ def test_a_component_with_only_instrument_data_yields_no_thumbnail(
 
     thumbnails = as_operator.get("/api/components/thumbnails?limit=1").json()
 
-    assert thumbnails == {"20USES40009002": "photo-9002"}
+    assert thumbnails == {
+        "20USES40009002": {"source": "pdb", "code": "photo-9002"}
+    }
 
 
 def test_thumbnails_still_skip_an_image_whose_file_is_gone(as_operator, attachments_dir):
@@ -175,6 +180,155 @@ def test_thumbnails_still_skip_an_image_whose_file_is_gone(as_operator, attachme
         session.commit()
 
     assert as_operator.get("/api/components/thumbnails").json() == {}
+
+
+def test_thumbnails_choose_browser_displayable_images_for_legacy_and_associations(
+    as_operator, attachments_dir
+):
+    """An older TIFF cannot hide a later JPEG or become a broken list tile."""
+    legacy_mixed = "20USES40009011"
+    legacy_tiff_only = "20USES40009012"
+    referenced_mixed = "20USES40009013"
+    referenced_tiff_only = "20USES40009014"
+    with as_operator.app.state.session_factory() as session:
+        for sn in (
+            legacy_mixed,
+            legacy_tiff_only,
+            referenced_mixed,
+            referenced_tiff_only,
+        ):
+            _component(session, sn, component_type="SENSOR")
+
+        _attachment(
+            session,
+            attachments_dir,
+            legacy_mixed,
+            "legacy-older-tiff",
+            content_type="image/tiff; charset=binary",
+            suffix=".tiff",
+        )
+        session.flush()
+        _attachment(
+            session,
+            attachments_dir,
+            legacy_mixed,
+            "legacy-newer-jpeg",
+            content_type="IMAGE/JPEG; charset=binary",
+            suffix=".jpg",
+        )
+        _attachment(
+            session,
+            attachments_dir,
+            legacy_tiff_only,
+            "legacy-only-tiff",
+            content_type="IMAGE/TIFF; charset=binary",
+            suffix=".tiff",
+        )
+
+        for target_sn, owner_sn, code, content_type, suffix in (
+            (
+                referenced_mixed,
+                "BLOBOWNER0000000001",
+                "reference-older-tiff",
+                "image/tiff; charset=binary",
+                ".tiff",
+            ),
+            (
+                referenced_mixed,
+                "BLOBOWNER0000000002",
+                "reference-newer-jpeg",
+                "IMAGE/JPEG; charset=binary",
+                ".jpg",
+            ),
+            (
+                referenced_tiff_only,
+                "BLOBOWNER0000000003",
+                "reference-only-tiff",
+                "image/tiff; charset=binary",
+                ".tiff",
+            ),
+        ):
+            attachment = _attachment(
+                session,
+                attachments_dir,
+                owner_sn,
+                code,
+                content_type=content_type,
+                suffix=suffix,
+            )
+            session.flush()
+            session.add(
+                TestRunAttachmentReference(
+                    attachment_id=attachment.id,
+                    component_sn=target_sn,
+                    test_type="VISUAL_INSPECTION",
+                    test_run_ref=f"RUN-{code}",
+                    filename=attachment.filename,
+                )
+            )
+        session.commit()
+
+    thumbnails = as_operator.get(
+        "/api/components/thumbnails?institute_code=TUDO"
+    ).json()
+
+    assert thumbnails == {
+        legacy_mixed: {"source": "pdb", "code": "legacy-newer-jpeg"},
+        referenced_mixed: {
+            "source": "pdb",
+            "code": "reference-newer-jpeg",
+        },
+    }
+
+
+def test_thumbnail_mime_normalization_matches_the_browser(
+    as_operator, attachments_dir
+):
+    """Whitespace around the MIME base type cannot hide a paintable image."""
+    legacy_sn = "20USES40009015"
+    referenced_sn = "20USES40009016"
+    with as_operator.app.state.session_factory() as session:
+        for sn in (legacy_sn, referenced_sn):
+            _component(session, sn, component_type="SENSOR")
+
+        _attachment(
+            session,
+            attachments_dir,
+            legacy_sn,
+            "legacy-spaced-jpeg",
+            content_type="\t  IMAGE/JPEG \t; charset=binary",
+            suffix=".jpg",
+        )
+        referenced = _attachment(
+            session,
+            attachments_dir,
+            "BLOBOWNER0000000004",
+            "reference-spaced-jpeg",
+            content_type="\tIMAGE/JPEG ;charset=binary",
+            suffix=".jpg",
+        )
+        session.flush()
+        session.add(
+            TestRunAttachmentReference(
+                attachment_id=referenced.id,
+                component_sn=referenced_sn,
+                test_type="VISUAL_INSPECTION",
+                test_run_ref="RUN-reference-spaced-jpeg",
+                filename=referenced.filename,
+            )
+        )
+        session.commit()
+
+    thumbnails = as_operator.get("/api/components/thumbnails").json()
+
+    assert thumbnails[legacy_sn] == {
+        "source": "pdb",
+        "code": "legacy-spaced-jpeg",
+    }
+    assert thumbnails[referenced_sn] == {
+        "source": "pdb",
+        "code": "reference-spaced-jpeg",
+    }
 
 
 # --- the gallery: a module page shows the parts it is made of --------------
@@ -227,6 +381,37 @@ def test_a_module_gallery_carries_its_childrens_images_tagged_by_child(
         for group in body["children"]
         for attachment in group["attachments"]
     )
+
+
+def test_child_gallery_normalizes_image_mime_case_and_parameters(
+    as_operator, attachments_dir
+):
+    factory = as_operator.app.state.session_factory
+    with factory() as session:
+        module = _component(session, MODULE_SN)
+        child = _component(
+            session,
+            f"{MODULE_SN}C0",
+            component_type="SENSOR",
+            type_code="ATLAS18R5",
+            parent=module,
+        )
+        _attachment(
+            session,
+            attachments_dir,
+            child.sn,
+            "childphoto-normalized-mime",
+            content_type="\t  IMAGE/JPEG \t; charset=binary",
+            suffix=".jpg",
+        )
+        session.commit()
+
+    body = as_operator.get(f"/api/components/{MODULE_SN}/attachments").json()
+
+    assert [[item["code"] for item in group["attachments"]] for group in body["children"]] == [
+        ["childphoto-normalized-mime"]
+    ]
+    assert body["children"][0]["attachments"][0]["is_image"] is True
 
 
 def test_a_childs_instrument_data_is_not_dragged_onto_the_parents_page(
