@@ -8,6 +8,7 @@ import {
   defaultXResult,
   histogramBins,
   pairedCurves,
+  representativeCurves,
 } from "./measurements";
 
 function curve(y: number[], x: number[] | null = null): MeasurementCurve {
@@ -205,5 +206,44 @@ describe("pairedCurves", () => {
     const indexOnly = curve([1, 2]);
     const mismatch = curve([1, 2], [0]);
     expect(pairedCurves([paired, indexOnly, mismatch])).toEqual([paired]);
+  });
+});
+
+describe("representativeCurves", () => {
+  it("returns a deterministic, evenly distributed subset with the exact limit", () => {
+    const curves = Array.from({ length: 100 }, (_, index) => ({
+      ...curve([index, index + 1], [0, 1]),
+      external_ref: `RUN-${index}`,
+    }));
+
+    const first = representativeCurves(curves, 8);
+    const second = representativeCurves(curves, 8);
+
+    expect(first).toHaveLength(8);
+    expect(first.map((entry) => entry.external_ref)).toEqual(
+      second.map((entry) => entry.external_ref),
+    );
+    expect(first[0].external_ref).toBe("RUN-0");
+    expect(first.some((entry) => entry.external_ref === "RUN-99")).toBe(true);
+  });
+
+  it("reserves space for failed runs so a dominant passed population cannot hide them", () => {
+    const curves = Array.from({ length: 100 }, (_, index) => ({
+      ...curve([index, index + 1], [0, 1]),
+      external_ref: `RUN-${index}`,
+      passed: index !== 1 && index !== 98,
+    }));
+
+    const sample = representativeCurves(curves, 8);
+
+    expect(sample.filter((entry) => !entry.passed).map((entry) => entry.external_ref)).toEqual([
+      "RUN-1",
+      "RUN-98",
+    ]);
+  });
+
+  it("does not clone or truncate a population already below the readable limit", () => {
+    const curves = [curve([1, 2], [0, 1]), curve([2, 3], [0, 1])];
+    expect(representativeCurves(curves, 32)).toBe(curves);
   });
 });

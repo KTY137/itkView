@@ -25,6 +25,7 @@ from app.pdb_credentials import (
 from app.pdb_sync import FetchResult, PdbSyncUnavailable
 from app.sync import SyncRecord
 from app.sync_jobs import (
+    ComponentSyncContext,
     SyncJobManager,
     acquire_component_sync_lease,
     acquire_evidence_sync_lease,
@@ -187,6 +188,92 @@ def test_legacy_sync_commits_terminal_lease_with_mirror(
         assert job is not None and job.status == "succeeded"
         assert job.active_key is None
         assert job.result["created"] == 1
+
+
+def test_legacy_sync_fetch_progress_heartbeats_its_owned_lease(
+    client: TestClient, session_factory, tudo: dict, as_operator
+):
+    observed: list[tuple[str, int, int | None, str, bool]] = []
+
+    def fetcher(settings, institute, access_codes, report):
+        assert report is not None
+        with session_factory() as session:
+            job = session.scalar(select(SyncJob).where(SyncJob.active_key == "components"))
+            assert job is not None
+            previous = (utcnow() - timedelta(hours=1)).replace(tzinfo=None)
+            job.updated_at = previous
+            session.commit()
+            job_id = job.id
+
+        report("fetching", 2, 5, "Fetching page 2.")
+
+        with session_factory() as session:
+            refreshed = session.get(SyncJob, job_id)
+            observed.append(
+                (
+                    refreshed.phase,
+                    refreshed.current,
+                    refreshed.total,
+                    refreshed.message,
+                    refreshed.updated_at > previous,
+                )
+            )
+        return FetchResult(records=[], skipped=0)
+
+    client.app.state.component_fetcher = fetcher
+    response = client.post("/api/sync/components/TUDO")
+
+    assert response.status_code == 200, response.text
+    assert observed == [("fetching", 2, 5, "Fetching page 2.", True)]
+
+
+def test_legacy_sync_zombie_cannot_publish_after_stale_takeover(
+    client: TestClient, session_factory, tudo: dict, as_operator
+):
+    old_job_id: list[int] = []
+    replacement_job_id: list[int] = []
+
+    def fetcher(settings, institute, access_codes, report):
+        with session_factory() as session:
+            old_job = session.scalar(
+                select(SyncJob).where(SyncJob.active_key == "components")
+            )
+            assert old_job is not None and old_job.user_id is not None
+            old_job_id.append(old_job.id)
+            owner_id = old_job.user_id
+            old_job.updated_at = utcnow() - timedelta(hours=1)
+            session.commit()
+
+        with session_factory() as session:
+            replacement = acquire_component_sync_lease(
+                session,
+                institute_code="TUDO",
+                requested_by="replacement@example.test",
+                user_id=owner_id,
+                initial_status="running",
+            )
+            assert replacement.created is True
+            replacement_job_id.append(replacement.job.id)
+
+        # This snapshot belongs to the now-interrupted request. Its return is
+        # deliberately late, after the replacement owns the canonical lease.
+        return FetchResult(records=[record("20USEM00000991")], skipped=0)
+
+    client.app.state.component_fetcher = fetcher
+    response = client.post("/api/sync/components/TUDO")
+
+    assert response.status_code == 409, response.text
+    assert "results were discarded" in response.json()["detail"]
+    with session_factory() as session:
+        assert session.get(Component, "20USEM00000991") is None
+        old_job = session.get(SyncJob, old_job_id[0])
+        replacement = session.get(SyncJob, replacement_job_id[0])
+        assert old_job.status == "interrupted"
+        assert old_job.active_key is None
+        assert old_job.result is None
+        assert replacement.status == "running"
+        assert replacement.active_key == "components"
+        assert replacement.result is None
 
 
 def test_component_job_runner_commits_mirror_and_terminal_result_atomically(
@@ -1669,15 +1756,23 @@ def test_component_and_evidence_jobs_run_on_separate_workers(
     the durable active_key leases remain the single-flight guard)."""
     manager = SyncJobManager(session_factory, client.app.state.settings)
     release = Event()
+    component_finished = Event()
     try:
         # Occupy the evidence worker the way a long institute sweep does.
         manager._evidence_executor.submit(lambda: release.wait(timeout=30))
+        # `sqlite:///:memory:` uses one StaticPool connection for every test
+        # thread. Polling that connection while the worker commits can make
+        # sqlite3 raise InterfaceError, which tests the driver rather than the
+        # executor split. The success callback runs after the terminal commit,
+        # so wait on it and inspect the row only once the connection is idle.
+        manager.enqueue_evidence = lambda *_args: component_finished.set()
         job_id = _queue_component_job(session_factory, requested_by="operator@example.org")
         manager.start(
             job_id,
             lambda settings, institute, access_codes, report: FetchResult(records=[], skipped=0),
         )
-        _wait_for(lambda: _job_status(session_factory, job_id) == "succeeded")
+        _wait_for(component_finished.is_set)
+        assert _job_status(session_factory, job_id) == "succeeded"
     finally:
         release.set()
         manager.shutdown()
@@ -2586,3 +2681,185 @@ def test_a_timestamp_tie_still_records_a_due_retry(session_factory, tudo: dict):
         result = session.get(SyncJob, component_id).result
         assert result[EVIDENCE_FOLLOWUP_PENDING_KEY] is True
         assert result[EVIDENCE_FOLLOWUP_RETRY_KEY] == FOLLOWUP_RETRY_DUE
+
+
+# --- stale-worker mutation fencing -----------------------------------------
+
+
+def _interrupt_and_release(session_factory, job_id: int) -> None:
+    """Simulate a newer process closing a stale worker's durable lease."""
+    with session_factory() as session:
+        job = session.get(SyncJob, job_id)
+        assert job is not None and job.status == "running"
+        finished = utcnow()
+        job.status = "interrupted"
+        job.error = "Lease taken over by a newer worker."
+        job.active_key = None
+        job.updated_at = finished
+        job.finished_at = finished
+        session.commit()
+
+
+def test_component_worker_losing_lease_during_fetch_cannot_mutate_mirror(
+    client: TestClient, session_factory, tudo: dict, as_operator
+):
+    job_id = _queue_component_job(
+        session_factory, requested_by="operator@example.org"
+    )
+    fetched_sn = "20USEM00000901"
+
+    def fetcher(settings, institute, access_codes, report):
+        _interrupt_and_release(session_factory, job_id)
+        return FetchResult(records=[record(fetched_sn)], skipped=0)
+
+    run_component_sync_job(
+        session_factory,
+        client.app.state.settings,
+        fetcher,
+        job_id,
+    )
+
+    with session_factory() as session:
+        assert session.scalar(select(Component).where(Component.sn == fetched_sn)) is None
+        job = session.get(SyncJob, job_id)
+        assert job.status == "interrupted"
+        assert job.active_key is None
+
+
+def test_evidence_worker_losing_lease_during_get_component_publishes_nothing(
+    client: TestClient,
+    session_factory,
+    tudo: dict,
+    as_operator,
+    tmp_path,
+):
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    client.app.state.settings.sync_evidence_strategy = "per_component"
+    client.app.state.settings.sync_fetch_concurrency = 1
+    _add_module(session_factory, "20USEM00000902")
+    job_id = _queue_evidence_job(
+        session_factory, requested_by="operator@example.org"
+    )
+
+    class _LeaseLosingClient(_EvidenceClient):
+        def get(self, action, json=None):
+            if action == "getComponent":
+                _interrupt_and_release(session_factory, job_id)
+            return super().get(action, json=json)
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, codes: _EvidenceGateway(_LeaseLosingClient()),
+        job_id,
+    )
+
+    with session_factory() as session:
+        assert session.scalar(select(func.count(TestRunEvidence.id))) == 0
+        assert session.scalar(select(func.count(TestRunAttachment.id))) == 0
+        job = session.get(SyncJob, job_id)
+        assert job.status == "interrupted"
+        assert job.active_key is None
+    attachment_root = tmp_path / "attachments"
+    assert not attachment_root.exists() or not any(
+        path.is_file() for path in attachment_root.rglob("*")
+    )
+
+
+def test_attachment_fetch_lease_loss_discards_row_and_final_file(
+    client: TestClient,
+    session_factory,
+    tudo: dict,
+    as_operator,
+    tmp_path,
+):
+    attachment_root = tmp_path / "attachments"
+    client.app.state.settings.attachment_dir = str(attachment_root)
+    client.app.state.settings.sync_evidence_strategy = "per_component"
+    client.app.state.settings.sync_fetch_concurrency = 1
+    _add_module(session_factory, "20USEM00000903")
+    job_id = _queue_evidence_job(
+        session_factory, requested_by="operator@example.org"
+    )
+
+    class _LeaseLosingAttachmentClient(_EvidenceClient):
+        def get(self, action, json=None):
+            result = super().get(action, json=json)
+            if action == "getTestRunAttachment":
+                _interrupt_and_release(session_factory, job_id)
+            return result
+
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, codes: _EvidenceGateway(_LeaseLosingAttachmentClient()),
+        job_id,
+    )
+
+    with session_factory() as session:
+        # Per-component evidence committed before the attachment phase remains
+        # valid, but the fenced attachment transaction publishes neither row.
+        assert session.scalar(select(func.count(TestRunEvidence.id))) == 1
+        assert session.scalar(select(func.count(TestRunAttachment.id))) == 0
+        assert session.get(SyncJob, job_id).status == "interrupted"
+    assert not attachment_root.exists() or not any(
+        path.is_file() for path in attachment_root.rglob("*")
+    )
+
+
+def test_rejected_component_auto_retry_submit_releases_its_new_lease(
+    client: TestClient,
+    session_factory,
+    tudo: dict,
+    as_operator,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        SyncJobManager, "_resume_evidence_followups", lambda self: None
+    )
+
+    class _RejectingExecutor:
+        def submit(self, function, *args):
+            raise RuntimeError("executor rejected submit")
+
+        def shutdown(self, wait=True, *, cancel_futures=False):
+            return None
+
+    with session_factory() as session:
+        user_id = session.scalar(select(User.id))
+        institute = session.scalar(
+            select(InstituteProfile).where(InstituteProfile.code == "TUDO")
+        )
+        assert user_id is not None and institute is not None
+        session.expunge(institute)
+    context = ComponentSyncContext(
+        institute=institute,
+        user_id=user_id,
+        requested_by="operator@example.org",
+    )
+    manager = SyncJobManager(session_factory, client.app.state.settings)
+    manager._component_executor.shutdown(wait=True, cancel_futures=True)
+    manager._component_executor = _RejectingExecutor()
+    try:
+        manager._start_component_retry(
+            lambda settings, profile, codes, report: FetchResult(records=[], skipped=0),
+            context,
+        )
+        jobs = _component_jobs(session_factory)
+        assert len(jobs) == 1
+        assert jobs[0].requested_by.startswith("automatic retry")
+        assert jobs[0].status == "failed"
+        assert jobs[0].active_key is None
+        assert jobs[0].id not in manager._queued_watch
+        with session_factory() as session:
+            assert (
+                session.scalar(
+                    select(SyncJob).where(
+                        SyncJob.kind == "components",
+                        SyncJob.active_key.is_not(None),
+                    )
+                )
+                is None
+            )
+    finally:
+        manager.shutdown()

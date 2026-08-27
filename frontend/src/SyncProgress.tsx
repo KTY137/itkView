@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { SyncJob, SyncJobPhase } from "./api";
 import { isSyncJobActive, syncJobElapsedSeconds } from "./componentSync";
 import type { SyncJobController } from "./componentSync";
@@ -17,6 +18,17 @@ const EVIDENCE_WORK_PHASES: SyncJobPhase[] = [
   "attachments",
   "committing",
 ];
+
+function useTelemetryNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+    if (!active) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  return now;
+}
 
 function workPhases(job: SyncJob): SyncJobPhase[] {
   return job.kind === "evidence" ? EVIDENCE_WORK_PHASES : COMPONENT_WORK_PHASES;
@@ -55,9 +67,10 @@ export function syncJobPhaseLabel(job: SyncJob): string {
 // Compatibility export for the original component-only caller/tests.
 export const componentSyncPhaseLabel = syncJobPhaseLabel;
 
-function jobTone(job: SyncJob): "running" | "success" | "error" {
+function jobTone(job: SyncJob): "running" | "success" | "warning" | "error" {
   if (job.status === "succeeded") return "success";
   if (job.status === "failed" || job.status === "interrupted") return "error";
+  if (job.heartbeat_stale === true) return "warning";
   return "running";
 }
 
@@ -159,6 +172,8 @@ function resultLabel(job: SyncJob): string | null {
     job.result.attachments_downloaded,
     job.result.attachments_reused,
     job.result.attachments_failed,
+    job.result.attachments_skipped ?? 0,
+    job.result.attachments_authentication_required ?? 0,
     job.result.attachments_total,
   );
 }
@@ -172,7 +187,8 @@ export function CompactSyncStatus({
   onOpen: () => void;
 }) {
   const phase = syncJobPhaseLabel(job);
-  const elapsed = formatDuration(syncJobElapsedSeconds(job));
+  const now = useTelemetryNow(isSyncJobActive(job));
+  const elapsed = formatDuration(syncJobElapsedSeconds(job, now));
   const count =
     job.total !== null
       ? `${formatCount(job.current)}/${formatCount(job.total)}`
@@ -180,11 +196,13 @@ export function CompactSyncStatus({
         ? formatCount(job.current)
         : null;
   const tone = jobTone(job);
+  const stale = isSyncJobActive(job) && job.heartbeat_stale === true;
+  const compactPhase = stale ? `${t.syncJob.mayBeStalled} · ${phase}` : phase;
   const accessibleLabel = [
     job.kind === "evidence"
       ? t.syncJob.openEvidenceDetails
       : t.syncJob.openDetails,
-    phase,
+    compactPhase,
     countLabel(job),
     t.syncJob.elapsed(elapsed),
   ].join(". ");
@@ -196,12 +214,12 @@ export function CompactSyncStatus({
       data-tone={tone}
       onClick={onOpen}
       aria-label={accessibleLabel}
-      title={job.message || phase}
+      title={stale ? t.syncJob.staleWarning(job.stale_after_seconds) : job.message || phase}
     >
       <span className="sync-status-dot" aria-hidden="true" />
       <span className="sync-job-compact-copy">
         <span className="sync-job-compact-phase" aria-live="polite">
-          {phase}
+          {compactPhase}
         </span>
         <span className="sync-job-compact-meta mono">
           {job.institute_code}
@@ -221,7 +239,9 @@ export function SyncProgressPanel({
   controller: SyncJobController;
   canRetry: boolean;
 }) {
-  const { job, startError, pollError, start, dismiss } = controller;
+  const { job, starting, startError, pollError, start, dismiss } = controller;
+  const active = isSyncJobActive(job);
+  const now = useTelemetryNow(active);
 
   if (job === null) {
     if (startError === null) return null;
@@ -243,9 +263,9 @@ export function SyncProgressPanel({
 
   const phase = syncJobPhaseLabel(job);
   const tone = jobTone(job);
+  const stale = active && job.heartbeat_stale === true;
   const step = phaseStep(job);
-  const active = isSyncJobActive(job);
-  const elapsed = formatDuration(syncJobElapsedSeconds(job));
+  const elapsed = formatDuration(syncJobElapsedSeconds(job, now));
   const result = resultLabel(job);
 
   return (
@@ -262,7 +282,7 @@ export function SyncProgressPanel({
         </div>
         <div className="sync-progress-times mono">
           <span>{t.syncJob.elapsed(elapsed)}</span>
-          <span>{t.syncJob.lastUpdate(formatAge(job.updated_at))}</span>
+          <span>{t.syncJob.lastUpdate(formatAge(job.updated_at, now))}</span>
         </div>
       </div>
 
@@ -283,6 +303,11 @@ export function SyncProgressPanel({
           {t.syncJob.connectionLost(pollError)}
         </p>
       )}
+      {stale && (
+        <p className="sync-job-warning" role="alert">
+          {t.syncJob.staleWarning(job.stale_after_seconds)}
+        </p>
+      )}
       {startError !== null && (
         <p className="sync-job-error" role="alert">
           {t.syncJob.retryFailed(startError)}
@@ -295,24 +320,38 @@ export function SyncProgressPanel({
       )}
       {(job.status === "failed" || job.status === "interrupted") && (
         <p className="sync-job-error" role="alert">
-          {job.error ?? phase} {t.syncJob.mirrorUnchanged}
+          {job.error ?? phase}{" "}
+          {job.kind === "components"
+            ? t.syncJob.componentMirrorPreserved
+            : t.syncJob.evidenceMirrorPreserved}
         </p>
       )}
 
-      {!active && (
+      {(!active || stale) && (
         <div className="sync-progress-actions">
-          {canRetry && (job.status === "failed" || job.status === "interrupted") && (
+          {canRetry &&
+            (stale || job.status === "failed" || job.status === "interrupted") && (
             <button
               type="button"
               className="btn primary"
+              disabled={starting}
+              aria-busy={starting}
               onClick={() => void start(job.institute_code)}
             >
-              {t.syncJob.retry}
+              {starting
+                ? stale
+                  ? t.syncJob.checkingAndRetrying
+                  : t.syncJob.retrying
+                : stale
+                  ? t.syncJob.checkAndRetry
+                  : t.syncJob.retry}
             </button>
           )}
-          <button type="button" className="btn" onClick={dismiss}>
-            {t.syncJob.dismiss}
-          </button>
+          {!active && (
+            <button type="button" className="btn" disabled={starting} onClick={dismiss}>
+              {t.syncJob.dismiss}
+            </button>
+          )}
         </div>
       )}
     </section>

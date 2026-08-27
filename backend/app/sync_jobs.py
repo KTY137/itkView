@@ -47,6 +47,7 @@ from app.pdb_test_evidence import (
     flat_fingerprint,
     records_from_index,
 )
+from app.share_credentials import SharePasswordResolver, load_share_passwords
 from app.sync import UnknownParentError, sync_components
 from app.test_run_evidence import EvidenceSyncStats, is_withdrawn, upsert_test_run_evidence
 from app.tool_sync import sync_tools_from_components
@@ -131,6 +132,16 @@ class SyncLeaseBusy(RuntimeError):
     """The short database lease transaction stayed busy after bounded retry."""
 
 
+class SyncLeaseLost(RuntimeError):
+    """The worker no longer owns the durable lease for its mutation scope.
+
+    This is an internal control-flow signal, not a failed sync verdict. A stale
+    worker can wake after another process has closed its job and started a
+    replacement. Every mirror mutation is fenced by the original job row, so
+    that worker must discard its pending work without rewriting either job.
+    """
+
+
 @dataclass(frozen=True)
 class SyncLease:
     job: SyncJob
@@ -144,6 +155,7 @@ class ComponentSyncContext:
     institute: InstituteProfile
     user_id: int
     requested_by: str
+    active_key: str = COMPONENT_SYNC_ACTIVE_KEY
     # True when this job *is* the one automatic retry; its own failure must
     # never schedule another.
     auto_retry: bool = False
@@ -156,6 +168,7 @@ class EvidenceSyncContext:
     institute: InstituteProfile
     user_id: int
     requested_by: str = ""
+    active_key: str = ""
     auto_retry: bool = False
     # True when this attempt covered a durable component generation. Its retry
     # is reconstructed from that component row, so the process-local timer
@@ -459,15 +472,22 @@ class SyncJobManager:
             self._schedule_retry(lambda: self._start_component_retry(fetcher, context))
 
         self._watch_queued(job_id)
-        self._component_executor.submit(
-            run_component_sync_job,
-            self._session_factory,
-            self._settings,
-            fetcher,
-            job_id,
-            self.enqueue_evidence,
-            schedule_retry,
-        )
+        try:
+            self._component_executor.submit(
+                run_component_sync_job,
+                self._session_factory,
+                self._settings,
+                fetcher,
+                job_id,
+                self.enqueue_evidence,
+                schedule_retry,
+            )
+        except Exception:
+            # Match the evidence executor: a rejected submit has no Future and
+            # therefore no later callback that could remove this never-run
+            # queued job from the heartbeat keeper.
+            self._unwatch_queued(job_id)
+            raise
 
     def start_evidence(self, job_id: int) -> None:
         self._watch_queued(job_id)
@@ -730,13 +750,22 @@ class SyncJobManager:
         for job_id in watched:
             try:
                 with self._session_factory() as session:
-                    job = session.get(SyncJob, job_id)
-                    if job is None or job.status != "queued":
+                    refreshed = session.execute(
+                        update(SyncJob)
+                        .where(
+                            SyncJob.id == job_id,
+                            SyncJob.status == "queued",
+                            SyncJob.active_key.is_not(None),
+                        )
+                        .values(updated_at=utcnow())
+                        .execution_options(synchronize_session=False)
+                    )
+                    if refreshed.rowcount != 1:
                         # Running jobs heartbeat through their own progress
                         # writes; terminal jobs need nothing anymore.
                         finished.append(job_id)
+                        session.rollback()
                         continue
-                    job.updated_at = utcnow()
                     session.commit()
             except Exception:
                 # Best effort: a busy database simply means the next tick
@@ -804,6 +833,7 @@ class SyncJobManager:
     def _start_component_retry(
         self, fetcher: ComponentFetcher, context: ComponentSyncContext
     ) -> None:
+        lease: SyncLease | None = None
         try:
             with self._session_factory() as session:
                 lease = acquire_component_sync_lease(
@@ -815,7 +845,15 @@ class SyncJobManager:
             if lease.created:
                 self.start(lease.job.id, fetcher)
         except Exception:
-            # Best effort by design; the failed job row remains authoritative.
+            # Lease creation commits before executor submission. A rejected
+            # submit must release that new lease instead of letting the queued
+            # heartbeat keeper preserve a job that can never run.
+            if lease is not None and lease.created:
+                fail_sync_job(
+                    self._session_factory,
+                    lease.job.id,
+                    "Component sync could not be scheduled.",
+                )
             log.error("The automatic component sync retry could not be queued.")
 
     def _start_evidence_retry(self, context: EvidenceSyncContext) -> None:
@@ -907,9 +945,13 @@ def run_component_sync_job(
         # One transaction owns every mirror mutation plus the terminal job
         # result. A crash/error therefore cannot expose a partial prune/history.
         with session_factory() as session:
+            # Take the job-row lock before touching the mirror. A stale
+            # takeover either wins before this fence (and this transaction
+            # writes nothing) or waits until the complete snapshot commits.
+            _require_sync_job_mutation_lease(session, job_id, context.active_key)
             job = session.get(SyncJob, job_id)
-            if job is None or job.status != "running":
-                return
+            if job is None:
+                raise SyncLeaseLost
             live_institute = session.scalar(
                 select(InstituteProfile).where(InstituteProfile.code == job.institute_code)
             )
@@ -942,17 +984,31 @@ def run_component_sync_job(
                 # post-commit snapshot attempt reaches a terminal outcome.
                 result[EVIDENCE_FOLLOWUP_PENDING_KEY] = True
             finished = utcnow()
-            job.status = "succeeded"
-            job.phase = "complete"
-            job.current = len(fetched.records)
-            job.total = len(fetched.records)
-            job.percent = 100.0
-            job.message = "Component sync completed."
-            job.result = result
-            job.error = None
-            job.active_key = None
-            job.updated_at = finished
-            job.finished_at = finished
+            finalized = session.execute(
+                update(SyncJob)
+                .where(
+                    SyncJob.id == job_id,
+                    SyncJob.status == "running",
+                    SyncJob.active_key == context.active_key,
+                )
+                .values(
+                    status="succeeded",
+                    phase="complete",
+                    current=len(fetched.records),
+                    total=len(fetched.records),
+                    percent=100.0,
+                    message="Component sync completed.",
+                    result=result,
+                    error=None,
+                    active_key=None,
+                    updated_at=finished,
+                    finished_at=finished,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if finalized.rowcount != 1:
+                session.rollback()
+                raise SyncLeaseLost
             session.commit()
         if on_success is not None:
             try:
@@ -968,6 +1024,11 @@ def run_component_sync_job(
                     "Could not enqueue evidence sync after component job %s.",
                     job_id,
                 )
+    except SyncLeaseLost:
+        log.warning(
+            "Component sync job %s stopped after losing its durable lease.", job_id
+        )
+        return
     except Exception as exc:
         detail = _public_sync_error(exc, access_codes=access_codes)
         # Do not use log.exception here. Some versions of itkdb include a
@@ -976,6 +1037,130 @@ def run_component_sync_job(
         log.error("Component sync job %s failed: %s", job_id, detail)
         fail_sync_job(session_factory, job_id, detail)
         _maybe_schedule_auto_retry(exc, context, on_transient_failure)
+
+
+def run_inline_component_sync(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    fetcher: ComponentFetcher,
+    job_id: int,
+    access_codes: PdbAccessCodes,
+) -> dict[str, Any]:
+    """Run the legacy synchronous component endpoint behind its durable lease.
+
+    The endpoint predates the background manager but shares the same global
+    lease. Fetch progress therefore heartbeats through short sessions, while
+    the authoritative mirror snapshot and terminal success are fenced by the
+    original job row in one transaction. A stale request that resumes after a
+    takeover can return an error, but cannot publish either mirror rows or job
+    state.
+    """
+
+    with session_factory() as session:
+        job = session.get(SyncJob, job_id)
+        if (
+            job is None
+            or job.kind != COMPONENT_SYNC_KIND
+            or job.status != "running"
+            or not job.active_key
+        ):
+            raise SyncLeaseLost
+        expected_active_key = job.active_key
+        institute = session.scalar(
+            select(InstituteProfile).where(InstituteProfile.code == job.institute_code)
+        )
+        if institute is None:
+            raise RuntimeError(
+                f"Institute '{job.institute_code}' disappeared before its sync started."
+            )
+        session.expunge(institute)
+
+    def report(
+        phase: str,
+        current: int,
+        total: int | None,
+        message: str | None = None,
+    ) -> None:
+        _update_progress(
+            session_factory,
+            job_id,
+            phase,
+            current,
+            total,
+            message=message,
+        )
+
+    report("fetching", 0, None)
+    fetched = fetcher(settings, institute, access_codes, report)
+    _update_progress(
+        session_factory,
+        job_id,
+        "upserting",
+        0,
+        len(fetched.records),
+        message=f"Updating the local mirror ({len(fetched.records)} records) and tools.",
+    )
+
+    with session_factory() as session:
+        # This conditional UPDATE is deliberately the first write in the
+        # snapshot transaction. It serializes against stale takeover before a
+        # component, prune flag, stage event, or tool row can be published.
+        _require_sync_job_mutation_lease(session, job_id, expected_active_key)
+        job = session.get(SyncJob, job_id)
+        if job is None:
+            raise SyncLeaseLost
+        live_institute = session.scalar(
+            select(InstituteProfile).where(InstituteProfile.code == job.institute_code)
+        )
+        if live_institute is None:
+            raise RuntimeError(
+                f"Institute '{job.institute_code}' disappeared while its sync was running."
+            )
+
+        stats = sync_components(
+            session,
+            fetched.records,
+            prune_scope=live_institute.code,
+        )
+        sync_tools_from_components(session, live_institute)
+        result = {
+            "institute_code": live_institute.code,
+            "fetched": len(fetched.records) + fetched.skipped,
+            "skipped": fetched.skipped,
+            "created": stats.created,
+            "updated": stats.updated,
+            "unchanged": stats.unchanged,
+            "stale": stats.stale,
+            "total": stats.total,
+        }
+        finished = utcnow()
+        finalized = session.execute(
+            update(SyncJob)
+            .where(
+                SyncJob.id == job_id,
+                SyncJob.status == "running",
+                SyncJob.active_key == expected_active_key,
+            )
+            .values(
+                status="succeeded",
+                phase="complete",
+                current=len(fetched.records),
+                total=len(fetched.records),
+                percent=100.0,
+                message="Component sync completed.",
+                result=result,
+                error=None,
+                active_key=None,
+                updated_at=finished,
+                finished_at=finished,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if finalized.rowcount != 1:
+            session.rollback()
+            raise SyncLeaseLost
+        session.commit()
+    return result
 
 
 def _evidence_component_types(institute: InstituteProfile) -> tuple[str, ...]:
@@ -1072,6 +1257,7 @@ def _claim_evidence_job(
             institute=institute,
             user_id=user_id,
             requested_by=requested_by,
+            active_key=canonical_active_key,
             auto_retry=requested_by.startswith(AUTO_RETRY_REQUESTED_BY_PREFIX),
         )
 
@@ -1239,6 +1425,7 @@ def run_evidence_sync_job(
     """Mirror detailed evidence and every downloadable attachment for an institute."""
 
     access_codes: PdbAccessCodes | None = None
+    share_passwords = SharePasswordResolver()
     context: EvidenceSyncContext | None = None
     try:
         context = _claim_evidence_job(session_factory, job_id)
@@ -1246,6 +1433,11 @@ def run_evidence_sync_job(
             return
         with session_factory() as credential_session:
             access_codes = load_pdb_credentials(
+                credential_session,
+                user_id=context.user_id,
+                encryption_key=settings.pdb_credential_encryption_key,
+            )
+            share_passwords = load_share_passwords(
                 credential_session,
                 user_id=context.user_id,
                 encryption_key=settings.pdb_credential_encryption_key,
@@ -1303,9 +1495,16 @@ def run_evidence_sync_job(
             # re-confirms.
             nonlocal evidence_stats, runs_seen
             runs_seen += len(records)
-            if not records:
-                return
             with session_factory() as evidence_session:
+                # Fence even an empty component. Besides stopping a worker
+                # that lost its lease, this heartbeat is committed in the same
+                # transaction that owns any evidence changes.
+                _require_sync_job_mutation_lease(
+                    evidence_session, job_id, context.active_key
+                )
+                if not records:
+                    evidence_session.commit()
+                    return
                 batch_stats = upsert_test_run_evidence(evidence_session, records)
                 evidence_session.commit()
             evidence_stats = EvidenceSyncStats(
@@ -1694,6 +1893,10 @@ def run_evidence_sync_job(
         for component_index, (component_sn, descriptors) in enumerate(
             attachment_plan, start=1
         ):
+            if not _refresh_sync_job_lease(
+                session_factory, job_id, context.active_key
+            ):
+                raise SyncLeaseLost
             with session_factory() as attachment_session:
                 stats = download_attachments(
                     attachment_session,
@@ -1703,12 +1906,21 @@ def run_evidence_sync_job(
                     heartbeat=attachment_heartbeat,
                     descriptors=descriptors,
                     breaker=breaker,
+                    share_passwords=share_passwords,
+                    before_commit=lambda active_session: _require_sync_job_mutation_lease(
+                        active_session, job_id, context.active_key
+                    ),
                 )
                 attachment_session.commit()
             attachment_stats = AttachmentSyncStats(
                 downloaded=attachment_stats.downloaded + stats.downloaded,
                 reused=attachment_stats.reused + stats.reused,
                 failed=attachment_stats.failed + stats.failed,
+                skipped=attachment_stats.skipped + stats.skipped,
+                authentication_required=(
+                    attachment_stats.authentication_required
+                    + stats.authentication_required
+                ),
             )
             processed_files += stats.total
             if breaker.sweep_is_doomed:
@@ -1758,25 +1970,45 @@ def run_evidence_sync_job(
             "attachments_downloaded": attachment_stats.downloaded,
             "attachments_reused": attachment_stats.reused,
             "attachments_failed": attachment_stats.failed,
+            "attachments_skipped": attachment_stats.skipped,
+            "attachments_authentication_required": (
+                attachment_stats.authentication_required
+            ),
             "attachments_total": attachment_stats.total,
         }
         with session_factory() as session:
-            job = session.get(SyncJob, job_id)
-            if job is None or job.status != "running":
-                return
             finished = utcnow()
-            job.status = "succeeded"
-            job.phase = "complete"
-            job.current = attachment_stats.total
-            job.total = attachment_total
-            job.percent = 100.0
-            job.message = "Evidence sync completed."
-            job.result = result
-            job.error = None
-            job.active_key = None
-            job.updated_at = finished
-            job.finished_at = finished
+            finalized = session.execute(
+                update(SyncJob)
+                .where(
+                    SyncJob.id == job_id,
+                    SyncJob.status == "running",
+                    SyncJob.active_key == context.active_key,
+                )
+                .values(
+                    status="succeeded",
+                    phase="complete",
+                    current=attachment_stats.total,
+                    total=attachment_total,
+                    percent=100.0,
+                    message="Evidence sync completed.",
+                    result=result,
+                    error=None,
+                    active_key=None,
+                    updated_at=finished,
+                    finished_at=finished,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if finalized.rowcount != 1:
+                session.rollback()
+                raise SyncLeaseLost
             session.commit()
+    except SyncLeaseLost:
+        log.warning(
+            "Evidence sync job %s stopped after losing its durable lease.", job_id
+        )
+        return
     except Exception as exc:
         detail = _public_sync_error(exc, access_codes=access_codes, kind=EVIDENCE_SYNC_KIND)
         log.error("Evidence sync job %s failed: %s", job_id, detail)
@@ -1862,12 +2094,58 @@ def _public_sync_error(
     return detail
 
 
+def _require_sync_job_mutation_lease(
+    session: Session, job_id: int, active_key: str
+) -> None:
+    """Fence one mirror mutation transaction with its still-owned job row.
+
+    The conditional UPDATE is both an ownership check and a row lock. A stale
+    takeover and this transaction cannot both win: whichever updates the job
+    first commits its verdict, while the other observes a zero row count and
+    must discard its pending mirror/file work.
+    """
+
+    if not active_key:
+        raise SyncLeaseLost
+    fenced = session.execute(
+        update(SyncJob)
+        .where(
+            SyncJob.id == job_id,
+            SyncJob.status == "running",
+            SyncJob.active_key == active_key,
+        )
+        .values(updated_at=utcnow())
+        .execution_options(synchronize_session=False)
+    )
+    if fenced.rowcount != 1:
+        raise SyncLeaseLost
+
+
+def _refresh_sync_job_lease(
+    session_factory: sessionmaker[Session], job_id: int, active_key: str
+) -> bool:
+    """Refresh a worker lease before an expensive non-transactional phase."""
+
+    try:
+        with session_factory() as session:
+            _require_sync_job_mutation_lease(session, job_id, active_key)
+            session.commit()
+        return True
+    except SyncLeaseLost:
+        return False
+
+
 def _claim_job(session_factory: sessionmaker[Session], job_id: int) -> ComponentSyncContext | None:
     """Move a queued job to running and return a detached secret-free context."""
 
     with session_factory() as session:
         job = session.get(SyncJob, job_id)
-        if job is None or job.status != "queued":
+        if (
+            job is None
+            or job.status != "queued"
+            or job.kind != COMPONENT_SYNC_KIND
+            or job.active_key != COMPONENT_SYNC_ACTIVE_KEY
+        ):
             return None
         if job.user_id is None:
             raise RuntimeError(
@@ -1881,24 +2159,42 @@ def _claim_job(session_factory: sessionmaker[Session], job_id: int) -> Component
                 f"Institute '{job.institute_code}' disappeared before its sync started."
             )
 
+        user_id = job.user_id
+        requested_by = job.requested_by
+        expected_active_key = job.active_key
         started = utcnow()
-        job.status = "running"
-        job.phase = "fetching"
-        job.current = 0
-        job.total = None
-        job.percent = None
-        job.message = "Connecting to the PDB."
-        job.started_at = started
-        job.updated_at = started
+        claimed = session.execute(
+            update(SyncJob)
+            .where(
+                SyncJob.id == job_id,
+                SyncJob.status == "queued",
+                SyncJob.active_key == expected_active_key,
+            )
+            .values(
+                status="running",
+                phase="fetching",
+                current=0,
+                total=None,
+                percent=None,
+                message="Connecting to the PDB.",
+                started_at=started,
+                updated_at=started,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if claimed.rowcount != 1:
+            session.rollback()
+            return None
         # Fetching must not keep a database transaction/read lock open; the
         # progress callback writes through short independent sessions.
         session.expunge(institute)
         session.commit()
         return ComponentSyncContext(
             institute=institute,
-            user_id=job.user_id,
-            requested_by=job.requested_by,
-            auto_retry=job.requested_by.startswith(AUTO_RETRY_REQUESTED_BY_PREFIX),
+            user_id=user_id,
+            requested_by=requested_by,
+            active_key=expected_active_key,
+            auto_retry=requested_by.startswith(AUTO_RETRY_REQUESTED_BY_PREFIX),
         )
 
 
@@ -1910,26 +2206,48 @@ def _update_progress(
     total: int | None,
     *,
     message: str | None = None,
-) -> None:
+) -> bool:
     """Persist one monotonic-in-phase progress observation."""
 
     try:
         with session_factory() as session:
             job = session.get(SyncJob, job_id)
             if job is None or job.status not in ACTIVE_SYNC_STATUSES:
-                return
-            job.status = "running"
-            job.phase = phase
-            job.current = max(0, current)
-            job.total = total if total is None else max(0, total)
-            job.percent = _percent(job.current, job.total)
-            job.message = message or _progress_message(phase, job.current, job.total)
-            job.updated_at = utcnow()
+                return False
+            expected_active_key = job.active_key
+            if expected_active_key is None:
+                return False
+            normalized_current = max(0, current)
+            normalized_total = total if total is None else max(0, total)
+            persisted = session.execute(
+                update(SyncJob)
+                .where(
+                    SyncJob.id == job_id,
+                    SyncJob.status.in_(ACTIVE_SYNC_STATUSES),
+                    SyncJob.active_key == expected_active_key,
+                )
+                .values(
+                    status="running",
+                    phase=phase,
+                    current=normalized_current,
+                    total=normalized_total,
+                    percent=_percent(normalized_current, normalized_total),
+                    message=message
+                    or _progress_message(phase, normalized_current, normalized_total),
+                    updated_at=utcnow(),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if persisted.rowcount != 1:
+                session.rollback()
+                return False
             session.commit()
+            return True
     except Exception:
         # Progress telemetry must never turn a successful read-only fetch into a
         # failed authoritative sync. Terminal state is still written atomically.
         log.warning("Could not persist progress for sync job %s", job_id, exc_info=True)
+        return False
 
 
 def _percent(current: int, total: int | None) -> float | None:
@@ -1993,24 +2311,46 @@ def fail_sync_job(
         job = session.get(SyncJob, job_id)
         if job is None or job.status not in ACTIVE_SYNC_STATUSES:
             return False
+        expected_active_key = job.active_key
+        if expected_active_key is None:
+            return False
+        job_kind = job.kind
+        job_started_at = job.started_at
+        institute_code = job.institute_code
         finished = utcnow()
-        job.status = "failed"
-        job.message = (
-            "Evidence sync failed." if job.kind == EVIDENCE_SYNC_KIND else "Component sync failed."
+        failed = session.execute(
+            update(SyncJob)
+            .where(
+                SyncJob.id == job_id,
+                SyncJob.status.in_(ACTIVE_SYNC_STATUSES),
+                SyncJob.active_key == expected_active_key,
+            )
+            .values(
+                status="failed",
+                message=(
+                    "Evidence sync failed."
+                    if job_kind == EVIDENCE_SYNC_KIND
+                    else "Component sync failed."
+                ),
+                error=detail[:8000],
+                active_key=None,
+                updated_at=finished,
+                finished_at=finished,
+            )
+            .execution_options(synchronize_session=False)
         )
-        job.error = detail[:8000]
-        job.active_key = None
-        job.updated_at = finished
-        job.finished_at = finished
+        if failed.rowcount != 1:
+            session.rollback()
+            return False
         if (
-            job.kind == EVIDENCE_SYNC_KIND
-            and job.started_at is not None
+            job_kind == EVIDENCE_SYNC_KIND
+            and job_started_at is not None
             and followup_retry_state is not None
         ):
             component_jobs = session.scalars(
                 select(SyncJob).where(
                     SyncJob.kind == COMPONENT_SYNC_KIND,
-                    SyncJob.institute_code == job.institute_code,
+                    SyncJob.institute_code == institute_code,
                     SyncJob.status == "succeeded",
                 )
             )
@@ -2032,8 +2372,8 @@ def fail_sync_job(
                 # committed and its evidence job was claimed inside one clock
                 # tick. So the verdict is recorded on a tie whatever it says.
                 if not (
-                    _timestamp_after(job.started_at, component_job.finished_at)
-                    or _timestamps_equal(job.started_at, component_job.finished_at)
+                    _timestamp_after(job_started_at, component_job.finished_at)
+                    or _timestamps_equal(job_started_at, component_job.finished_at)
                 ):
                     continue
                 result[EVIDENCE_FOLLOWUP_RETRY_KEY] = followup_retry_state

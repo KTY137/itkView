@@ -95,6 +95,7 @@ from app.pdb_credentials import (
 from app.pdb_gateway import PdbClientUnavailable
 from app.pdb_scope import is_registrable_type
 from app.pdb_sync import PdbSyncUnavailable
+from app.required_test_stats import required_test_stats
 from app.schemas import (
     AssemblyDraftIn,
     AssemblyPreviewOut,
@@ -147,9 +148,12 @@ from app.schemas import (
     ReminderOccurrenceOut,
     ReminderOut,
     ReminderUpdate,
+    RequiredTestStatsOut,
     RequirementCheckOut,
     SetupAdminIn,
     SetupStatusOut,
+    ShareCredentialOut,
+    ShareCredentialPut,
     ShipmentItemOut,
     ShipmentOut,
     ShipmentReceptionUpdate,
@@ -171,14 +175,18 @@ from app.schemas import (
 )
 from app.stage_service import evaluate_for_component
 from app.stats import production_stats
-from app.sync import UnknownParentError, sync_components
+from app.sync import UnknownParentError
 from app.sync_jobs import (
     ACTIVE_SYNC_STATUSES,
     COMPONENT_SYNC_KIND,
+    SYNC_HEARTBEAT_GRACE,
     SyncLeaseBusy,
+    SyncLeaseLost,
+    _job_heartbeat_stale,
     acquire_component_sync_lease,
     acquire_evidence_sync_lease,
     fail_sync_job,
+    run_inline_component_sync,
 )
 from app.tool_sync import sync_tools_from_components
 
@@ -186,6 +194,17 @@ from app.tool_sync import sync_tools_from_components
 def get_db(request: Request) -> Iterator[Session]:
     with request.app.state.session_factory() as session:
         yield session
+
+
+def _sync_job_out(job: SyncJob) -> SyncJobOut:
+    """Serialize heartbeat state with the server's canonical stale clock."""
+
+    return SyncJobOut.model_validate(job).model_copy(
+        update={
+            "heartbeat_stale": _job_heartbeat_stale(job),
+            "stale_after_seconds": int(SYNC_HEARTBEAT_GRACE.total_seconds()),
+        }
+    )
 
 
 def current_session(request: Request, db: Session = Depends(get_db)) -> UserSession | None:
@@ -796,6 +815,130 @@ def delete_personal_pdb_connection(
     db.commit()
 
 
+def _share_credential_out(status) -> ShareCredentialOut:
+    return ShareCredentialOut(
+        id=status.id,
+        provider_host=status.provider_host,
+        token_hint=status.token_hint,
+        updated_at=status.updated_at,
+    )
+
+
+@router.get(
+    "/api/account/share-credentials",
+    response_model=list[ShareCredentialOut],
+    tags=["account", "attachments"],
+)
+def get_share_credentials(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> list[ShareCredentialOut]:
+    """List only non-secret metadata for this user's public-share passwords."""
+
+    from app.share_credentials import list_share_credentials
+
+    return [
+        _share_credential_out(status)
+        for status in list_share_credentials(db, user_id=user.id)
+    ]
+
+
+@router.put(
+    "/api/account/share-credentials",
+    response_model=ShareCredentialOut,
+    tags=["account", "attachments"],
+)
+def put_share_credential(
+    body: ShareCredentialPut,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> ShareCredentialOut:
+    """Validate and locally save a password for one HTTPS public share.
+
+    Private CERNBox account URLs are intentionally rejected: supporting them
+    requires CERN OAuth, never collection of a person's CERN password.
+    Share access is checked only when an evidence-bound sync needs the URL;
+    this user-controlled settings endpoint never makes an outbound request.
+    """
+
+    from app.share_credentials import (
+        ShareLinkValidationError,
+        SharePasswordValidationError,
+        public_share_identity,
+        save_share_password,
+    )
+
+    settings = request.app.state.settings
+    url = body.url.strip()
+    password = body.password.get_secret_value()
+    try:
+        identity = public_share_identity(url)
+    except (ShareLinkValidationError, SharePasswordValidationError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    try:
+        row = save_share_password(
+            db,
+            user_id=user.id,
+            url=url,
+            password=password,
+            encryption_key=settings.pdb_credential_encryption_key,
+        )
+        db.add(
+            AuditEvent(
+                actor=user.email,
+                user_id=user.id,
+                action="share_credential.saved",
+                subject=f"user:{user.id}:share-credential",
+                detail={"provider_host": identity.host, "result": "saved"},
+            )
+        )
+        db.commit()
+        db.refresh(row)
+    except SharePasswordValidationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    except (CredentialKeyMissingError, CredentialKeyInvalidError):
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Encrypted public-share credential storage is not configured.",
+        ) from None
+    return _share_credential_out(row)
+
+
+@router.delete(
+    "/api/account/share-credentials/{credential_id}",
+    status_code=204,
+    tags=["account", "attachments"],
+)
+def delete_share_password(
+    credential_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> None:
+    from app.share_credentials import delete_share_credential
+
+    removed = delete_share_credential(
+        db,
+        user_id=user.id,
+        credential_id=credential_id,
+    )
+    if not removed:
+        raise HTTPException(status_code=404, detail="Saved public share not found.")
+    db.add(
+        AuditEvent(
+            actor=user.email,
+            user_id=user.id,
+            action="share_credential.removed",
+            subject=f"user:{user.id}:share-credential:{credential_id}",
+            detail={"result": "removed"},
+        )
+    )
+    db.commit()
+
+
 @router.get("/api/users", response_model=list[UserOut], tags=["users"])
 def list_users(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
     stmt = select(User).order_by(User.email)
@@ -1021,10 +1164,58 @@ def operations_health(
             )
     else:
         institute = None
-    return collect_ops_health(
+    snapshot = collect_ops_health(
         db,
         request.app.state.settings,
         institute=institute,
+    )
+    from app.diagnostics import diagnostics_available
+
+    snapshot["diagnostics_available"] = (
+        admin.institute_id is None
+        and diagnostics_available(getattr(request.app.state, "desktop_log_dir", None))
+    )
+    return snapshot
+
+
+@router.get("/api/ops/diagnostics", tags=["operations"])
+def operations_diagnostics(
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> Response:
+    """Download a bounded local desktop log bundle for global admins only."""
+
+    if admin.institute_id is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Installation diagnostics require a global administrator.",
+        )
+    from app.diagnostics import DiagnosticsUnavailableError, build_diagnostics_bundle
+
+    log_dir = getattr(request.app.state, "desktop_log_dir", None)
+    try:
+        bundle = build_diagnostics_bundle(
+            db,
+            log_dir=log_dir,
+            app_version=__version__,
+        )
+    except (DiagnosticsUnavailableError, OSError, TypeError):
+        raise HTTPException(
+            status_code=404,
+            detail="Desktop diagnostics are not available on this server.",
+        ) from None
+    stamp = utcnow().strftime("%Y%m%d-%H%M%S")
+    return Response(
+        content=bundle,
+        media_type="application/zip",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": (
+                f'attachment; filename="itkFlow-diagnostics-{stamp}.zip"'
+            ),
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -2062,7 +2253,7 @@ def active_sync_job(
     institute_code: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
-) -> SyncJob | Response:
+) -> SyncJobOut | Response:
     """Discover a live job after navigation, refresh or another tab."""
 
     statement = select(SyncJob).where(
@@ -2078,7 +2269,7 @@ def active_sync_job(
             SyncJob.id.desc(),
         )
     )
-    return job if job is not None else Response(status_code=204)
+    return _sync_job_out(job) if job is not None else Response(status_code=204)
 
 
 @router.get(
@@ -2092,14 +2283,14 @@ def latest_sync_job(
     institute_code: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
-) -> SyncJob | Response:
+) -> SyncJobOut | Response:
     """Recover the newest persisted job, including terminal success/errors."""
 
     statement = select(SyncJob).where(SyncJob.kind == kind)
     if institute_code is not None:
         statement = statement.where(SyncJob.institute_code == institute_code)
     job = db.scalar(statement.order_by(SyncJob.id.desc()))
-    return job if job is not None else Response(status_code=204)
+    return _sync_job_out(job) if job is not None else Response(status_code=204)
 
 
 @router.get(
@@ -2111,11 +2302,11 @@ def get_sync_job(
     job_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
-) -> SyncJob:
+) -> SyncJobOut:
     job = db.get(SyncJob, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Sync job '{job_id}' not found.")
-    return job
+    return _sync_job_out(job)
 
 
 @router.post(
@@ -2129,7 +2320,7 @@ def start_component_sync_job(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_operator),
-) -> SyncJob:
+) -> SyncJobOut:
     """Start a pollable sync, or converge on the already-active global job."""
 
     institute = db.scalar(
@@ -2154,7 +2345,7 @@ def start_component_sync_job(
     except SyncLeaseBusy as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not lease.created:
-        return lease.job
+        return _sync_job_out(lease.job)
 
     try:
         request.app.state.sync_job_manager.start(
@@ -2164,7 +2355,7 @@ def start_component_sync_job(
     except Exception as exc:
         fail_sync_job(request.app.state.session_factory, lease.job.id, exc)
         raise HTTPException(status_code=503, detail="Could not schedule component sync.") from exc
-    return lease.job
+    return _sync_job_out(lease.job)
 
 
 @router.post(
@@ -2178,7 +2369,7 @@ def start_evidence_sync_job(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_operator),
-) -> SyncJob:
+) -> SyncJobOut:
     """Start the detailed evidence/attachment mirror, or return its live job."""
 
     institute = db.scalar(
@@ -2198,13 +2389,13 @@ def start_evidence_sync_job(
     except SyncLeaseBusy as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not lease.created:
-        return lease.job
+        return _sync_job_out(lease.job)
     try:
         request.app.state.sync_job_manager.start_evidence(lease.job.id)
     except Exception as exc:
         fail_sync_job(request.app.state.session_factory, lease.job.id, exc)
         raise HTTPException(status_code=503, detail="Could not schedule evidence sync.") from exc
-    return lease.job
+    return _sync_job_out(lease.job)
 
 
 @router.post(
@@ -2245,39 +2436,20 @@ def sync_components_for_institute(
         )
 
     job_id = lease.job.id
-    fetcher = request.app.state.component_fetcher
     try:
-        fetched = fetcher(request.app.state.settings, institute, access_codes, None)
-        # A full institute fetch is authoritative, so prune rows that vanished.
-        stats = sync_components(db, fetched.records, prune_scope=institute.code)
-        sync_tools_from_components(db, institute)
-        result = {
-            "institute_code": institute.code,
-            "fetched": len(fetched.records) + fetched.skipped,
-            "skipped": fetched.skipped,
-            "created": stats.created,
-            "updated": stats.updated,
-            "unchanged": stats.unchanged,
-            "stale": stats.stale,
-            "total": stats.total,
-        }
-        job = db.get(SyncJob, job_id)
-        if job is None:
-            raise RuntimeError(f"Sync job '{job_id}' disappeared before commit.")
-        finished = utcnow()
-        job.status = "succeeded"
-        job.phase = "complete"
-        job.current = len(fetched.records)
-        job.total = len(fetched.records)
-        job.percent = 100.0
-        job.message = "Component sync completed."
-        job.result = result
-        job.error = None
-        job.active_key = None
-        job.updated_at = finished
-        job.finished_at = finished
-        # Mirror, prune, derived tools and terminal lease state are one commit.
-        db.commit()
+        result = run_inline_component_sync(
+            request.app.state.session_factory,
+            request.app.state.settings,
+            request.app.state.component_fetcher,
+            job_id,
+            access_codes,
+        )
+    except SyncLeaseLost:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="The component sync lease was replaced; its results were discarded.",
+        ) from None
     except PdbSyncUnavailable as exc:
         db.rollback()
         fail_sync_job(request.app.state.session_factory, job_id, exc)
@@ -2489,6 +2661,55 @@ def get_production_stats(
         institute=institute or None,
         target_stage=target_stage,
         bucket=bucket,
+    )
+
+
+@router.get(
+    "/api/stats/required-tests",
+    response_model=RequiredTestStatsOut,
+    tags=["stats"],
+)
+def get_required_test_stats(
+    institute: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> RequiredTestStatsOut:
+    """Confirmed REQUIRED-test coverage from the local mirror only.
+
+    Institute-bound viewers read their own profile by default. An unbound user
+    may omit the query only when exactly one institute profile exists; with
+    several profiles the scope must be explicit because each has its own stage
+    model. No PDB client is constructed by this route.
+    """
+    code = institute.strip().upper() if institute is not None else None
+    if not code and user.institute is not None:
+        code = user.institute.code
+    if not code:
+        profiles = list(
+            db.scalars(select(InstituteProfile).order_by(InstituteProfile.code).limit(2))
+        )
+        if len(profiles) != 1:
+            raise HTTPException(
+                status_code=422,
+                detail="institute is required when more than one profile is configured.",
+            )
+        profile = profiles[0]
+    else:
+        profile = db.scalar(select(InstituteProfile).where(InstituteProfile.code == code))
+        if profile is None:
+            raise HTTPException(status_code=404, detail=f"Institute '{code}' not found.")
+    if user.institute_id is not None and user.institute_id != profile.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only read REQUIRED-test statistics for your own institute.",
+        )
+
+    stats = required_test_stats(db, profile)
+    return RequiredTestStatsOut(
+        institute=stats.institute,
+        denominator="at_or_beyond_stage",
+        stage_order=stats.stage_order,
+        rows=[vars(row) for row in stats.rows],
     )
 
 
@@ -3438,13 +3659,28 @@ def component_attachments_sync(
     Read-only against the PDB. Requires the detailed evidence sync to have run
     first, which is what records *which* attachments exist."""
     from app.attachment_store import download_attachments
+    from app.share_credentials import load_share_passwords
+
+    settings = request.app.state.settings
+    try:
+        share_passwords = load_share_passwords(
+            db,
+            user_id=user.id,
+            encryption_key=settings.pdb_credential_encryption_key,
+        )
+    except (CredentialKeyMissingError, CredentialKeyInvalidError):
+        raise HTTPException(
+            status_code=503,
+            detail="Saved public-share passwords cannot be opened by this server.",
+        ) from None
 
     stats = download_attachments(
         db,
         _pdb_gateway(request, db, user),
-        request.app.state.settings,
+        settings,
         sn,
         force=force,
+        share_passwords=share_passwords,
     )
     db.commit()
     return AttachmentSyncOut(
@@ -3452,6 +3688,8 @@ def component_attachments_sync(
         downloaded=stats.downloaded,
         reused=stats.reused,
         failed=stats.failed,
+        skipped=stats.skipped,
+        authentication_required=stats.authentication_required,
         total=stats.total,
     )
 
@@ -3536,6 +3774,7 @@ def component_sync_evidence(
     would be indistinguishable from a module that has no test runs at all."""
     from app.attachment_store import download_attachments
     from app.pdb_test_evidence import PdbEvidenceUnavailable, fetch_test_run_evidence
+    from app.share_credentials import load_share_passwords
     from app.test_run_evidence import upsert_test_run_evidence
 
     component = db.scalar(select(Component).where(Component.sn == sn))
@@ -3556,6 +3795,18 @@ def component_sync_evidence(
     # One opened component is worth the extra request per run: this is what
     # fills the glue-weight, metrology and IV views.
     gateway = _pdb_gateway(request, db, user)
+    settings = request.app.state.settings
+    try:
+        share_passwords = load_share_passwords(
+            db,
+            user_id=user.id,
+            encryption_key=settings.pdb_credential_encryption_key,
+        )
+    except (CredentialKeyMissingError, CredentialKeyInvalidError):
+        raise HTTPException(
+            status_code=503,
+            detail="Saved public-share passwords cannot be opened by this server.",
+        ) from None
     try:
         records = fetch_test_run_evidence(
             gateway, sn, with_detail=True, strict=True
@@ -3572,8 +3823,9 @@ def component_sync_evidence(
     attachment_stats = download_attachments(
         db,
         gateway,
-        request.app.state.settings,
+        settings,
         sn,
+        share_passwords=share_passwords,
     )
     db.commit()
     return EvidenceSyncOut(
@@ -3585,6 +3837,10 @@ def component_sync_evidence(
         attachments_downloaded=attachment_stats.downloaded,
         attachments_reused=attachment_stats.reused,
         attachments_failed=attachment_stats.failed,
+        attachments_skipped=attachment_stats.skipped,
+        attachments_authentication_required=(
+            attachment_stats.authentication_required
+        ),
         attachments_total=attachment_stats.total,
     )
 
@@ -3607,6 +3863,7 @@ def sync_institute_evidence(
     gateway is not configured."""
     from app.attachment_store import AttachmentSyncStats, download_attachments
     from app.pdb_test_evidence import fetch_test_run_evidence
+    from app.share_credentials import load_share_passwords
     from app.test_run_evidence import upsert_test_run_evidence
 
     institute = db.scalar(
@@ -3617,6 +3874,18 @@ def sync_institute_evidence(
     _require_institute_scope(user, institute)
 
     gateway = _pdb_gateway(request, db, user)
+    settings = request.app.state.settings
+    try:
+        share_passwords = load_share_passwords(
+            db,
+            user_id=user.id,
+            encryption_key=settings.pdb_credential_encryption_key,
+        )
+    except (CredentialKeyMissingError, CredentialKeyInvalidError):
+        raise HTTPException(
+            status_code=503,
+            detail="Saved public-share passwords cannot be opened by this server.",
+        ) from None
     components = list(
         db.scalars(
             select(Component).where(
@@ -3641,14 +3910,20 @@ def sync_institute_evidence(
         current = download_attachments(
             db,
             gateway,
-            request.app.state.settings,
+            settings,
             component.sn,
+            share_passwords=share_passwords,
         )
         db.commit()
         attachment_stats = AttachmentSyncStats(
             downloaded=attachment_stats.downloaded + current.downloaded,
             reused=attachment_stats.reused + current.reused,
             failed=attachment_stats.failed + current.failed,
+            skipped=attachment_stats.skipped + current.skipped,
+            authentication_required=(
+                attachment_stats.authentication_required
+                + current.authentication_required
+            ),
         )
     return InstituteEvidenceSyncOut(
         institute_code=institute_code,
@@ -3661,6 +3936,10 @@ def sync_institute_evidence(
         attachments_downloaded=attachment_stats.downloaded,
         attachments_reused=attachment_stats.reused,
         attachments_failed=attachment_stats.failed,
+        attachments_skipped=attachment_stats.skipped,
+        attachments_authentication_required=(
+            attachment_stats.authentication_required
+        ),
         attachments_total=attachment_stats.total,
     )
 

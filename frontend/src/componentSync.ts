@@ -10,6 +10,10 @@ import { parseApiTimestamp } from "./i18n";
 
 const POLL_INTERVAL_MS = 1_000;
 const POLL_RETRY_MS = 3_000;
+// Terminal cards stay visible until dismissed. A slow, read-only lookup lets
+// them notice the backend's delayed automatic retry (or a retry started in a
+// different tab) without turning the idle app into a hot poller.
+const TERMINAL_DISCOVERY_MS = 5_000;
 // Rolling readout: how often a *running* job may invite its consumers to
 // re-read the mirror. An evidence sweep commits each component as it arrives,
 // so the data is already there — without this the screen sat on stale rows for
@@ -52,6 +56,7 @@ export type SyncJobController = {
   job: SyncJob | null;
   active: boolean;
   discovering: boolean;
+  starting: boolean;
   startError: string | null;
   pollError: string | null;
   /**
@@ -85,12 +90,14 @@ function usePersistedSyncJob(
 ): SyncJobController {
   const [job, setJob] = useState<SyncJob | null>(null);
   const [discovering, setDiscovering] = useState(enabled);
+  const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const [dataEpoch, setDataEpoch] = useState(0);
   // Throttle state for the rolling readout. Refs, not state: updating these
   // must never itself schedule a render, or the poll loop would re-run.
   const lastRefresh = useRef({ at: 0, current: -1, jobId: -1 });
+  const startInFlight = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     if (!enabled) {
@@ -212,21 +219,83 @@ function usePersistedSyncJob(
     };
   }, [enabled, jobId, jobStatus, kind]);
 
+  const jobInstituteCode = job?.institute_code ?? null;
+  useEffect(() => {
+    if (
+      !enabled ||
+      jobId === null ||
+      jobInstituteCode === null ||
+      jobStatus === "queued" ||
+      jobStatus === "running"
+    ) {
+      return;
+    }
+
+    const ctrl = new AbortController();
+    let timer: number | null = null;
+
+    const discoverNewer = async () => {
+      try {
+        const latest = await getLatestSyncJob(kind, jobInstituteCode, ctrl.signal);
+        if (ctrl.signal.aborted) return;
+        if (
+          latest !== null &&
+          latest.kind === kind &&
+          latest.institute_code === jobInstituteCode &&
+          latest.id > jobId
+        ) {
+          setJob((current) =>
+            current !== null &&
+            current.id === jobId &&
+            current.kind === kind &&
+            current.institute_code === jobInstituteCode
+              ? latest
+              : current,
+          );
+          return;
+        }
+      } catch (error) {
+        if (ctrl.signal.aborted || isAbortError(error)) return;
+        // Best-effort discovery must not replace the actionable terminal
+        // result with a second, connectivity-shaped error.
+      }
+      if (!ctrl.signal.aborted) {
+        timer = window.setTimeout(() => void discoverNewer(), TERMINAL_DISCOVERY_MS);
+      }
+    };
+
+    timer = window.setTimeout(() => void discoverNewer(), TERMINAL_DISCOVERY_MS);
+    return () => {
+      ctrl.abort();
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [enabled, jobId, jobInstituteCode, jobStatus, kind]);
+
   const start = useCallback(
-    async (instituteCode: string) => {
+    (instituteCode: string) => {
+      if (startInFlight.current !== null) return startInFlight.current;
+
+      setStarting(true);
       setStartError(null);
       setPollError(null);
-      try {
-        // The server returns the existing global job if another tab/operator
-        // already started one, so every caller converges on the same job id.
-        const next = await startJob(instituteCode);
-        if (next.kind !== kind) {
-          throw new Error(`The server returned an unexpected ${next.kind} sync job.`);
+      const request = (async () => {
+        try {
+          // The server returns the existing global job if another tab/operator
+          // already started one, so every caller converges on the same job id.
+          const next = await startJob(instituteCode);
+          if (next.kind !== kind) {
+            throw new Error(`The server returned an unexpected ${next.kind} sync job.`);
+          }
+          setJob(next);
+        } catch (error) {
+          setStartError(errorMessage(error));
+        } finally {
+          startInFlight.current = null;
+          setStarting(false);
         }
-        setJob(next);
-      } catch (error) {
-        setStartError(errorMessage(error));
-      }
+      })();
+      startInFlight.current = request;
+      return request;
     },
     [kind, startJob],
   );
@@ -244,13 +313,25 @@ function usePersistedSyncJob(
       job,
       active,
       discovering,
+      starting,
       startError,
       pollError,
       dataEpoch,
       start,
       dismiss,
     }),
-    [kind, job, active, discovering, startError, pollError, dataEpoch, start, dismiss],
+    [
+      kind,
+      job,
+      active,
+      discovering,
+      starting,
+      startError,
+      pollError,
+      dataEpoch,
+      start,
+      dismiss,
+    ],
   );
 }
 

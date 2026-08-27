@@ -86,6 +86,17 @@ im Frontend-i18n-Modul liegt.
    ausschliesslich auf der Komponentendetailseite.
 5. **Dashboard:** KPI-Kacheln (Module in Arbeit, Staged offen, Tests
    ausstehend, Yield) plus Charts (Module je Stage, Durchsatz/Woche).
+5a. **Statistics — Pflichttests je Produktionsstufe (2026-08-27):** Vor den
+   Messwert- und Kollektivplots steht eine kompakte Liste `Required tests by
+   stage`. Sie folgt der effektiven Stage-Reihenfolge des Instituts und zeigt
+   je konfiguriertem Testtyp `Passed`, `Failed` und `Missing`. Nenner sind nur
+   lebende Komponenten, die diese Stage erreicht oder ueberschritten haben;
+   Drafts, Staged-Actions, zurueckgezogene und geloeschte Laeufe zaehlen nie
+   als bestaetigte Evidenz. Pro Komponente entscheidet der neueste lebende
+   gespiegelte Lauf; ein bestaetigter itkFlow-Upload ist nach seinem Mirror
+   deshalb gleichwertig. Loading, leerer Zustand, Fehler und `Retry` stehen in
+   der Karte selbst. Testtypen und Reihenfolge kommen aus dem Institutsprofil,
+   nicht aus Frontend-Konstanten.
 5b. **Statistics — Messwert-Sektion (2026-08-26):** Unter den Prozess-Charts
    (Durchsatz, Stage-Dwell, Rework) aggregiert ein `Measurements`-Block die
    gespiegelten Testlauf-Messwerte des Instituts. Zwei Auswahlfelder
@@ -102,7 +113,7 @@ im Frontend-i18n-Modul liegt.
    ueber Farbe), beide in der Legende; Hover-Ziel ist eine breitere unsichtbare
    Zwillingslinie. Achsen tragen die Einheit aus `result_meta.name`.
 
-   **Explizite Kollektivkurven fuer IV und CV (2026-08-27):** Vor dem
+   **Explizite Kollektivkurven fuer IV und CV (2026-08-27):** Nach dem
    generischen Messwert-Explorer stehen zwei dauerhaft sichtbare Karten
    `Collective IV curves` und `Collective CV curves`. Ihre Kandidaten werden
    aus den gespiegelten Dimensionen entdeckt, nicht aus einer Liste exakter
@@ -115,14 +126,38 @@ im Frontend-i18n-Modul liegt.
    duerfen. Die Karten nutzen denselben lokalen Messwert-Endpunkt und
    SVG-Renderer wie der Explorer (neueste hoechstens 300 Laeufe; ein Cap wird
    sichtbar benannt), zeichnen aber **ausschliesslich** Laeufe mit explizitem,
-   gleich langem X/Y-Paar. Der generische Explorer darf weiter auf Sample-Index
-   zurueckfallen; eine als IV/CV bezeichnete Karte nie. Fehlende Schemata,
-   fehlende gleich lange Paare, ausgeschlossene Laeufe und Ladefehler erhalten
-   eigene Textzustaende. Read-only am lokalen TUDO-Spiegel belegt: fuenf
+   gleich langem X/Y-Paar. Jede Karte hat einen getrennt lokal gespeicherten
+   Modus `Curve display`: `Representative curves` ist der Default und zeigt
+   eine deterministische, ueber den Rueckgabezeitraum verteilte Auswahl von
+   hoechstens 32 Kurven; vorhandene fehlgeschlagene Laeufe erhalten reservierte
+   Plaetze. `All returned curves` zeichnet alle vom Endpoint gelieferten
+   paarbaren Kurven. Klartext nennt in beiden Modi gezeigte, paarbare und
+   insgesamt gelieferte Laeufe. Der generische Explorer darf weiter auf
+   Sample-Index zurueckfallen; eine als IV/CV bezeichnete Karte nie. Fehlende
+   Schemata, fehlende gleich lange Paare, ausgeschlossene Laeufe und Ladefehler
+   erhalten eigene Textzustaende. Read-only am lokalen TUDO-Spiegel belegt: fuenf
    IV-Schemata mit zusammen 1 960 lebenden Laeufen und ein CV-Schema mit 364;
    alle 2 324 aktuellen Paare sind laengengleich. Der generische
-   `Measurements`-Block bleibt unveraendert darunter fuer alle anderen
-   Arrays und skalaren Verteilungen.
+   `Measurements`-Block bleibt davor fuer alle anderen Arrays und skalaren
+   Verteilungen sichtbar; die Spezialkarten verdraengen ihn nicht.
+
+   **Messwert-Cache und Hintergrundladen (2026-08-27):** Dimensionen und
+   Serien verwenden einen persistenten, nach lokalem Benutzer-/Institutsscope
+   getrennten Stale-while-revalidate-Cache. Bei Navigation oder Remount wird
+   ein Eintrag derselben Revision sofort ohne Aggregationsrequest gezeichnet;
+   bei geaenderter Revision bleibt der alte Plot sichtbar, waehrend genau ein
+   geteilter Request im Hintergrund aktualisiert. Gespeichert werden nur
+   Spiegelantworten und der nicht geheime Scope, nie Session-, CSRF- oder
+   PDB-Zugangsdaten. Der heutige Revisions-Hinweis aus Evidence-Job-ID,
+   progressivem Data-Epoch und Status invalidiert Evidence-Sync-Aenderungen,
+   ist aber noch **nicht autoritativ** fuer andere Schreiber. Der offene
+   Backend-Vertrag ist ein billiges, auth-/institutsgescoptes
+   `GET /api/stats/measurements/revision -> { revision: <opaque token> }`:
+   Der Token muss in derselben DB-Transaktion bei jeder fuer Measurement-
+   Dimensionen/-Serien sichtbaren Mutation wechseln (`TestRunEvidence`
+   insert/update/delete/state sowie relevante Component-Zuordnung/Local-Name-
+   Aenderung). Optionales `ETag`/`If-None-Match` darf 304 liefern. Erst dieser
+   Token ersetzt den Job-Hinweis als autoritative Cache-Revision.
 6. **Account / persoenliche PDB-Verbindung + Preferences:** Klick auf den angemeldeten
    User-Block in der Rail oeffnet einen eigenen Screen; Logout bleibt eine
    getrennte Aktion. Links stehen lokale Identitaet/Rolle/Institut, rechts die
@@ -131,6 +166,18 @@ im Frontend-i18n-Modul liegt.
    werden nie maskiert zurueckgelesen oder im Browser gespeichert. Muster:
    Connect & test, Test, Replace sowie Disconnect mit Inline-Bestaetigung. Ein
    eigenes `Preferences`-Panel bietet `Staged preview: Tabs | Inline | Off`.
+   Ein getrenntes Panel `Public share passwords` akzeptiert nur
+   passwortfaehige oeffentliche HTTPS-Links und ein write-only Share-Passwort.
+   `Save password` validiert nur die sichere Public-Link-Form und speichert das
+   Secret verschluesselt; dieser nutzergesteuerte Request kontaktiert keinen
+   externen Host. Danach zeigt die Liste nur Host, Token-Ende und
+   Speicherzeit. Ob das Passwort stimmt, prueft erst der evidenzgebundene Sync.
+   Entfernen hat eine eigene Aktion. Private CERNBox-Dateibrowser-Links werden
+   mit dem Hinweis abgelehnt, dass sie CERN-Anmeldung/OAuth brauchen; itkFlow
+   fragt nie nach dem CERN-Account-Passwort. Ein Sync nennt ein fehlendes oder
+   falsches Passwort sowie private Links sichtbar als
+   `skipped`/`authentication required`, statt sie als Netzstoerung oder Erfolg
+   auszugeben.
 7. **Admin Settings:** Nur fuer Admins sichtbarer Screen fuer ein ausgewaehltes
    Institutsprofil. Er bietet strukturierte Abschnitte fuer Name/Prefix,
    Mattermost-/Webhook-Kanaele, Shipment-Empfangscheckliste,
@@ -218,7 +265,12 @@ im Frontend-i18n-Modul liegt.
    Problemen. Institutsgebundene Admins sehen nur ihr eigenes Profil; globale
    Admins koennen Institut oder Gesamtansicht waehlen. Jede Problemgruppe
    verlinkt direkt nach `Staged`, `Ingest log` oder `Reminders`. Ein Refresh
-   fuehrt niemals einen Live-PDB-Probe aus.
+   fuehrt niemals einen Live-PDB-Probe aus. Nur im paketierten Desktop und nur
+   fuer globale Admins erscheint `Download diagnostics`: ein lokales ZIP aus
+   den rollierenden, fest erlaubten `server.log`-/`desktop.log`-Dateien und
+   sanitisierten Metadaten zu den letzten Sync-Jobs. Die UI warnt vor dem
+   Teilen, weil freie Logtexte weiterhin Identifikatoren enthalten koennen.
+   Web-Deployments und Institutsadmins bekommen weder Button noch Endpoint.
 
 ### Staged-Preview auf der Komponentendetailseite
 
@@ -349,22 +401,24 @@ ersten Oeffnen von „All mirrored runs".
   Stages stehen gedaempft mit Chip `Not reached yet`, gespiegelte Testtypen
   ausserhalb des Stage-Modells sowie nur-staged oder bestaetigt-aber-noch-
   nicht-gespiegelte Testtypen sammelt die Gruppe `Additional`.
-- **Zeile aufklappbar** zum vollen Run-Detail (Kurven, Werte, Conditions,
-  Attachments) ueber dieselben Renderer wie bisher; geladen wird erst beim
-  Oeffnen. Dict-wertige Ergebnisse (Metrologie, Wire Bonding) rendern als
+- **Zeile aufklappbar** zum vollen Run-Detail (Attachments, Kurven, Werte,
+  Conditions) ueber dieselben Renderer wie bisher; geladen wird erst beim
+  Oeffnen. Die Aktion ist als beschrifteter Button `Runs & plots` sichtbar und
+  nicht mehr nur ein unbeschriftetes kleines Caret. Ein lokal gespeichertes,
+  browserdarstellbares Attachment/Instrument-Plot steht vor der daraus
+  rekonstruierten numerischen Array-Kurve; beide bleiben sichtbar.
+  Dict-wertige Ergebnisse (Metrologie, Wire Bonding) rendern als
   Position/Wert-Paare statt als `[object Object]`. Ist eine Map vollstaendig
   numerisch und endlich, steht vor der weiterhin vollstaendigen Tabelle ein
-  generierter kategorischer Plot. Besteht jeder Wert exakt aus einem endlichen
-  `[number, number]`-Paar, erscheint stattdessen ein semantisch neutraler
-  Scatter; seine Caption nennt `second value / first value`, waehrend Tabelle
-  und Punkt-Titel das rohe Paar als `[first, second]` erhalten. Sichtbare
-  Achsentitel werden nicht erfunden. Ohne ausdrueckliche semantische
-  Schema-Metadaten darf die UI daraus kein `Δx`/`Δy` machen. Gemischte,
-  leere oder nicht-endliche Maps bleiben nur
+  generierter kategorischer **Balkenplot — aber nur als Fallback**, wenn der
+  Lauf weder eine numerische Array-Kurve noch ein darstellbares Attachment
+  besitzt. Maps aus exakten `[number, number]`-Paaren bleiben Tabelle; ohne
+  ausdrueckliche semantische Schema-Metadaten darf die UI daraus weder Achsen
+  noch einen Scatter und insbesondere kein `Δx`/`Δy` erfinden. Gemischte,
+  leere oder nicht-endliche Maps bleiben ebenfalls nur
   Tabelle, weil die Anzeige keine Punkte erfinden oder Werte umdeuten darf.
-  Diese Datenplots werden allein aus den gespiegelten Ergebnissen erzeugt und
-  sind unabhaengig davon, ob Attachments vorhanden sind; der bestehende
-  Array-/IV-Kurvenpfad bleibt unveraendert.
+  Der bestehende Array-/IV-Kurvenpfad bleibt unveraendert und hat zusammen mit
+  einem echten darstellbaren Plot-Attachment Vorrang vor diesem Fallback.
 - **Edit-Strip statt Sprung:** Der Ghost-Stift oeffnet die schema-getriebenen
   Felder jetzt **innerhalb der Zeile**, vorbelegt aus dem juengsten Lauf, und
   stageed ueber den unveraenderten Weg manual-entry-Ingest → Dry-Run →
@@ -423,7 +477,10 @@ Korrekturen an genau diesem Worksheet
   14 759 gespiegelten Laeufen haengen an MODULE-Komponenten, der Rest an
   Sensoren, Hybriden, Powerboards — und bei R5-Ringmodulen an den beiden
   Halbmodulen (docs/10 §7). Die `Values`-Zelle folgt exakt demselben
-  Kompaktheitsvertrag wie oben.
+  Kompaktheitsvertrag wie oben. Jede Zeile mit Laeufen hat zusaetzlich den
+  sichtbaren read-only Button `Runs & plots`; er laedt das volle Run-Detail
+  fuer die **Seriennummer des Kindes** lazy nach, sodass dessen Attachments
+  und Kurven auf der Modulseite nicht mehr unsichtbar bleiben.
   Bewusst **nicht** enthalten: eine `Status`-Spalte und der Edit-Stift. Ein
   Pflichttest-Status ist eine Aussage ueber *diese* Komponente, und ob der
   bestandene Test eines Kindes die Anforderung des Elternteils erfuellt, ist
@@ -636,6 +693,15 @@ gar keiner Steuerung.
   Evidence-/Attachment-Mirror; `Sync complete` darf erst den vorgesehenen
   Offline-Umfang ehrlich benennen. Der Sync laeuft als Server-Job weiter, nicht
   als Lebensdauer des gerade montierten React-Screens.
+- **Freeze-/Retry-Vertrag (2026-08-27):** `Check status` liest einen
+  vermeintlich haengenden Job neu. Erst wenn das Backend dessen Heartbeat nach
+  derselben Lease-Grenze als stale markiert, bietet die UI `Retry sync` an.
+  Der neue Lauf uebernimmt die Lease per Compare-and-swap; jeder Schreib- und
+  Dateipublikationsschritt des alten Workers prueft weiterhin Job-ID und
+  Lease-Token. Ein spaet erwachender Worker kann deshalb weder Fortschritt,
+  Terminalstatus noch Attachment-Datei des Nachfolgers ueberschreiben. Die UI
+  dedupliziert den aktiven Job nach Job-ID und entdeckt nach einem Reload den
+  serverseitig weiterlaufenden Sync wieder.
 - **Rollierende Anzeige waehrend eines Evidence-Sweeps (2026-08-27):** Der
   Sweep committet **jede Komponente einzeln**, die Daten stehen also laengst im
   Spiegel, waehrend der Job noch laeuft. Bisher las die Oberflaeche erst beim

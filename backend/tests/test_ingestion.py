@@ -72,6 +72,23 @@ def test_parse_payload_glue_weight_checks_numeric_results():
     assert "Result 'GW_T1' must be a number" in parsed.issues
 
 
+def test_parse_payload_glue_weight_preserves_a_share_link_result():
+    url = "https://cernbox.cern.ch/s/public/photo.jpg"
+    parsed = parse_payload(
+        pdb_payload(
+            testType="GLUE_WEIGHT",
+            results={"GW_SENSOR": 6.1849, "VISUAL_INSPECTION_URL": url},
+        )
+    )
+
+    assert parsed.parser == "glue-weight-v1"
+    assert parsed.issues == []
+    assert {(result.name, result.kind) for result in parsed.results} == {
+        ("GW_SENSOR", "number"),
+        ("VISUAL_INSPECTION_URL", "string"),
+    }
+
+
 def test_parse_payload_canonicalizes_lowercase_glue_weight_test_type():
     parsed = parse_payload(
         pdb_payload(testType="glue_weight", results={"GW_SENSOR": 6.1849})

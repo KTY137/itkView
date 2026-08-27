@@ -76,6 +76,25 @@ def test_build_upload_payload_merges_reviewed_derived_results_without_mutating_s
     assert derived == {"GW_GLUE_H1": 0.1327, "GW_GLUE_PB": 0.0961}
 
 
+def test_build_glue_upload_payload_preserves_a_share_link_result():
+    url = "https://cernbox.cern.ch/s/public/photo.jpg"
+    raw = upload_payload(
+        testType="GLUE_WEIGHT",
+        results={"GW_SENSOR": 7.0162, "VISUAL_INSPECTION_URL": url},
+    )
+
+    converted = build_upload_test_run_payload(
+        raw,
+        component_sn="20USE5M0000701",
+    )
+
+    assert converted["results"] == {
+        "GW_SENSOR": 7.0162,
+        "VISUAL_INSPECTION_URL": url,
+    }
+    assert raw["results"]["VISUAL_INSPECTION_URL"] == url
+
+
 def test_build_upload_payload_removes_a_controlled_raw_result_when_no_value_was_derived():
     raw = upload_payload(results={"GW_SENSOR": None, "GW_GLUE_H1": 9.999})
 

@@ -456,6 +456,11 @@ describe("ModuleWorksheet", () => {
     expect(await screen.findByTestId("run-curves")).toHaveTextContent("GLUE_WEIGHT");
     expect(screen.getByTestId("run-scalars")).toHaveTextContent("0.1664");
     expect(screen.getByTestId("run-conditions")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("run-attachments").compareDocumentPosition(
+        screen.getByTestId("run-curves"),
+      ),
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
   it("labels only the terminal deleted state as withdrawn instead of presenting its old verdict as valid", async () => {
@@ -888,7 +893,7 @@ describe("ModuleWorksheet", () => {
       expect(screen.getByText(t.worksheet.childWithdrawn(3))).toBeInTheDocument();
     });
 
-    it("makes no requirement claim for the parent: the child's run shows its own verdict, with no status chip or edit affordance", () => {
+    it("makes no requirement claim for the parent while giving child plots a visible read-only affordance", () => {
       renderWorksheet({ worksheet: withChildren });
 
       const childSection = screen.getByText(t.worksheet.childrenTitle).closest("section");
@@ -900,8 +905,28 @@ describe("ModuleWorksheet", () => {
         screen.queryByRole("button", { name: "Record MODULE_METROLOGY" }),
       ).not.toBeInTheDocument();
       expect(
-        screen.queryByRole("button", { name: "Show MODULE_METROLOGY runs" }),
-      ).not.toBeInTheDocument();
+        within(childSection as HTMLElement).getByRole("button", {
+          name: "Show MODULE_METROLOGY runs",
+        }),
+      ).toHaveTextContent(t.worksheet.runsAndPlots);
+    });
+
+    it("loads and renders a child's full run detail under the child's serial", async () => {
+      const user = userEvent.setup();
+      vi.mocked(getComponentTests).mockResolvedValue([metrologyRunWithMap]);
+      renderWorksheet({ worksheet: withChildren });
+
+      await user.click(
+        screen.getByRole("button", { name: "Show MODULE_METROLOGY runs" }),
+      );
+
+      await waitFor(() =>
+        expect(getComponentTests).toHaveBeenCalledWith(
+          "20USE5L0000031",
+          expect.any(AbortSignal),
+        ),
+      );
+      expect(await screen.findByTestId("run-curves")).toHaveTextContent("MODULE_METROLOGY");
     });
 
     it("renders nothing extra when the server sends no children block at all", () => {

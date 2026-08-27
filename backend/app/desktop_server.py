@@ -23,16 +23,20 @@ itkFlow-registered DUMMY-batch test components.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import os
 import socket
 import sys
 from pathlib import Path
+from typing import Any
 
 READY_PREFIX = "ITKFLOW_READY"
 _APP_DIR_NAME = "itkflow"
 _KEY_FILE_NAME = "pdb-credential.key"
 _DB_FILE_NAME = "itkflow.db"
+_SERVER_LOG_MAX_BYTES = 5 * 1024 * 1024
+_SERVER_LOG_BACKUPS = 3
 
 
 def application_data_dir() -> Path:
@@ -87,6 +91,42 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def _backup_path(log_file: Path, index: int) -> Path:
+    return log_file.with_name(f"{log_file.name}.{index}")
+
+
+def rotate_log(
+    log_file: Path,
+    *,
+    max_bytes: int = _SERVER_LOG_MAX_BYTES,
+    backups: int = _SERVER_LOG_BACKUPS,
+) -> None:
+    """Rotate a full desktop log before a new packaged process appends to it.
+
+    Rotation is deliberately best effort. A locked backup must never prevent
+    the application from starting; in that case the current file remains the
+    crash trail and the process simply keeps appending to it.
+    """
+    if max_bytes <= 0 or backups <= 0:
+        return
+    try:
+        if log_file.stat().st_size < max_bytes:
+            return
+        oldest = _backup_path(log_file, backups)
+        if oldest.exists():
+            oldest.unlink()
+        for index in range(backups - 1, 0, -1):
+            source = _backup_path(log_file, index)
+            if source.exists():
+                source.replace(_backup_path(log_file, index + 1))
+        log_file.replace(_backup_path(log_file, 1))
+    except OSError:
+        # A second process or virus scanner may temporarily hold a Windows
+        # file handle. Losing rotation is preferable to losing application
+        # startup and the only available crash trail.
+        return
+
+
 def redirect_output_to_log(data_dir: Path) -> Path | None:
     """Give a packaged run somewhere to write, and keep a crash trail.
 
@@ -101,11 +141,27 @@ def redirect_output_to_log(data_dir: Path) -> Path | None:
     log_dir = data_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "server.log"
+    rotate_log(log_file)
     # Line buffered: a crash must not lose the lines explaining it.
     stream = open(log_file, "a", encoding="utf-8", buffering=1)
     sys.stdout = stream
     sys.stderr = stream
     return log_file
+
+
+def enable_crash_trace() -> bool:
+    """Write fatal Python tracebacks, including all threads, to stderr.
+
+    ``redirect_output_to_log`` makes stderr a durable file in the packaged
+    build. Keep failure best effort: unsupported platforms or a broken file
+    descriptor must not turn diagnostics into the reason the app will not run.
+    """
+    try:
+        faulthandler.enable(file=sys.stderr, all_threads=True)
+    except (OSError, RuntimeError, ValueError):
+        print("itkflow-server: Python crash tracing could not be enabled.", flush=True)
+        return False
+    return True
 
 
 def bundled_static_dir() -> Path | None:
@@ -158,6 +214,32 @@ def build_settings(data_dir: Path, static_dir: Path | None):
     return Settings(**overrides)
 
 
+def ready_payload(bound_host: str, bound_port: int, settings: Any, app: Any) -> dict[str, Any]:
+    """Return the secret- and personal-data-free packaged readiness record."""
+    return {
+        "port": bound_port,
+        "url": f"http://{bound_host}:{bound_port}/",
+        "pdb_instance": settings.pdb_instance,
+        "spa": bool(getattr(app.state, "spa_mounted", False)),
+    }
+
+
+def uvicorn_config(app: Any):
+    """Build the desktop Uvicorn config without request-path access logs.
+
+    Error and lifecycle logs remain enabled. Access logs are omitted because
+    query strings can contain arbitrary search input and their high-volume
+    polling noise makes a bounded crash trail less useful.
+    """
+    import uvicorn
+
+    return uvicorn.Config(
+        app,
+        log_level=os.environ.get("ITKFLOW_LOG_LEVEL", "info"),
+        access_log=False,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="itkflow-server")
     parser.add_argument("--host", default="127.0.0.1")
@@ -174,12 +256,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    import uvicorn
-
     from app.main import create_app
 
     data_dir = application_data_dir()
-    redirect_output_to_log(data_dir)
+    log_file = redirect_output_to_log(data_dir)
+    if log_file is not None:
+        enable_crash_trace()
+        print("itkflow-server: packaged server process starting.", flush=True)
     static_dir = Path(args.static_dir) if args.static_dir else bundled_static_dir()
     settings = build_settings(data_dir, static_dir)
 
@@ -193,20 +276,18 @@ def main(argv: list[str] | None = None) -> int:
     bound_host, bound_port = sock.getsockname()[:2]
 
     app = create_app(settings)
-    ready = {
-        "port": bound_port,
-        "url": f"http://{bound_host}:{bound_port}/",
-        "data_dir": str(data_dir),
-        "pdb_instance": settings.pdb_instance,
-        "spa": bool(getattr(app.state, "spa_mounted", False)),
-    }
+    # The diagnostics endpoint is mounted separately from ordinary settings:
+    # only this packaged entry point may authorize access to its local logs.
+    app.state.desktop_log_dir = data_dir / "logs"
+    ready = ready_payload(bound_host, bound_port, settings, app)
     # One line, flushed: the host blocks on it before opening a window.
     print(f"{READY_PREFIX} {json.dumps(ready)}", flush=True)
 
-    server = uvicorn.Server(
-        uvicorn.Config(app, log_level=os.environ.get("ITKFLOW_LOG_LEVEL", "info"))
-    )
+    import uvicorn
+
+    server = uvicorn.Server(uvicorn_config(app))
     server.run(sockets=[sock])
+    print("itkflow-server: packaged server process stopped.", flush=True)
     return 0
 
 

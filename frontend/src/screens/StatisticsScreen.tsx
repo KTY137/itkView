@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ApiError,
-  getMeasurementDimensions,
-  getMeasurementSeries,
   getProductionStats,
+  getRequiredTestStats,
   getStatsDimensions,
 } from "../api";
 import type {
@@ -11,10 +10,16 @@ import type {
   MeasurementSeries,
   ProductionStats,
   ProductionStatsQuery,
+  RequiredTestStageRow,
+  RequiredTestStats,
   StatsDimensions,
 } from "../api";
 import { makeDemoProductionStats, makeDemoStatsDimensions } from "../demoData";
 import { formatCount, t } from "../i18n";
+import {
+  loadMeasurementDimensions,
+  loadMeasurementSeries,
+} from "../measurementCache";
 import {
   collectiveCurveCandidates,
   compactNumber,
@@ -22,9 +27,15 @@ import {
   defaultXResult,
   histogramBins,
   pairedCurves,
+  representativeCurves,
 } from "../measurements";
 import type { CollectiveCurveFamily } from "../measurements";
 import StageLegend from "../StageLegend";
+import {
+  readCollectiveDisplayMode,
+  writeCollectiveDisplayMode,
+} from "../statisticsPreferences";
+import type { CollectiveDisplayMode } from "../statisticsPreferences";
 import { roleLabel, stageChipClass, stageLabel } from "../ui";
 
 function errorMessage(err: unknown): string {
@@ -37,7 +48,15 @@ const BUCKETS = [
   { id: "year", label: t.stats.bucketYear },
 ] as const;
 
-export default function StatisticsScreen() {
+export default function StatisticsScreen({
+  measurementRevision = "unknown",
+  measurementCacheScope = "default",
+  instituteCode,
+}: {
+  measurementRevision?: string;
+  measurementCacheScope?: string;
+  instituteCode?: string;
+}) {
   const [dims, setDims] = useState<StatsDimensions | null>(null);
   const [componentType, setComponentType] = useState("MODULE");
   const [typeCode, setTypeCode] = useState("");
@@ -47,6 +66,10 @@ export default function StatisticsScreen() {
   const [error, setError] = useState<string | null>(null);
   const [demo, setDemo] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [requiredTests, setRequiredTests] = useState<RequiredTestStats | null>(null);
+  const [requiredTestsLoading, setRequiredTestsLoading] = useState(true);
+  const [requiredTestsError, setRequiredTestsError] = useState<string | null>(null);
+  const [requiredTestsReloadKey, setRequiredTestsReloadKey] = useState(0);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -80,6 +103,24 @@ export default function StatisticsScreen() {
       });
     return () => ctrl.abort();
   }, [componentType, typeCode, bucket, reloadKey]);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setRequiredTests(null);
+    setRequiredTestsLoading(true);
+    setRequiredTestsError(null);
+    getRequiredTestStats(instituteCode, ctrl.signal)
+      .then((data) => {
+        setRequiredTests(data);
+        setRequiredTestsLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (ctrl.signal.aborted) return;
+        setRequiredTestsError(errorMessage(err));
+        setRequiredTestsLoading(false);
+      });
+    return () => ctrl.abort();
+  }, [instituteCode, requiredTestsReloadKey]);
 
   if (error !== null) {
     return (
@@ -224,37 +265,189 @@ export default function StatisticsScreen() {
             </section>
           </div>
 
-          <MeasurementsSection />
+          <RequiredTestsCard
+            data={requiredTests}
+            loading={requiredTestsLoading}
+            error={requiredTestsError}
+            onRetry={() => setRequiredTestsReloadKey((key) => key + 1)}
+          />
+
+          <MeasurementsSection
+            revision={measurementRevision}
+            cacheScope={measurementCacheScope}
+          />
         </>
       )}
     </div>
   );
 }
 
+function requiredCoverage(row: RequiredTestStageRow): number | null {
+  if (row.component_total === 0) return null;
+  return Math.round((row.passed / row.component_total) * 100);
+}
+
+/** Server-owned stage-gate semantics, displayed without guessing which tests
+ * or stages matter. Counts and cohort come straight from the profile-backed
+ * endpoint. */
+function RequiredTestsCard({
+  data,
+  loading,
+  error,
+  onRetry,
+}: {
+  data: RequiredTestStats | null;
+  loading: boolean;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  return (
+    <section className="chart-card required-tests-card" aria-labelledby="required-tests-title">
+      <h2 id="required-tests-title">{t.stats.requiredTestsTitle}</h2>
+      <p className="state-note">{t.stats.requiredTestsSubtitle}</p>
+      {data !== null && (
+        <p className="state-note">{t.stats.requiredTestsCohort(data.institute)}</p>
+      )}
+      {loading ? (
+        <p className="state-note" role="status">{t.common.loading}</p>
+      ) : error !== null ? (
+        <div className="error-banner" role="alert">
+          <span>{`${t.stats.requiredTestsLoadError}: ${error}`}</span>
+          <button type="button" className="btn" onClick={onRetry}>
+            {t.common.retry}
+          </button>
+        </div>
+      ) : data === null || data.rows.length === 0 ? (
+        <p className="state-note">{t.stats.requiredTestsEmpty}</p>
+      ) : (
+        <div className="required-tests-scroll">
+          <table className="data-table required-tests-table">
+            <thead>
+              <tr>
+                <th scope="col">{t.stats.requiredTestsStage}</th>
+                <th scope="col">{t.stats.requiredTestsTest}</th>
+                <th scope="col">{t.stats.requiredTestsComponents}</th>
+                <th scope="col">{t.stats.requiredTestsPassed}</th>
+                <th scope="col">{t.stats.requiredTestsFailed}</th>
+                <th scope="col">{t.stats.requiredTestsMissing}</th>
+                <th scope="col">{t.stats.requiredTestsCoverage}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.rows.map((row) => {
+                const coverage = requiredCoverage(row);
+                const aria = t.stats.requiredTestsCoverageAria(
+                  row.test_type,
+                  stageLabel(row.stage),
+                  row.passed,
+                  row.failed,
+                  row.missing,
+                  row.component_total,
+                );
+                return (
+                  <tr key={`${row.stage}:${row.test_type}`}>
+                    <td>
+                      <span className={stageChipClass(row.stage)}>{stageLabel(row.stage)}</span>
+                    </td>
+                    <td className="mono">{row.test_type}</td>
+                    <td className="mono">{formatCount(row.component_total)}</td>
+                    <td>
+                      <span className={row.passed > 0 ? "chip green" : "chip neutral"}>
+                        {formatCount(row.passed)}
+                      </span>
+                    </td>
+                    <td>
+                      <span className={row.failed > 0 ? "chip red" : "chip neutral"}>
+                        {formatCount(row.failed)}
+                      </span>
+                    </td>
+                    <td>
+                      <span className={row.missing > 0 ? "chip amber" : "chip neutral"}>
+                        {formatCount(row.missing)}
+                      </span>
+                    </td>
+                    <td>
+                      <div className="required-coverage-cell">
+                        <span className="mono">
+                          {coverage === null ? t.common.none : `${coverage} %`}
+                        </span>
+                        <div className="required-coverage-bar" role="img" aria-label={aria}>
+                          {row.component_total > 0 && (
+                            <>
+                              <span
+                                className="passed"
+                                style={{ width: `${(row.passed / row.component_total) * 100}%` }}
+                                aria-hidden="true"
+                              />
+                              <span
+                                className="failed"
+                                style={{ width: `${(row.failed / row.component_total) * 100}%` }}
+                                aria-hidden="true"
+                              />
+                              <span
+                                className="missing"
+                                style={{ width: `${(row.missing / row.component_total) * 100}%` }}
+                                aria-hidden="true"
+                              />
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** Measurement dimensions are loaded once for the explicit IV/CV panels and
  * the generic explorer. Every dataset and result code still comes from the
  * local mirror; the screen carries no institute-specific test map. */
-function MeasurementsSection() {
+function MeasurementsSection({
+  revision,
+  cacheScope,
+}: {
+  revision: string;
+  cacheScope: string;
+}) {
   const [dims, setDims] = useState<MeasurementDimensions | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const ctrl = new AbortController();
-    getMeasurementDimensions(ctrl.signal)
+    let active = true;
+    const load = loadMeasurementDimensions(cacheScope, revision);
+    setDims(load.cached);
+    setError(null);
+    if (load.refresh === null) return;
+    load.refresh
       .then((data) => {
+        if (!active) return;
         setDims(data);
         setError(null);
       })
       .catch((err: unknown) => {
-        if (ctrl.signal.aborted) return;
-        setDims({ test_types: [] });
+        if (!active) return;
         setError(errorMessage(err));
       });
-    return () => ctrl.abort();
-  }, []);
+    return () => {
+      active = false;
+    };
+  }, [cacheScope, revision]);
 
   return (
     <>
+      {dims !== null && (
+        <MeasurementExplorer
+          dimensions={dims}
+          revision={revision}
+          cacheScope={cacheScope}
+        />
+      )}
       <section aria-labelledby="collective-curves-title">
         <h2 className="section-title" id="collective-curves-title">
           {t.stats.collectiveCurvesTitle}
@@ -266,11 +459,22 @@ function MeasurementsSection() {
           </p>
         )}
         <div className="charts">
-          <CollectiveCurveCard family="iv" dimensions={dims} dimensionsError={error} />
-          <CollectiveCurveCard family="cv" dimensions={dims} dimensionsError={error} />
+          <CollectiveCurveCard
+            family="iv"
+            dimensions={dims}
+            dimensionsError={error}
+            revision={revision}
+            cacheScope={cacheScope}
+          />
+          <CollectiveCurveCard
+            family="cv"
+            dimensions={dims}
+            dimensionsError={error}
+            revision={revision}
+            cacheScope={cacheScope}
+          />
         </div>
       </section>
-      {dims !== null && error === null && <MeasurementExplorer dimensions={dims} />}
     </>
   );
 }
@@ -279,10 +483,14 @@ function CollectiveCurveCard({
   family,
   dimensions,
   dimensionsError,
+  revision,
+  cacheScope,
 }: {
   family: CollectiveCurveFamily;
   dimensions: MeasurementDimensions | null;
   dimensionsError: string | null;
+  revision: string;
+  cacheScope: string;
 }) {
   const candidates = useMemo(
     () => (dimensions === null ? [] : collectiveCurveCandidates(dimensions, family)),
@@ -294,6 +502,9 @@ function CollectiveCurveCard({
   const [series, setSeries] = useState<MeasurementSeries | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [displayMode, setDisplayMode] = useState<CollectiveDisplayMode>(() =>
+    readCollectiveDisplayMode(family),
+  );
 
   useEffect(() => {
     if (selected === undefined) {
@@ -302,46 +513,53 @@ function CollectiveCurveCard({
       setLoading(false);
       return;
     }
-    const ctrl = new AbortController();
-    setSeries(null);
+    let active = true;
+    const query = {
+      test_type: selected.testType,
+      result: selected.yResult.code,
+      x_result: selected.xResult.code,
+    };
+    const load = loadMeasurementSeries(cacheScope, revision, query);
+    setSeries(load.cached);
     setError(null);
-    setLoading(true);
-    getMeasurementSeries(
-      {
-        test_type: selected.testType,
-        result: selected.yResult.code,
-        x_result: selected.xResult.code,
-      },
-      ctrl.signal,
-    )
+    setLoading(load.cached === null && load.refresh !== null);
+    if (load.refresh === null) return;
+    load.refresh
       .then((data) => {
+        if (!active) return;
         setSeries(data);
         setLoading(false);
       })
       .catch((err: unknown) => {
-        if (ctrl.signal.aborted) return;
+        if (!active) return;
         setError(errorMessage(err));
         setLoading(false);
       });
-    return () => ctrl.abort();
-  }, [selected?.testType, selected?.xResult.code, selected?.yResult.code]);
+    return () => {
+      active = false;
+    };
+  }, [cacheScope, revision, selected?.testType, selected?.xResult.code, selected?.yResult.code]);
 
   const title = family === "iv" ? t.stats.collectiveIvTitle : t.stats.collectiveCvTitle;
   const subtitle =
     family === "iv" ? t.stats.collectiveIvSubtitle : t.stats.collectiveCvSubtitle;
   const empty = family === "iv" ? t.stats.collectiveIvEmpty : t.stats.collectiveCvEmpty;
   const paired = useMemo(() => pairedCurves(series?.curves ?? []), [series]);
+  const displayed = useMemo(
+    () => (displayMode === "all" ? paired : representativeCurves(paired)),
+    [displayMode, paired],
+  );
   const excluded = (series?.curves.length ?? 0) - paired.length;
   const returnedRunCount = series?.curves.length ?? 0;
   // Keep the collective cap notice outside CurveOverlay so it remains visible
   // even when every returned run is excluded before a plot can render.
-  const pairedSeries = series === null ? null : { ...series, curves: paired, truncated: false };
+  const pairedSeries = series === null ? null : { ...series, curves: displayed, truncated: false };
 
   return (
     <section className="chart-card">
       <h2>{title}</h2>
       <p className="state-note">{subtitle}</p>
-      {dimensionsError !== null ? (
+      {dimensionsError !== null && dimensions === null ? (
         <p className="state-note">
           {`${t.stats.measurementLoadError}: ${dimensionsError}`}
         </p>
@@ -366,11 +584,37 @@ function CollectiveCurveCard({
                 ))}
               </select>
             </label>
+            <label className="field">
+              <span className="field-label">{t.stats.collectiveDisplayLabel}</span>
+              <select
+                className="select-input"
+                value={displayMode}
+                onChange={(event) => {
+                  const mode = event.target.value === "all" ? "all" : "representative";
+                  setDisplayMode(mode);
+                  writeCollectiveDisplayMode(family, mode);
+                }}
+              >
+                <option value="representative">{t.stats.collectiveRepresentative}</option>
+                <option value="all">{t.stats.collectiveAllReturned}</option>
+              </select>
+            </label>
           </div>
           <p className="state-note">
             {t.stats.collectivePairing(selected.yResult.code, selected.xResult.code)}
           </p>
-          {error !== null ? (
+          {series !== null && (
+            <p className="state-note">
+              {displayMode === "all"
+                ? t.stats.collectiveAllCount(displayed.length, paired.length, returnedRunCount)
+                : t.stats.collectiveRepresentativeCount(
+                    displayed.length,
+                    paired.length,
+                    returnedRunCount,
+                  )}
+            </p>
+          )}
+          {error !== null && pairedSeries === null ? (
             <p className="state-note" role="alert">
               {`${t.stats.measurementLoadError}: ${error}`}
             </p>
@@ -381,6 +625,11 @@ function CollectiveCurveCard({
           ) : (
             <p className="state-note">{t.stats.collectiveNoPairedRuns}</p>
           )}
+          {error !== null && pairedSeries !== null && (
+            <p className="state-note" role="alert">
+              {`${t.stats.measurementRefreshError}: ${error}`}
+            </p>
+          )}
           {excluded > 0 && (
             <p className="state-note">{t.stats.collectiveExcluded(excluded)}</p>
           )}
@@ -389,34 +638,53 @@ function CollectiveCurveCard({
           )}
         </>
       )}
+      {dimensionsError !== null && dimensions !== null && (
+        <p className="state-note" role="alert">
+          {`${t.stats.measurementRefreshError}: ${dimensionsError}`}
+        </p>
+      )}
     </section>
   );
 }
 
-/** Generic measurement explorer, retained beside the explicit shortcuts. */
-function MeasurementExplorer({ dimensions: dims }: { dimensions: MeasurementDimensions }) {
+/** Generic measurement explorer. Cached data paints immediately; a changed
+ * mirror revision refreshes the selected aggregation once in the background. */
+function MeasurementExplorer({
+  dimensions: dims,
+  revision,
+  cacheScope,
+}: {
+  dimensions: MeasurementDimensions;
+  revision: string;
+  cacheScope: string;
+}) {
   const [testType, setTestType] = useState<string>("");
   const [resultCode, setResultCode] = useState<string>("");
-  const [xCode, setXCode] = useState<string>("");
+  const [xSelection, setXSelection] = useState({ key: "", code: "" });
   const [series, setSeries] = useState<MeasurementSeries | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     const first = dims.test_types[0];
-    if (first !== undefined) {
-      setTestType((current) =>
-        dims.test_types.some((entry) => entry.test_type === current)
+    setTestType((current) =>
+      first === undefined
+        ? ""
+        : dims.test_types.some((entry) => entry.test_type === current)
           ? current
           : first.test_type,
-      );
-    }
+    );
   }, [dims]);
 
   const results = useMemo(
     () => dims.test_types.find((entry) => entry.test_type === testType)?.results ?? [],
     [dims, testType],
   );
+  const arrayCodes = useMemo(
+    () => results.filter((entry) => entry.kind === "array"),
+    [results],
+  );
+  const selectionKey = JSON.stringify([testType, resultCode]);
 
   useEffect(() => {
     if (results.length === 0) {
@@ -431,33 +699,60 @@ function MeasurementExplorer({ dimensions: dims }: { dimensions: MeasurementDime
 
   useEffect(() => {
     const picked = results.find((entry) => entry.code === resultCode);
-    if (picked === undefined) return;
-    setXCode(picked.kind === "array" ? (defaultXResult(results, resultCode) ?? "") : "");
-  }, [results, resultCode]);
+    setXSelection((current) => {
+      if (picked === undefined) return { key: "", code: "" };
+      const currentStillValid =
+        current.key === selectionKey &&
+        (current.code === "" ||
+          arrayCodes.some((entry) => entry.code === current.code && entry.code !== resultCode));
+      return {
+        key: selectionKey,
+        code: currentStillValid
+          ? current.code
+          : picked.kind === "array"
+            ? (defaultXResult(results, resultCode) ?? "")
+            : "",
+      };
+    });
+  }, [arrayCodes, results, resultCode, selectionKey]);
+
+  const xCode = xSelection.key === selectionKey ? xSelection.code : "";
 
   useEffect(() => {
-    if (testType === "" || resultCode === "") return;
-    const ctrl = new AbortController();
-    setSeries(null);
-    setLoading(true);
+    if (
+      testType === "" ||
+      resultCode === "" ||
+      xSelection.key !== selectionKey ||
+      !results.some((entry) => entry.code === resultCode)
+    ) {
+      return;
+    }
+    let active = true;
+    const query = {
+      test_type: testType,
+      result: resultCode,
+      x_result: xCode || undefined,
+    };
+    const load = loadMeasurementSeries(cacheScope, revision, query);
+    setSeries(load.cached);
+    setLoading(load.cached === null && load.refresh !== null);
     setError(null);
-    getMeasurementSeries(
-      { test_type: testType, result: resultCode, x_result: xCode || undefined },
-      ctrl.signal,
-    )
+    if (load.refresh === null) return;
+    load.refresh
       .then((data) => {
+        if (!active) return;
         setSeries(data);
         setLoading(false);
       })
       .catch((err: unknown) => {
-        if (ctrl.signal.aborted) return;
+        if (!active) return;
         setError(errorMessage(err));
         setLoading(false);
       });
-    return () => ctrl.abort();
-  }, [testType, resultCode, xCode]);
-
-  const arrayCodes = results.filter((entry) => entry.kind === "array");
+    return () => {
+      active = false;
+    };
+  }, [cacheScope, revision, results, selectionKey, testType, resultCode, xCode, xSelection.key]);
 
   return (
     <section className="chart-card">
@@ -491,7 +786,13 @@ function MeasurementExplorer({ dimensions: dims }: { dimensions: MeasurementDime
             {series?.kind === "array" && arrayCodes.length > 1 && (
               <label className="field">
                 <span className="field-label">{t.stats.measurementXLabel}</span>
-                <select className="select-input" value={xCode} onChange={(e) => setXCode(e.target.value)}>
+                <select
+                  className="select-input"
+                  value={xCode}
+                  onChange={(event) =>
+                    setXSelection({ key: selectionKey, code: event.target.value })
+                  }
+                >
                   <option value="">{t.stats.measurementXIndex}</option>
                   {arrayCodes
                     .filter((entry) => entry.code !== resultCode)
@@ -505,7 +806,7 @@ function MeasurementExplorer({ dimensions: dims }: { dimensions: MeasurementDime
             )}
           </div>
 
-          {error !== null ? (
+          {error !== null && series === null ? (
             <p className="state-note" role="alert">
               {`${t.stats.measurementLoadError}: ${error}`}
             </p>
@@ -517,6 +818,11 @@ function MeasurementExplorer({ dimensions: dims }: { dimensions: MeasurementDime
             <ScalarDistribution series={series} />
           ) : (
             <p className="state-note">{t.stats.measurementEmpty}</p>
+          )}
+          {error !== null && series !== null && (
+            <p className="state-note" role="alert">
+              {`${t.stats.measurementRefreshError}: ${error}`}
+            </p>
           )}
         </>
       )}

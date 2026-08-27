@@ -26,6 +26,7 @@ from app.models import (
     TestRunAttachmentReference,
     TestRunEvidence,
 )
+from app.share_credentials import SharePasswordResolver, public_share_identity
 
 JPEG = b"\xff\xd8\xff\xe0itkflow-test-image"
 
@@ -582,11 +583,22 @@ def test_share_link_download_is_unauthenticated_and_indexed_by_source(
 
 
 @pytest.mark.parametrize(
-    "payload,max_bytes",
-    [(HTML_ERROR_PAGE, 1024), (b"12345", 4)],
+    "payload,max_bytes,expected_failed,expected_skipped,expected_auth",
+    [
+        (HTML_ERROR_PAGE, 1024, 0, 1, 1),
+        (b"12345", 4, 1, 0, 0),
+    ],
 )
 def test_share_link_refuses_html_and_oversized_payloads(
-    session, settings, evidence, monkeypatch, payload, max_bytes
+    session,
+    settings,
+    evidence,
+    monkeypatch,
+    payload,
+    max_bytes,
+    expected_failed,
+    expected_skipped,
+    expected_auth,
 ):
     url = "https://cernbox.cern.ch/s/public/data"
     _set_attachment_descriptor(
@@ -608,7 +620,9 @@ def test_share_link_refuses_html_and_oversized_payloads(
 
     stats = download_attachments(session, _FakeGateway(), settings, "20USEM20000041")
 
-    assert stats.failed == 1
+    assert stats.failed == expected_failed
+    assert stats.skipped == expected_skipped
+    assert stats.authentication_required == expected_auth
     assert resolve_path(settings, session.scalar(select(TestRunAttachment))) is None
 
 
@@ -638,8 +652,82 @@ def test_share_link_refuses_local_or_credential_bearing_urls(
             },
         )
         stats = download_attachments(session, _FakeGateway(), settings, "20USEM20000041")
-        assert stats.failed == 1
+        assert stats.failed == 0
+        assert stats.skipped == 1
+        assert stats.authentication_required == 0
     assert called is False
+
+
+def test_password_protected_public_share_uses_account_resolver(
+    session, settings, evidence, monkeypatch
+):
+    url = "https://cernbox.cern.ch/s/protected-share"
+    _set_attachment_descriptor(
+        session,
+        evidence,
+        {
+            "code": "c" * 64,
+            "type": "share_link",
+            "source": "share_link",
+            "url": url,
+        },
+    )
+    calls = []
+
+    def open_url(requested, timeout, password=None):
+        calls.append((requested, timeout, password))
+        return _PublicResponse(requested, JPEG, "image/jpeg")
+
+    monkeypatch.setattr(attachment_store, "_open_public_url", open_url)
+    identity = public_share_identity(url)
+    resolver = SharePasswordResolver({identity.share_key: "share-secret"})
+
+    stats = download_attachments(
+        session,
+        _FakeGateway(),
+        settings,
+        "20USEM20000041",
+        share_passwords=resolver,
+    )
+
+    assert stats.downloaded == 1
+    assert stats.authentication_required == 0
+    assert calls[0][2] == "share-secret"
+    assert "share-secret" not in repr(resolver)
+
+
+def test_public_share_authorization_never_redirects_to_another_host():
+    request = attachment_store.Request(
+        "https://cernbox.cern.ch/remote.php/dav/public-files/token",
+        headers={"Authorization": "Basic sentinel"},
+    )
+
+    with pytest.raises(HTTPError, match="Credential-bearing"):
+        attachment_store._SafeShareRedirects().redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://attacker.example/download",
+        )
+
+
+def test_public_share_authorization_never_redirects_to_another_port():
+    request = attachment_store.Request(
+        "https://cernbox.cern.ch/remote.php/dav/public-files/token",
+        headers={"Authorization": "Basic sentinel"},
+    )
+
+    with pytest.raises(HTTPError, match="Credential-bearing"):
+        attachment_store._SafeShareRedirects().redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://cernbox.cern.ch:8443/download",
+        )
 
 
 # --- transient-vs-permanent download failures -------------------------------
@@ -977,7 +1065,7 @@ def test_share_page_html_falls_back_to_the_download_route(
     assert resolve_path(settings, row).read_bytes() == JPEG
 
 
-def test_a_share_that_only_serves_html_fails_and_stays_retryable(
+def test_a_share_that_only_serves_html_is_skipped_and_stays_retryable(
     session, settings, evidence, monkeypatch, no_sleep
 ):
     """A viewer page must never be stored as the attachment — and the failure
@@ -996,7 +1084,8 @@ def test_a_share_that_only_serves_html_fails_and_stays_retryable(
     )
     session.commit()
 
-    assert stats.failed == 1 and stats.downloaded == 0
+    assert stats.failed == 0 and stats.downloaded == 0
+    assert stats.skipped == 1 and stats.authentication_required == 1
     # HTML is a final answer for this sweep: all candidates once, no backoff.
     assert opens == [DAV_URL, DOWNLOAD_URL, SHARE_URL]
     assert no_sleep == []
@@ -1143,7 +1232,9 @@ def test_a_web_ui_share_link_serving_only_html_is_still_refused(
     )
     session.commit()
 
-    assert stats.failed == 1
+    assert stats.failed == 0
+    assert stats.skipped == 1
+    assert stats.authentication_required == 1
     assert resolve_path(settings, session.scalar(select(TestRunAttachment))) is None
 
 
@@ -1182,7 +1273,9 @@ def test_a_private_web_ui_location_is_refused_without_any_request(
         )
         session.commit()
 
-        assert stats.failed == 1, url
+        assert stats.failed == 0, url
+        assert stats.skipped == 1, url
+        assert stats.authentication_required == 1, url
         assert attachment_store._share_link_candidates(url) == [], url
 
 
@@ -1526,10 +1619,10 @@ def test_overlapping_component_syncs_fetch_and_store_one_shared_blob(
 ):
     """Direct/background overlap is serialized by physical attachment key.
 
-    Two calls even target the same component, so without the lock they also
-    write the exact same deterministic .part path. A third component proves
-    that serialization retains every association instead of duplicating the
-    bytes under each serial number.
+    Two calls even target the same component. A third component proves that
+    serialization retains every association instead of duplicating the bytes
+    under each serial number. Cross-process staging isolation has its own test
+    below because separate processes do not share this in-memory lock.
     """
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'parallel-attachments.db'}",
@@ -1689,6 +1782,115 @@ def test_overlapping_component_syncs_fetch_and_store_one_shared_blob(
     assert list(root.rglob("*.part")) == []
 
 
+def test_separate_workers_stage_same_blob_without_cross_owner_cleanup(
+    tmp_path, monkeypatch
+):
+    """A stale process must only discard the staging file that it owns.
+
+    Separate packaged processes have separate in-memory key-lock registries,
+    so bypass that registry here while two workers fetch the same physical
+    blob. Both reach their lease fence with independently intact bytes. The
+    stale worker then loses its fence and runs the ordinary exception cleanup;
+    the active worker's staging file must survive and publish atomically.
+    """
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'process-fence.db'}",
+        attachment_dir=str(tmp_path / "attachments"),
+        _env_file=None,
+    )
+    engine = make_engine(settings.database_url)
+    Base.metadata.create_all(engine)
+    factory = make_session_factory(engine)
+    component_sn = "20USEP00000003"
+    stale_bytes = JPEG + b"-stale-worker"
+    active_bytes = JPEG + b"-active-worker"
+    fetch_barrier = Barrier(2)
+    stale_at_fence = Event()
+    active_at_fence = Event()
+    allow_stale_fence_loss = Event()
+    allow_active_commit = Event()
+
+    def fetch_for_owner(client, descriptor, *, timeout, max_bytes):  # noqa: ARG001
+        fetch_barrier.wait(timeout=5)
+        return descriptor["payload"], "image/jpeg"
+
+    # This is what makes the two calls model different OS processes: their
+    # Python lock registries cannot coordinate, even though their disk and DB
+    # are shared.
+    monkeypatch.setattr(attachment_store, "_acquire_attachment_key_locks", lambda *args: [])
+    monkeypatch.setattr(attachment_store, "_fetch_bytes", fetch_for_owner)
+
+    class _NoPdbGateway:
+        is_configured = False
+
+    def mirror(owner: str):
+        payload = stale_bytes if owner == "stale" else active_bytes
+        descriptor = {
+            "component_sn": component_sn,
+            "test_type": "VISUAL_INSPECTION",
+            "test_run_ref": f"RUN-{owner}",
+            "code": "cross-process-shared-code",
+            "filename": "picture.jpg",
+            "content_type": "image/jpeg",
+            "title": owner,
+            "type": "share_link",
+            "url": "https://example.invalid/s/public",
+            "source": "share_link",
+            "payload": payload,
+        }
+
+        def fence(session):  # noqa: ARG001
+            if owner == "stale":
+                stale_at_fence.set()
+                allow_stale_fence_loss.wait(timeout=5)
+                raise RuntimeError("attachment lease fence lost")
+            active_at_fence.set()
+            allow_active_commit.wait(timeout=5)
+
+        with factory() as session:
+            stats = download_attachments(
+                session,
+                _NoPdbGateway(),
+                settings,
+                component_sn,
+                descriptors=[descriptor],
+                before_commit=fence,
+            )
+            session.commit()
+            return stats
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        stale = executor.submit(mirror, "stale")
+        active = executor.submit(mirror, "active")
+        try:
+            assert stale_at_fence.wait(timeout=5)
+            assert active_at_fence.wait(timeout=5)
+            root = attachment_store.attachment_root(settings)
+            staged = list(root.rglob("*.part"))
+            assert len(staged) == 2
+            assert {path.read_bytes() for path in staged} == {stale_bytes, active_bytes}
+
+            allow_stale_fence_loss.set()
+            with pytest.raises(RuntimeError, match="lease fence lost"):
+                stale.result(timeout=5)
+
+            remaining = list(root.rglob("*.part"))
+            assert len(remaining) == 1
+            assert remaining[0].read_bytes() == active_bytes
+
+            allow_active_commit.set()
+            stats = active.result(timeout=5)
+        finally:
+            allow_stale_fence_loss.set()
+            allow_active_commit.set()
+
+    assert stats.downloaded == 1
+    final_files = [path for path in root.rglob("*") if path.is_file()]
+    assert len(final_files) == 1
+    assert final_files[0].name == "cross-process-shared-code.jpg"
+    assert final_files[0].read_bytes() == active_bytes
+
+
 def test_a_failed_download_leaves_no_part_file_and_no_relative_path(
     session, settings, evidence
 ):
@@ -1718,11 +1920,11 @@ def test_a_successful_download_lands_on_the_final_name_with_no_part_file(
     assert list(root.rglob("*.part")) == []
 
 
-def test_a_stale_part_file_from_a_crashed_run_is_overwritten(
+def test_a_stale_legacy_part_file_is_ignored_without_cross_owner_cleanup(
     session, settings, evidence
 ):
-    """A previous process could die mid-write; the leftover `.part` file must
-    not make the next sweep fail or serve stale bytes."""
+    """A previous process's unknown `.part` owner is never overwritten or
+    deleted; it is harmless and can be reaped by a separate age-based policy."""
     root = attachment_store.attachment_root(settings)
     stale = root / "20USEM20000041" / "pdb" / "abc123.jpg.part"
     stale.parent.mkdir(parents=True, exist_ok=True)
@@ -1734,7 +1936,8 @@ def test_a_stale_part_file_from_a_crashed_run_is_overwritten(
     assert stats.downloaded == 1
     row = session.scalar(select(TestRunAttachment))
     assert resolve_path(settings, row).read_bytes() == JPEG
-    assert list(root.rglob("*.part")) == []
+    assert list(root.rglob("*.part")) == [stale]
+    assert stale.read_bytes() == b"leftover-from-a-crashed-process"
 
 
 # --- outage circuit breaker --------------------------------------------------

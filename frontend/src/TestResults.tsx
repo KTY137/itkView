@@ -190,16 +190,13 @@ function CurvePlot({ xs, ys, xLabel, yLabel }: {
   );
 }
 
-type MapPlotData =
-  | { kind: "categories"; keys: string[]; values: number[] }
-  | { kind: "pairs"; keys: string[]; first: number[]; second: number[] };
+type MapPlotData = { keys: string[]; values: number[] };
 
 /**
  * A map is plotted only when every entry has one unambiguous numeric shape.
- * Mixed maps stay tables: coercing a missing/string/container value into a
- * point would fabricate data. Exact finite two-tuples remain schema-neutral
- * numeric pairs; plain finite numbers are categorical values keyed by the map
- * entry. The renderer must not infer physical axis semantics from shape alone.
+ * Mixed maps and numeric-pair maps stay tables: coercing or assigning axes to
+ * those values would fabricate data. Plain finite numbers are categorical
+ * values keyed by the map entry.
  */
 function mapPlotData(entries: Record<string, unknown>): MapPlotData | null {
   const pairs = Object.entries(entries);
@@ -207,22 +204,10 @@ function mapPlotData(entries: Record<string, unknown>): MapPlotData | null {
 
   if (pairs.every(([, value]) => typeof value === "number" && Number.isFinite(value))) {
     return {
-      kind: "categories",
       keys: pairs.map(([key]) => key),
       values: pairs.map(([, value]) => value as number),
     };
   }
-
-  const numericPairs = pairs.map(([, value]) => asFinitePair(value));
-  if (numericPairs.every((value): value is readonly [number, number] => value !== null)) {
-    return {
-      kind: "pairs",
-      keys: pairs.map(([key]) => key),
-      first: numericPairs.map(([first]) => first),
-      second: numericPairs.map(([, second]) => second),
-    };
-  }
-
   return null;
 }
 
@@ -242,9 +227,11 @@ function categoryTick(value: string): string {
   return value.length > 12 ? `${value.slice(0, 10)}…` : value;
 }
 
-/** Numeric map values against their discrete keys. No line joins categories. */
+/** Numeric map values against their discrete keys. Bars make the categorical
+ * nature explicit and avoid the point-wave that looked like a degraded copy
+ * of the original instrument/array curves. */
 function CategoricalMapPlot({ data, valueLabel }: {
-  data: Extract<MapPlotData, { kind: "categories" }>;
+  data: MapPlotData;
   valueLabel: string;
 }) {
   const width = 320;
@@ -261,6 +248,7 @@ function CategoricalMapPlot({ data, valueLabel }: {
   const yAt = (value: number) =>
     height - pad.bottom - ((value - yMin) / ySpan) * (height - pad.top - pad.bottom);
   const baseline = yAt(0);
+  const barWidth = Math.max(3, Math.min(24, (plotWidth / data.values.length) * 0.64));
   const labelEvery = Math.max(1, Math.ceil(data.keys.length / 6));
 
   return (
@@ -275,13 +263,21 @@ function CategoricalMapPlot({ data, valueLabel }: {
         {data.values.map((value, index) => {
           const x = xAt(index);
           const y = yAt(value);
+          const barTop = Math.min(y, baseline);
+          const barHeight = Math.max(1, Math.abs(baseline - y));
           const showLabel = index === data.keys.length - 1 || index % labelEvery === 0;
           return (
             <g key={data.keys[index]}>
-              <line x1={x} y1={baseline} x2={x} y2={y} stroke="var(--series)" strokeWidth="1.5" />
-              <circle cx={x} cy={y} r="2.8" fill="var(--series)">
+              <rect
+                x={x - barWidth / 2}
+                y={barTop}
+                width={barWidth}
+                height={barHeight}
+                rx="1.5"
+                fill="var(--series)"
+              >
                 <title>{`${data.keys[index]}: ${formatScalar(value)}`}</title>
-              </circle>
+              </rect>
               {showLabel && (
                 <text className="curve-tick" x={x} y={height - 10} textAnchor="middle">
                   {categoryTick(data.keys[index])}
@@ -304,61 +300,6 @@ function CategoricalMapPlot({ data, valueLabel }: {
   );
 }
 
-/** Exact two-number map values as points. Position names and the raw ordered
- * pair stay in each point title and in the complete table below. Without
- * result-schema evidence, the axes are only first and second value. */
-function PairScatterPlot({ data, valueLabel }: {
-  data: Extract<MapPlotData, { kind: "pairs" }>;
-  valueLabel: string;
-}) {
-  const width = 320;
-  const height = 160;
-  const pad = { left: 38, right: 8, top: 10, bottom: 24 };
-  const rawXMin = Math.min(...data.first);
-  const rawXMax = Math.max(...data.first);
-  const rawYMin = Math.min(...data.second);
-  const rawYMax = Math.max(...data.second);
-  const xPadding = rawXMin === rawXMax ? Math.max(Math.abs(rawXMin) * 0.05, 1) : 0;
-  const yPadding = rawYMin === rawYMax ? Math.max(Math.abs(rawYMin) * 0.05, 1) : 0;
-  const xMin = rawXMin - xPadding;
-  const xMax = rawXMax + xPadding;
-  const yMin = rawYMin - yPadding;
-  const yMax = rawYMax + yPadding;
-  const xAt = (value: number) =>
-    pad.left + ((value - xMin) / (xMax - xMin)) * (width - pad.left - pad.right);
-  const yAt = (value: number) =>
-    height - pad.bottom - ((value - yMin) / (yMax - yMin)) * (height - pad.top - pad.bottom);
-
-  return (
-    <figure className="curve">
-      <svg
-        viewBox={`0 0 ${width} ${height}`}
-        role="img"
-        aria-label={t.testResults.pairPlotAria(valueLabel, data.first.length)}
-      >
-        <line className="curve-axis" x1={pad.left} y1={height - pad.bottom} x2={width - pad.right} y2={height - pad.bottom} />
-        <line className="curve-axis" x1={pad.left} y1={pad.top} x2={pad.left} y2={height - pad.bottom} />
-        {data.first.map((first, index) => (
-          <circle
-            key={data.keys[index]}
-            cx={xAt(first)}
-            cy={yAt(data.second[index])}
-            r="3.2"
-            fill="var(--series)"
-          >
-            <title>{`${data.keys[index]}: ${t.testResults.numericPair(formatScalar(first), formatScalar(data.second[index]))}`}</title>
-          </circle>
-        ))}
-        <text className="curve-tick" x={pad.left} y={height - 8} textAnchor="start">{formatScalar(rawXMin)}</text>
-        <text className="curve-tick" x={width - pad.right} y={height - 8} textAnchor="end">{formatScalar(rawXMax)}</text>
-        <text className="curve-tick" x={pad.left - 4} y={pad.top + 8} textAnchor="end">{formatScalar(rawYMax)}</text>
-        <text className="curve-tick" x={pad.left - 4} y={height - pad.bottom} textAnchor="end">{formatScalar(rawYMin)}</text>
-      </svg>
-      <figcaption>{t.testResults.pairPlotCaption(valueLabel, data.first.length)}</figcaption>
-    </figure>
-  );
-}
-
 function label(run: DisplayTestRun, code: string): string {
   return run.result_meta[code]?.name ?? code;
 }
@@ -369,7 +310,12 @@ export function RunCurves({ run }: { run: DisplayTestRun }) {
     .map(([code, value]) => [code, asNumericArray(value)] as const)
     .filter((entry): entry is readonly [string, number[]] => entry[1] !== null);
 
-  const plots = mapPlots(run);
+  const hasDisplayableAttachment = run.attachments.some(
+    (attachment) => attachment.stored && isDisplayableImage(attachment),
+  );
+  // A categorical chart is a fallback, never a replacement for the original
+  // numeric-array curve or a locally mirrored instrument image/plot.
+  const plots = arrays.length === 0 && !hasDisplayableAttachment ? mapPlots(run) : [];
 
   if (arrays.length === 0 && plots.length === 0) return null;
 
@@ -386,13 +332,9 @@ export function RunCurves({ run }: { run: DisplayTestRun }) {
           xLabel={label(run, "VOLTAGE")}
           yLabel={label(run, "CURRENT")}
         />
-        {plots.map(({ code, data }) =>
-          data.kind === "categories" ? (
-            <CategoricalMapPlot key={code} data={data} valueLabel={label(run, code)} />
-          ) : (
-            <PairScatterPlot key={code} data={data} valueLabel={label(run, code)} />
-          ),
-        )}
+        {plots.map(({ code, data }) => (
+          <CategoricalMapPlot key={code} data={data} valueLabel={label(run, code)} />
+        ))}
       </>
     );
   }
@@ -410,13 +352,9 @@ export function RunCurves({ run }: { run: DisplayTestRun }) {
           yLabel={label(run, code)}
         />
       ))}
-      {plots.map(({ code, data }) =>
-        data.kind === "categories" ? (
-          <CategoricalMapPlot key={code} data={data} valueLabel={label(run, code)} />
-        ) : (
-          <PairScatterPlot key={code} data={data} valueLabel={label(run, code)} />
-        ),
-      )}
+      {plots.map(({ code, data }) => (
+        <CategoricalMapPlot key={code} data={data} valueLabel={label(run, code)} />
+      ))}
     </>
   );
 }
@@ -477,10 +415,15 @@ export function RunAttachments({ sn, attachments, onOpen }: {
   onOpen: (attachment: TestRunAttachment) => void;
 }) {
   if (attachments.length === 0) return null;
+  const ordered = [...attachments].sort(
+    (left, right) =>
+      Number(right.stored && isDisplayableImage(right)) -
+      Number(left.stored && isDisplayableImage(left)),
+  );
 
   return (
     <div className="img-grid compact">
-      {attachments.map((attachment) =>
+      {ordered.map((attachment) =>
         attachment.stored && isDisplayableImage(attachment) ? (
           <button
             type="button"
@@ -632,6 +575,7 @@ export function TestResultsSection({
                         : formatTimestamp(run.measured_at)}
                     </span>
                   </div>
+                  <RunAttachments sn={sn} attachments={run.attachments} onOpen={setLightbox} />
                   <RunCurves run={run} />
                   <RunScalars run={run} />
                   {Object.keys(run.results).length === 0 && (
@@ -639,7 +583,6 @@ export function TestResultsSection({
                       {ghost ? t.testResults.stagedHint : t.testResults.noValues}
                     </p>
                   )}
-                  <RunAttachments sn={sn} attachments={run.attachments} onOpen={setLightbox} />
                   <RunConditions run={run} />
                 </li>
                 );

@@ -13,7 +13,7 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { EvidenceSyncJob } from "./api";
-import { getLatestSyncJob, getSyncJob } from "./api";
+import { getLatestSyncJob, getSyncJob, startEvidenceSyncJob } from "./api";
 import { useEvidenceSyncJob } from "./componentSync";
 
 vi.mock("./api", () => ({
@@ -125,5 +125,71 @@ describe("useEvidenceSyncJob rolling readout", () => {
 
     expect(afterFirst).toBe(1);
     expect(result.current.dataEpoch).toBe(afterFirst);
+  });
+
+  it("deduplicates an in-flight start and exposes its pending state", async () => {
+    const result = await mountRunning();
+    let resolveStart!: (job: EvidenceSyncJob) => void;
+    vi.mocked(startEvidenceSyncJob).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStart = resolve;
+      }),
+    );
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.start("EXAMPLE");
+      second = result.current.start("EXAMPLE");
+    });
+
+    expect(first).toBe(second);
+    expect(startEvidenceSyncJob).toHaveBeenCalledTimes(1);
+    expect(result.current.starting).toBe(true);
+
+    await act(async () => {
+      resolveStart(evidenceJob({ id: 8, status: "queued", phase: "queued" }));
+      await first;
+    });
+    expect(result.current.job?.id).toBe(8);
+    expect(result.current.starting).toBe(false);
+  });
+
+  it("discovers a newer automatic retry after the visible job is terminal", async () => {
+    vi.mocked(getLatestSyncJob).mockResolvedValueOnce(
+      evidenceJob({ status: "failed", phase: "fetching", error: "offline" }),
+    );
+    const hook = renderHook(() => useEvidenceSyncJob(true));
+    await settle(0);
+    expect(hook.result.current.job?.status).toBe("failed");
+
+    vi.mocked(getLatestSyncJob).mockResolvedValueOnce(
+      evidenceJob({ id: 8, status: "queued", phase: "queued" }),
+    );
+    await settle(5_000);
+
+    expect(getLatestSyncJob).toHaveBeenLastCalledWith(
+      "evidence",
+      "EXAMPLE",
+      expect.any(AbortSignal),
+    );
+    expect(hook.result.current.job?.id).toBe(8);
+    expect(hook.result.current.active).toBe(true);
+  });
+
+  it("does not replace a terminal card with a job from another institute", async () => {
+    vi.mocked(getLatestSyncJob).mockResolvedValueOnce(
+      evidenceJob({ status: "interrupted", phase: "fetching", error: "restart" }),
+    );
+    const hook = renderHook(() => useEvidenceSyncJob(true));
+    await settle(0);
+
+    vi.mocked(getLatestSyncJob).mockResolvedValueOnce(
+      evidenceJob({ id: 8, institute_code: "OTHER", status: "queued", phase: "queued" }),
+    );
+    await settle(5_000);
+
+    expect(hook.result.current.job?.id).toBe(7);
+    expect(hook.result.current.job?.institute_code).toBe("EXAMPLE");
   });
 });

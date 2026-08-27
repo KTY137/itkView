@@ -30,6 +30,46 @@ export type CollectiveCurveCandidate = {
   runs: number;
 };
 
+export const REPRESENTATIVE_CURVE_LIMIT = 32;
+
+function evenlySpacedIndices(indices: number[], count: number): number[] {
+  if (count <= 0 || indices.length === 0) return [];
+  if (indices.length <= count) return indices;
+  if (count === 1) return [indices[0]];
+  return Array.from({ length: count }, (_, position) =>
+    indices[Math.round((position * (indices.length - 1)) / (count - 1))],
+  );
+}
+
+/**
+ * A deterministic readable subset for the collective charts. The API returns
+ * newest-first, so evenly spacing indices keeps the whole returned time span
+ * visible. Up to one quarter of the budget is reserved for failed runs before
+ * the general sample is filled; a failure therefore cannot disappear merely
+ * because passed runs dominate the population.
+ */
+export function representativeCurves(
+  curves: MeasurementCurve[],
+  limit = REPRESENTATIVE_CURVE_LIMIT,
+): MeasurementCurve[] {
+  const bounded = Math.max(1, Math.floor(limit));
+  if (curves.length <= bounded) return curves;
+
+  const allIndices = curves.map((_, index) => index);
+  const failedIndices = allIndices.filter((index) => !curves[index].passed);
+  const failedBudget = Math.min(failedIndices.length, Math.max(1, Math.floor(bounded / 4)));
+  const picked = new Set(evenlySpacedIndices(failedIndices, failedBudget));
+
+  // Sample the remaining population with the remaining budget. Because the
+  // sets cannot overlap, both ends of the returned time span stay eligible
+  // even when the reserved failures sit near the newest end.
+  const remainingIndices = allIndices.filter((index) => !picked.has(index));
+  for (const index of evenlySpacedIndices(remainingIndices, bounded - picked.size)) {
+    picked.add(index);
+  }
+  return [...picked].sort((left, right) => left - right).map((index) => curves[index]);
+}
+
 const CURVE_FAMILY_RESULTS: Record<
   CollectiveCurveFamily,
   { x: "voltage"; y: "current" | "capacitance" }

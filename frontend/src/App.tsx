@@ -232,6 +232,26 @@ function AppShell() {
     (left, right) =>
       new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime(),
   )[0] ?? null;
+  // Measurement aggregations are expensive. Scope their local cache to the
+  // signed-in view and invalidate it only when the evidence mirror visibly
+  // advances. The backend contract still needs an authoritative revision for
+  // non-sync mutations; this job/epoch tuple is the safe frontend seam today.
+  const measurementCacheScope = demo
+    ? "demo"
+    : `user:${user?.id ?? "unknown"}:institute:${user?.institute_code ?? "all"}`;
+  const evidenceRevisionPhase =
+    evidenceSync.job?.status === "queued" || evidenceSync.job?.status === "running"
+      ? `progress:${evidenceSync.dataEpoch}`
+      : `terminal:${evidenceSync.job?.status ?? "none"}`;
+  const measurementRevision = demo
+    ? "demo-static"
+    : evidenceSync.job === null
+      ? "mirror-unknown"
+      : [
+          evidenceSync.job.institute_code,
+          evidenceSync.job.id,
+          evidenceRevisionPhase,
+        ].join(":");
 
   return (
     <div className="frame">
@@ -460,7 +480,11 @@ function AppShell() {
               labels={t.adminSettings}
             />
           ) : screen === "statistics" ? (
-            <StatisticsScreen />
+            <StatisticsScreen
+              measurementRevision={measurementRevision}
+              measurementCacheScope={measurementCacheScope}
+              instituteCode={user?.institute_code || adminInstituteCode || undefined}
+            />
           ) : (
             <DashboardScreen />
           )}

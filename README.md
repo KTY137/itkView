@@ -223,9 +223,12 @@ Another process owns `8000` or `5173`. Identify it first; only then rerun with
 `-ForcePortCleanup`, which terminates that process and its child tree.
 
 **The desktop app opens but stays on the splash screen.**
-The backend did not come up. Its log says why:
-`%LOCALAPPDATA%\itkflow\logs\server.log` — a windowed build has no console,
-so that file is the only trail.
+The backend did not come up. Check
+`%LOCALAPPDATA%\itkflow\logs\server.log` for the Python server and
+`desktop.log` beside it for shell/process lifecycle events. Both retain three
+rotated backups. A global administrator can also download a bounded diagnostics
+ZIP from **Operations health** in the packaged desktop app; review the logs
+before sharing because application activity can contain component identifiers.
 
 **Sign-in fails right after setup.**
 No account exists yet. From `backend/`, create one with

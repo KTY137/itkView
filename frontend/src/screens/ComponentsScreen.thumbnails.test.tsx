@@ -56,6 +56,7 @@ function syncController(kind: SyncJobKind): SyncJobController {
     job: null,
     active: false,
     discovering: false,
+    starting: false,
     startError: null,
     pollError: null,
     dataEpoch: 0,

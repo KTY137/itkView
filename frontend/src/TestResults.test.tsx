@@ -5,7 +5,11 @@ import type { TestRunAttachment, TestRunDetail } from "./api";
 import { t } from "./i18n";
 import { RunAttachments, RunCurves, RunScalars } from "./TestResults";
 
-function run(results: Record<string, unknown>, names: Record<string, string>): TestRunDetail {
+function run(
+  results: Record<string, unknown>,
+  names: Record<string, string>,
+  attachments: TestRunAttachment[] = [],
+): TestRunDetail {
   return {
     test_type: "GENERIC_MEASUREMENT",
     passed: true,
@@ -18,7 +22,7 @@ function run(results: Record<string, unknown>, names: Record<string, string>): T
       Object.entries(names).map(([code, name]) => [code, { name }]),
     ),
     properties: {},
-    attachments: [],
+    attachments,
   };
 }
 
@@ -87,7 +91,8 @@ describe("generated plots in expanded test results", () => {
         name: t.testResults.categoryPlotAria("Glue thickness [um]", 2),
       }),
     ).toBeInTheDocument();
-    expect(container.querySelectorAll("svg circle")).toHaveLength(2);
+    expect(container.querySelectorAll("svg rect")).toHaveLength(2);
+    expect(container.querySelector("svg circle")).toBeNull();
     expect(container.querySelector("svg polyline")).toBeNull();
     expect(screen.getAllByText("SENSOR_LEFT").length).toBeGreaterThan(0);
     expect(screen.getAllByText("SENSOR_RIGHT").length).toBeGreaterThan(0);
@@ -95,7 +100,7 @@ describe("generated plots in expanded test results", () => {
     expect(screen.getAllByText("-0.5").length).toBeGreaterThan(0);
   });
 
-  it("plots finite numeric pairs without inventing axis semantics", () => {
+  it("keeps finite numeric pairs in the table without inventing plot axes", () => {
     const pairs = run(
       { PAIRS: { POSITION_A: [0.1, -0.2], POSITION_B: [-0.3, 0.4] } },
       { PAIRS: "Measured pairs [mm]" },
@@ -108,20 +113,96 @@ describe("generated plots in expanded test results", () => {
       </>,
     );
 
-    expect(
-      screen.getByRole("img", {
-        name: t.testResults.pairPlotAria("Measured pairs [mm]", 2),
-      }),
-    ).toBeInTheDocument();
-    expect(container.querySelectorAll("svg circle")).toHaveLength(2);
-    expect(container.querySelector("svg polyline")).toBeNull();
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(container.querySelector("svg")).toBeNull();
     expect(screen.getByText("POSITION_A")).toBeInTheDocument();
     expect(screen.getByText("POSITION_B")).toBeInTheDocument();
     expect(screen.getByText(t.testResults.numericPair("0.1", "-0.2"))).toBeInTheDocument();
     expect(screen.getByText(t.testResults.numericPair("-0.3", "0.4"))).toBeInTheDocument();
-    expect(screen.getByText(t.testResults.pairPlotCaption("Measured pairs [mm]", 2))).toBeInTheDocument();
     expect(container).not.toHaveTextContent("Δx");
     expect(container).not.toHaveTextContent("Δy");
+  });
+
+  it("does not let a categorical fallback replace an original numeric-array curve", () => {
+    const mixedShapes = run(
+      {
+        CURRENT: [0.1, 0.8, 1.7],
+        THICKNESS: { SENSOR_LEFT: 1.25, SENSOR_RIGHT: 1.2 },
+      },
+      { CURRENT: "Leakage current [uA]", THICKNESS: "Glue thickness [um]" },
+    );
+
+    const { container } = render(<RunCurves run={mixedShapes} />);
+
+    expect(
+      screen.getByRole("img", { name: "Leakage current [uA] over #" }),
+    ).toBeInTheDocument();
+    expect(container.querySelectorAll("svg")).toHaveLength(1);
+    expect(container.querySelector("svg polyline")).not.toBeNull();
+    expect(container.querySelector("svg rect")).toBeNull();
+  });
+
+  it("uses a displayable attachment instead of generating a categorical fallback", () => {
+    const attachment: TestRunAttachment = {
+      source: "pdb",
+      code: "PLOT-PNG",
+      test_type: "MODULE_METROLOGY",
+      test_run_ref: "RUN-1",
+      filename: "profile.png",
+      content_type: "image/png",
+      title: "Measured profile",
+      size_bytes: 2048,
+      stored: true,
+      is_image: true,
+    };
+    const mapped = run(
+      { THICKNESS: { SENSOR_LEFT: 1.25, SENSOR_RIGHT: 1.2 } },
+      { THICKNESS: "Glue thickness [um]" },
+      [attachment],
+    );
+
+    const { container } = render(
+      <>
+        <RunAttachments sn="20USEM00000001" attachments={mapped.attachments} onOpen={vi.fn()} />
+        <RunCurves run={mapped} />
+      </>,
+    );
+
+    expect(screen.getByRole("img", { name: "Measured profile" })).toBeInTheDocument();
+    expect(container.querySelector("figure.curve")).toBeNull();
+  });
+
+  it("shows a real image before the original array curve when both exist", () => {
+    const attachment: TestRunAttachment = {
+      source: "pdb",
+      code: "PLOT-PNG",
+      test_type: "MODULE_IV",
+      test_run_ref: "RUN-1",
+      filename: "iv.png",
+      content_type: "image/png",
+      title: "Instrument IV plot",
+      size_bytes: 2048,
+      stored: true,
+      is_image: true,
+    };
+    const iv = run(
+      { VOLTAGE: [0, -50, -100], CURRENT: [0.1, 0.8, 1.7] },
+      { VOLTAGE: "Bias voltage [V]", CURRENT: "Leakage current [uA]" },
+      [attachment],
+    );
+
+    const { container } = render(
+      <>
+        <RunAttachments sn="20USEM00000001" attachments={iv.attachments} onOpen={vi.fn()} />
+        <RunCurves run={iv} />
+      </>,
+    );
+
+    const imageGrid = container.querySelector(".img-grid");
+    const curve = container.querySelector("figure.curve");
+    expect(imageGrid).not.toBeNull();
+    expect(curve).not.toBeNull();
+    expect(imageGrid!.compareDocumentPosition(curve!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
   it("leaves a mixed map as a table without inventing plot points", () => {

@@ -15,6 +15,7 @@ import {
   writeStagedPreviewPreference,
 } from "../stagedPreview";
 import type { StagedPreviewMode } from "../stagedPreview";
+import ShareCredentialsPanel from "../ShareCredentialsPanel";
 
 type BusyAction = "connect" | "test" | "disconnect" | null;
 
@@ -465,6 +466,7 @@ export default function AccountScreen() {
             </>
           ) : null}
         </section>
+        <ShareCredentialsPanel />
         <StagedPreviewPreferences
           mode={stagedPreviewMode}
           onChange={changeStagedPreviewMode}

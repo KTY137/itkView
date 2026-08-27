@@ -264,6 +264,8 @@ export type EvidenceSyncJobResult = {
   attachments_downloaded: number;
   attachments_reused: number;
   attachments_failed: number;
+  attachments_skipped?: number;
+  attachments_authentication_required?: number;
   attachments_total: number;
 };
 
@@ -310,6 +312,8 @@ export type ComponentSyncJob = {
   started_at: string | null;
   updated_at: string;
   finished_at: string | null;
+  heartbeat_stale?: boolean;
+  stale_after_seconds?: number;
 };
 
 /** Persisted progress for the detailed test-evidence and attachment mirror. */
@@ -329,6 +333,8 @@ export type EvidenceSyncJob = {
   started_at: string | null;
   updated_at: string;
   finished_at: string | null;
+  heartbeat_stale?: boolean;
+  stale_after_seconds?: number;
 };
 
 export type SyncJob = ComponentSyncJob | EvidenceSyncJob;
@@ -349,6 +355,7 @@ export type OpsHealth = {
   status: "healthy" | "warning" | "critical";
   generated_at: string;
   institute_code: string | null;
+  diagnostics_available?: boolean;
   heartbeats: OpsHeartbeat[];
   sync: { active: SyncJob[]; latest: SyncJob[]; stale_active: number };
   outbox: {
@@ -465,6 +472,22 @@ export type ProductionStats = {
   stage_dwell: StageDwell[];
   rework: Rework;
   yield_: Yield;
+};
+
+export type RequiredTestStageRow = {
+  stage: string;
+  test_type: string;
+  component_total: number;
+  passed: number;
+  failed: number;
+  missing: number;
+};
+
+export type RequiredTestStats = {
+  institute: string;
+  denominator: "at_or_beyond_stage";
+  stage_order: string[];
+  rows: RequiredTestStageRow[];
 };
 
 export type MeasurementResultDimension = {
@@ -821,6 +844,20 @@ export type PdbCredentialsPut = {
   access_code2: string;
 };
 
+/** Non-secret metadata for one account-owned public-share password. */
+export type ShareCredentialOut = {
+  id: number;
+  provider_host: string;
+  token_hint: string;
+  updated_at: string;
+};
+
+/** Write-only public-share URL/password pair. Neither value is echoed. */
+export type ShareCredentialPut = {
+  url: string;
+  password: string;
+};
+
 // ---- Error handling ----------------------------------------------------------
 
 export class ApiError extends Error {
@@ -1089,6 +1126,8 @@ export type EvidenceSyncResult = {
   attachments_downloaded: number;
   attachments_reused: number;
   attachments_failed: number;
+  attachments_skipped?: number;
+  attachments_authentication_required?: number;
   attachments_total: number;
 };
 
@@ -1362,6 +1401,16 @@ export function getStatsDimensions(signal?: AbortSignal): Promise<StatsDimension
   return request<StatsDimensions>("/api/stats/dimensions", { signal });
 }
 
+export function getRequiredTestStats(
+  institute?: string,
+  signal?: AbortSignal,
+): Promise<RequiredTestStats> {
+  return request<RequiredTestStats>(
+    `/api/stats/required-tests${queryString({ institute })}`,
+    { signal },
+  );
+}
+
 export function getMeasurementDimensions(
   signal?: AbortSignal,
 ): Promise<MeasurementDimensions> {
@@ -1596,6 +1645,27 @@ export function testPdbConnection(): Promise<PdbConnectionOut> {
 /** Remove only the signed-in user's saved PDB connection (204). */
 export function deletePdbConnection(): Promise<void> {
   return requestVoid("/api/account/pdb-connection", { method: "DELETE" });
+}
+
+/** List only non-secret metadata for saved public-share passwords. */
+export function getShareCredentials(signal?: AbortSignal): Promise<ShareCredentialOut[]> {
+  return request<ShareCredentialOut[]>("/api/account/share-credentials", { signal });
+}
+
+/** Validate the link shape and locally save one encrypted public-share password. */
+export function putShareCredential(body: ShareCredentialPut): Promise<ShareCredentialOut> {
+  return request<ShareCredentialOut>("/api/account/share-credentials", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Remove one account-owned saved public-share password. */
+export function deleteShareCredential(id: number): Promise<void> {
+  return requestVoid(`/api/account/share-credentials/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 
