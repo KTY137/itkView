@@ -4,8 +4,20 @@ import { deriveAuthCapabilities } from "./auth";
 import { product, productForVariant, setProductDocumentTitle } from "./product";
 
 describe("product variants", () => {
-  it("keeps itkFlow as the compile-time default", () => {
+  it("defaults to itkView and fails closed for unknown variants", () => {
     expect(productForVariant(undefined)).toEqual({
+      variant: "view",
+      name: "itkView",
+      brandPrefix: "itk",
+      brandAccent: "View",
+      csrfCookie: "itkview_csrf",
+      workflowWrites: false,
+    });
+    expect(productForVariant("anything-else")).toEqual(productForVariant(undefined));
+  });
+
+  it("keeps the shared itkFlow surface behind an explicit build selection", () => {
+    expect(productForVariant(" FLOW ")).toEqual({
       variant: "flow",
       name: "itkFlow",
       brandPrefix: "itk",
@@ -13,8 +25,9 @@ describe("product variants", () => {
       csrfCookie: "itkflow_csrf",
       workflowWrites: true,
     });
-    expect(productForVariant("anything-else")).toEqual(productForVariant(undefined));
-    expect(product).toEqual(productForVariant(undefined));
+    // The shared regression suite opts into Flow in vitest.config.ts. Runtime
+    // builds do not receive that test-only environment value.
+    expect(product).toEqual(productForVariant("flow"));
   });
 
   it("defines itkView branding, title, CSRF cookie and a hard workflow-write gate", () => {
@@ -48,7 +61,7 @@ describe("product variants", () => {
   });
 
   it("preserves the existing itkFlow operator/admin/demo capability surface", () => {
-    const flow = productForVariant(undefined);
+    const flow = productForVariant("flow");
     expect(deriveAuthCapabilities("admin", false, flow.workflowWrites).canWrite).toBe(true);
     expect(deriveAuthCapabilities("operator", false, flow.workflowWrites).canWrite).toBe(true);
     expect(deriveAuthCapabilities(null, true, flow.workflowWrites).canWrite).toBe(true);

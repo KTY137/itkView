@@ -70,15 +70,40 @@ def _concrete_path(route_path: str) -> str:
     return re.sub(r"\{[^}]+\}", "1", route_path)
 
 
-def test_flow_remains_the_default_product() -> None:
+def test_view_is_the_dedicated_repository_default(monkeypatch) -> None:
+    monkeypatch.delenv("ITKFLOW_PRODUCT_VARIANT", raising=False)
     settings = Settings(_env_file=None)
+
+    assert settings.product_variant == "view"
+    assert settings.app_name == "itkView"
+    assert settings.database_url == "sqlite:///./itkview.db"
+    assert settings.pdb_write_scope == "disabled"
+    assert settings.pdb_writes_enabled is False
+    assert settings.outbox_processor == "off"
+    assert settings.reminder_scheduler == "off"
+
+
+def test_flow_remains_available_only_when_explicitly_selected() -> None:
+    settings = Settings(product_variant="flow", _env_file=None)
 
     assert settings.product_variant == "flow"
     assert settings.app_name == "itkFlow"
+    assert settings.database_url == "sqlite:///./itkflow.db"
     assert settings.pdb_write_scope == "dummy_only"
     assert settings.pdb_writes_enabled is True
     assert settings.outbox_processor == "worker"
     assert settings.reminder_scheduler == "worker"
+
+
+def test_explicit_flow_never_inherits_the_view_database_default() -> None:
+    settings = Settings(
+        product_variant="flow",
+        app_name="Shared core regression",
+        _env_file=None,
+    )
+
+    assert settings.app_name == "Shared core regression"
+    assert settings.database_url == "sqlite:///./itkflow.db"
 
 
 def test_view_forces_every_background_and_pdb_write_switch_off() -> None:

@@ -1,265 +1,156 @@
-# itkFlow
+# itkView
 
-Production cockpit for ATLAS ITk strip module assembly. Replaces the
-Google-Sheet + CERNBox + zFlow triage workflow with a self-hostable web app.
-Multi-institute by design — the ITk Production Database (PDB) remains the
-single source of truth; itkFlow orchestrates local data entry, validation,
-test ingestion and reviewed PDB writes.
+itkView is a fail-closed, read-only viewer for ATLAS ITk strip production
+data. It mirrors authorized PDB data and attachments into an isolated local
+store, then makes components, images, original plots, generated fallbacks,
+collective IV/CV curves and production statistics available without exposing
+production-data authoring or PDB writes.
 
-The same source tree also builds **itkView**, a separately installed,
-fail-closed read-only product. itkView keeps PDB mirror sync, images, plots,
-statistics, search and diagnostics, but has no Triage/ingest, Staged/Outbox,
-assembly, registration, test-entry, stage-move or other production-write UI.
-The server, worker and final PDB submission sink enforce that boundary even
-for administrators and direct API calls. The two desktop products use separate
-cookies and `%LOCALAPPDATA%` directories; see
-[`docs/adr/007-itkview-read-only-product.md`](docs/adr/007-itkview-read-only-product.md).
+The ITk Production Database remains the source of truth. "Read only" refers
+to that remote boundary: itkView still writes its local mirror, accounts,
+settings, attachment files, logs and caches.
 
-**Safety first:** the default configuration cannot reach the production PDB.
-Production reads require a deliberate double opt-in. itkFlow writes remain
-limited to itkFlow-registered DUMMY test components; itkView disables them
-entirely. See `CLAUDE.md` for the hard rules.
+## Install on Windows
 
-For current implementation priorities, agents and humans should start with
-`docs/04-roadmap.md`; `docs/02-revamp-plan.md` remains the product vision.
+Download the newest `itkView_<version>_x64-setup.exe` from the
+**[itkView Releases page](https://github.com/KTY137/itkView/releases)**.
 
-## Install (Windows)
+The alpha installer is not code-signed yet, so Windows SmartScreen may show a
+warning on first launch. Verify that the download came from the release page,
+then use **More info -> Run anyway** if you trust it.
 
-The fastest way to try itkFlow is the desktop app — one installer, no Python
-or Node.js setup; the backend ships inside and the UI opens in its own window:
+On first start:
 
-**[Download the latest installer from the Releases page.](https://github.com/KTY137/itkflow/releases)**
+1. create the initial local administrator when prompted;
+2. open **Account** and connect your personal Plus4U/PDB access codes;
+3. run the component/evidence sync to populate the new local mirror.
 
-The build is not code-signed yet, so Windows SmartScreen will warn on first
-run — choose "More info → Run anyway". On first start, create the admin
-account the app asks for, then connect your personal ITk PDB access codes
-under **Account**. Without the deliberate production opt-in the app stays
-fully offline; PDB writes remain restricted to DUMMY test components either
-way.
+Application data lives under `%LOCALAPPDATA%\itkview`, separately from
+itkFlow. This includes the SQLite database, encrypted credential key,
+attachments and rotating logs. A fresh itkView installation therefore starts
+empty even when itkFlow is already installed; that isolation is intentional.
 
-Your data — database, credential key, mirrored attachments — lives in
-`%LOCALAPPDATA%\itkflow` and survives updates. Back up `pdb-credential.key`:
-losing it makes saved PDB connections unreadable. Building the installer
-yourself is covered in *Desktop build* below.
+## What itkView includes
 
-## Repository layout
+- component search, scanner input, board, family and detail views;
+- authorized component, test, evidence, attachment, tool and shipment sync;
+- locally stored images and original plots;
+- generated plots only when no usable original plot or array curve exists;
+- persistent measurement caching and collective IV/CV curve controls;
+- required-test statistics and production-hold indicators;
+- local accounts, institute settings and personal credential management;
+- sync retry, rotating crash logs and bounded diagnostic export.
 
-| Path | Contents |
-|---|---|
-| `backend/` | FastAPI + SQLAlchemy backend (Python ≥ 3.10, 3.12 in Docker) |
-| `frontend/` | React + TypeScript (Vite) frontend |
-| `agent/` | Watched-folder upload agent for instrument PCs (phase 2) |
-| `deploy/` | Docker Compose, Dockerfiles, `.env.example` |
-| `desktop/` | Tauri desktop shell: bundles the backend and the built UI into one app |
-| `docs/` | Internal planning documents (German): roadmap `docs/04-roadmap.md`, binding UI design reference `docs/05-ui-design-reference.md` (+ mockup `docs/itkflow-ui-mockup.html`) |
+## What itkView intentionally removes
 
-## Prerequisites
+There is no Triage/Ingest workflow, Staged/Outbox tab, watched-folder upload,
+manual or file-based test entry, assembly, component registration, stage move,
+shipment reception editing, reminder delivery, notification mutation,
+`Push to PDB` or `Discard`.
 
-| Requirement | Version | Needed for |
-|---|---|---|
-| Python | ≥ 3.10 (3.12 in Docker/CI) | backend |
-| Node.js + npm | ≥ 20.19 (Vite 7 / React 19) | frontend |
-| Docker + Compose | current | optional: full-stack deployment only |
+This is enforced beyond the interface. The server rejects unclassified unsafe
+mutations by default, forces the PDB write scope and processors off, and guards
+the final submitter and standalone worker. Administrators do not bypass the
+product boundary. Authentication, local administration, personal credentials
+and explicitly classified read-sync requests remain available because they
+maintain the local viewer.
 
-A Plus4U/PDB account is **not** needed to run itkFlow. Every person connects
-their own PDB access codes later, in the app, under **Account**.
+See [ADR 007](docs/adr/007-itkview-read-only-product.md) for the complete
+security contract.
 
-## Quickstart (development)
+## Docker deployment
 
-### First run, in order
+The dedicated Compose stack owns its own project, PostgreSQL database and
+database/attachment volumes:
 
-1. Install the backend environment (`backend/.venv`) and the frontend
-   dependencies (`frontend/node_modules`) — see *Manual setup* below.
-2. Create a local admin account: from `backend/`, run
-   `python -m app.create_admin --help`. There is no default account.
-3. Start the app (launcher below, or the manual commands).
-4. Sign in at <http://127.0.0.1:5173/>.
-5. Open **Account** and connect your personal Plus4U/PDB access codes.
-   This step needs a server started with production reads enabled — see the
-   next paragraph and *Troubleshooting*.
-
-### Windows launcher
-
-On Windows, the root launcher provides the shortest repeatable start:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-itkflow.ps1
+```bash
+cd deploy
+cp .env.example .env
+# Fill in POSTGRES_PASSWORD and a new credential-encryption key.
+docker compose up --build
 ```
 
-The default remains offline from the PDB. To make the component **Sync** action
-use the production PDB read path, start with the explicit production-read
-opt-in (the historical PDB test host no longer exists):
+Do not reuse itkFlow's `.env`, database volume, attachment volume or
+credential key. Full setup, backup and offline-mode guidance is in the
+[deployment guide](deploy/README.md).
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-itkflow.ps1 -EnableProductionReads
-```
+## Development
 
-It safely reclaims existing itkFlow listeners on the fixed development ports
-`8000` and `5173`, starts the backend and frontend in the background, checks
-both services, and opens <http://127.0.0.1:5173/>. It does not reset application
-data or accounts. If an unrelated process owns either port, the launcher stops
-and reports it; use `-ForcePortCleanup` only after confirming that process and
-its child process tree may be terminated. Use `-NoBrowser` to start without
-opening a browser. The launcher also keeps production PDB access disabled for
-its backend process unless `-EnableProductionReads` is supplied. Even in that
-mode, it disables the PDB write-test opt-in, keeps `dummy_only` scope, and does
-not start the outbox worker. The launcher creates a stable encryption key under
-the current Windows profile (outside the repository). After signing in, every
-person opens **Account** and connects their own Plus4U/PDB access-code pair;
-Sync and direct PDB reads then run only as that account. Saved codes are never
-returned to the browser, and server-wide access-code variables are not used by
-web requests.
+The repository default is itkView. Standard development and build commands
+therefore select the read-only product unless a shared-core regression test
+explicitly requests the Flow variant.
 
-Component syncs run as background jobs. Their phase, count, elapsed time and
-last update remain visible in the top bar while you browse another screen; the
-Components screen shows the detailed progress and reconnects after a reload.
-
-### Manual setup
-
-Backend:
+### Backend
 
 ```bash
 cd backend
 python -m venv .venv
-.venv/Scripts/activate          # Windows; Linux/macOS: source .venv/bin/activate
+.venv/Scripts/activate
 pip install -e ".[dev]"
-pytest                          # runs offline — no PDB access, no login needed
-python -m app.seed_demo          # optional: creates demo institute + component mirror data
-uvicorn app.main:create_app --factory --reload   # http://127.0.0.1:8000/health
+pytest
+uvicorn app.main:create_app --factory --reload
 ```
 
-Install `.[dev,pdb]` instead when this environment should perform explicitly
-enabled live PDB reads. With uv, use `uv sync --extra pdb --extra dev`. The
-production-read launcher checks this before replacing a running server. The
-normal test suite remains offline.
+On Linux or macOS, activate with `source .venv/bin/activate`. Install
+`.[dev,pdb]` only when an environment is intentionally prepared for PDB
+reads. The normal suite stays offline and excludes every live-PDB marker.
 
-When starting the backend manually (without `start-itkflow.ps1`), also set one
-stable `ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY`; generate a URL-safe 32-byte
-value once and keep it outside the repository. Losing or replacing it makes
-saved personal PDB connections unreadable. Compose setup is documented in
-`deploy/README.md`.
-
-Frontend:
+### Frontend
 
 ```bash
 cd frontend
-npm install
-npm run dev                     # http://127.0.0.1:5173 (proxies /api to :8000)
+npm ci
+npm run dev
 ```
 
-The first sign-in requires a local account; `seed_demo` deliberately does not
-create one. From `backend/`, run `python -m app.create_admin --help` to create
-or update an admin for an existing institute without storing credentials in
-the repository.
+Vite listens on <http://127.0.0.1:5173> and proxies `/api` to the backend on
+port `8000`. The first browser visit provides first-run admin setup; no default
+password is shipped.
 
-Full stack via Docker: see `deploy/README.md`.
+### Desktop installer
 
-## Desktop build
-
-The desktop app is the same itkFlow, packaged: a small shell starts the backend
-and shows its UI. Backend and frontend are served from one local origin, so
-sign-in, sessions and PDB connections behave exactly as they do in a browser.
-It is a single-workstation build — an institute still runs the server
-deployment, because roles, audit and the outbox worker are shared state.
-
-Prerequisites, on top of the ones above: a Rust toolchain (`rustup`), and on
-Windows the MSVC build tools (Tauri's supported toolchain there).
+Install a Rust toolchain and the platform prerequisites required by Tauri,
+then run:
 
 ```bash
 cd desktop
-npm install                          # Tauri CLI
-python build-sidecar.py              # builds the itkFlow frontend and sidecar
-npm run build                        # produces the itkFlow installer
-npm run build:view                   # produces the separate itkView installer
+npm ci
+npm run build
 ```
 
-`build-sidecar.py` bundles the backend with PyInstaller and names the result
-for the Rust host target triple, which is what Tauri's sidecar mechanism
-expects. Pass `--variant view` to select itkView and `--skip-frontend` to reuse
-that variant's existing output under `desktop/build/<variant>/frontend`. For a
-run without packaging an installer, `npm run dev` starts the default itkFlow
-shell.
+The default command builds the itkView frontend, PyInstaller sidecar and Tauri
+installer in a variant-isolated tree. On Windows, the expected artifact is:
 
-On a GNU toolchain (`rustup show` reports `x86_64-pc-windows-gnu`), build with
-the target spelled out:
+```text
+desktop/build/view/tauri-target/<triple>/release/bundle/nsis/itkView_<version>_x64-setup.exe
+```
+
+## Verification
+
+Useful offline checks before a release:
 
 ```bash
-npx tauri build --target x86_64-pc-windows-gnu
+cd backend && pytest && ruff check app tests
+cd frontend && npm test -- --run && npm run build
+cd desktop && npm run test:variants
 ```
 
-Without it the bundler looks for the sidecar under the MSVC triple and stops
-with `resource path binaries\itkflow-server-x86_64-pc-windows-msvc.exe doesn't
-exist`, because the sidecar is named for the host triple. MSVC needs no flag.
+A release smoke test must additionally start the packaged itkView sidecar
+with isolated temporary state and verify that `/health` reports the View
+variant, write features disabled and PDB write scope disabled. No agent or
+normal test run may enable live production access.
 
-Installers land in the variant-isolated build tree:
+## Repository map
 
-- `desktop/build/flow/tauri-target/<triple>/release/bundle/nsis/itkFlow_<version>_x64-setup.exe`
-- `desktop/build/view/tauri-target/<triple>/release/bundle/nsis/itkView_<version>_x64-setup.exe`
+| Path | Purpose |
+|---|---|
+| `backend/` | FastAPI API, local mirror, sync and server-side product policy |
+| `frontend/` | React/Vite read-only product UI |
+| `desktop/` | Tauri shell and PyInstaller sidecar build |
+| `deploy/` | isolated Docker Compose deployment |
+| `docs/` | architecture, safety rules, roadmap and UI reference |
 
-The app keeps its database, credential key and logs in the per-user
-application data directory — on Windows `%LOCALAPPDATA%\itkflow`, deliberately
-the same place `start-itkflow.ps1` uses, so a PDB connection made in the dev
-launcher keeps working in the packaged app. **Back up `pdb-credential.key`**:
-losing it makes saved PDB connections unreadable.
-
-itkView deliberately uses `%LOCALAPPDATA%\itkview` instead, including its own
-database, credential key, attachments and logs. It therefore needs its own
-first-run account and initial mirror sync and cannot drain an existing itkFlow
-Outbox.
-
-The desktop build selects the production PDB read target by default, but sends
-no PDB traffic until a user connects personal access codes. itkFlow writes
-remain restricted to itkFlow-registered DUMMY-batch test components; itkView
-has no PDB-write capability. Design notes and the trade-offs are in
-`docs/adr/005-desktop-packaging.md`.
-
-## Troubleshooting
-
-**Account → “Test connection” reports “The PDB could not be reached”, although
-the same access codes work elsewhere.**
-The server is running against the retired PDB *test* configuration. Check
-<http://127.0.0.1:8000/health>: if it reports `"pdb_instance": "test"`, no PDB
-is reachable by design — the historical test host
-`itkpd-test.unicorncollege.cz` no longer resolves, and itkFlow never silently
-falls back to production. Restart with the production-read opt-in:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-itkflow.ps1 -EnableProductionReads
-```
-
-Without the launcher, set `ITKFLOW_PDB_INSTANCE=production` **and**
-`ITKFLOW_ALLOW_PRODUCTION=true` for the backend process. Writes stay confined
-to DUMMY components either way.
-
-**“PDB client support is unavailable on this itkFlow server.”**
-The `pdb` extra is missing. In `backend/`, run `uv sync --extra pdb --extra dev`
-(or `pip install -e ".[dev,pdb]"`) and restart.
-
-**A saved connection suddenly cannot be opened.**
-`ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY` changed. Restore the previous key, or
-have each person reconnect their codes under **Account**.
-
-**The launcher refuses to start: a port is in use.**
-Another process owns `8000` or `5173`. Identify it first; only then rerun with
-`-ForcePortCleanup`, which terminates that process and its child tree.
-
-**The desktop app opens but stays on the splash screen.**
-The backend did not come up. Check
-`%LOCALAPPDATA%\itkflow\logs\server.log` for the Python server and
-`desktop.log` beside it for shell/process lifecycle events. Both retain three
-rotated backups. A global administrator can also download a bounded diagnostics
-ZIP from **Operations health** in the packaged desktop app; review the logs
-before sharing because application activity can contain component identifiers.
-
-**Sign-in fails right after setup.**
-No account exists yet. From `backend/`, create one with
-`python -m app.create_admin`. Run it from `backend/` so it picks up
-`backend/.env` and writes to the same database the backend uses.
-
-## Testing policy
-
-- The standard test suite is **fully offline**: fixtures and mocks, no tokens.
-- PDB integration tests are explicitly marked and excluded from the default
-  run; production reads and DUMMY-scoped writes require separate opt-ins.
-- Production PDB access is refused by the application unless explicitly and
-  deliberately enabled — see `backend/app/config.py`.
+Contributors and coding agents must read `CLAUDE.md`,
+`docs/04-roadmap.md` and, before UI work,
+`docs/05-ui-design-reference.md`. Never execute or import
+`references/zeuthenflow`; it is read/grep-only reference material.

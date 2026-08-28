@@ -1,8 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "itkFlow",
-  "version": "0.2.8",
-  "identifier": "org.itkflow.desktop",
+  "productName": "itkView",
+  "version": "0.1.0",
+  "mainBinaryName": "itkview",
+  "identifier": "org.itkflow.view",
   "build": {
     "frontendDist": "../splash"
   },
@@ -10,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "itkFlow",
+        "title": "itkView",
         "width": 1440,
         "height": 900,
         "minWidth": 1024,
@@ -33,8 +34,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/itkflow-server"],
-    "shortDescription": "ITk strip module production cockpit",
-    "longDescription": "itkFlow bundles its backend and web UI into one desktop application. The ITk Production Database stays the source of truth; reads start after a user connects personal access codes, while writes remain restricted to registered DUMMY-batch test components."
+    "externalBin": ["binaries/itkview-server"],
+    "shortDescription": "Read-only ITk strip module production viewer",
+    "longDescription": "itkView packages the shared backend and web UI as a read-only production viewer. It can mirror components, evidence, images and plots from the ITk Production Database after a user connects personal access codes, but it cannot ingest results, stage changes or submit writes to the PDB."
   }
 }

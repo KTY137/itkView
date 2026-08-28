@@ -5,6 +5,9 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: "jsdom",
+    // Most frontend tests exercise the shared authoring implementation. Keep
+    // that regression path explicit while production builds default to View.
+    env: { VITE_ITKFLOW_PRODUCT_VARIANT: "flow" },
     globals: false,
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],

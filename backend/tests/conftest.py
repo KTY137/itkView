@@ -12,6 +12,13 @@ from app.pdb_credentials import (
 )
 
 
+@pytest.fixture(autouse=True)
+def shared_core_tests_use_explicit_flow(monkeypatch):
+    """Keep legacy writer tests explicit while the shipped repo defaults View."""
+
+    monkeypatch.setenv("ITKFLOW_PRODUCT_VARIANT", "flow")
+
+
 @pytest.fixture()
 def client() -> TestClient:
     settings = Settings(

@@ -1,74 +1,136 @@
-# Deployment
+# Deploy itkView with Docker Compose
 
-One command per institute:
+itkView is the read-only ATLAS ITk production viewer. It mirrors PDB data and
+attachments into local storage so components, images, original plots,
+generated fallbacks, collective IV/CV curves and statistics remain fast to
+browse. It does not expose ingestion, Staged/Outbox, assembly, registration,
+test entry, stage moves or any PDB-write sink.
+
+"Read only" describes the PDB boundary. The local PostgreSQL mirror,
+attachment store, accounts, settings and caches must still be writable.
+
+## Start
+
+Create a dedicated configuration for itkView. Do not copy an itkFlow `.env`,
+database volume, attachment volume or credential key.
 
 ```bash
 cd deploy
-cp .env.example .env      # set POSTGRES_PASSWORD and one stable encryption key
+cp .env.example .env
+```
+
+Fill in these two required values in `.env`:
+
+- `POSTGRES_PASSWORD`: a new password for itkView's local PostgreSQL service.
+- `ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY`: a new, stable URL-safe base64
+  32-byte key. The example file contains a generation command.
+
+Then start the stack:
+
+```bash
 docker compose up --build
 ```
 
-The default builds the full itkFlow product. To deploy the read-only itkView
-variant from the same commit, set this in `deploy/.env` before building:
+The Compose project is explicitly named `itkview` and owns its own `itkview`
+PostgreSQL database plus separate database and attachment volumes. This keeps
+it isolated even when itkFlow runs on the same host.
+
+- Frontend: <http://localhost:8080>
+- Backend API and OpenAPI docs: <http://localhost:8000/docs>
+- Health: <http://localhost:8000/health>
+
+The worker container prints that the read-only product disables it and exits
+once with status 0. That stopped container is intentional, not a crash loop.
+
+## First-run setup
+
+On the first visit, create the initial local administrator in the browser.
+The setup route closes permanently as soon as any account exists. Complete
+this step before exposing the ports outside a trusted network: until then,
+anyone who can reach the service can claim the first account.
+
+After signing in, connect personal Plus4U/PDB access codes under **Account**.
+Credentials are encrypted per account and are never returned to the browser.
+There is no deployment-wide PDB identity.
+
+Compose enables production PDB reads by default, but no PDB request is made
+until a signed-in person connects credentials and starts or schedules a sync.
+To make the deployment network-inert, add this to `.env` and restart:
 
 ```dotenv
-ITKFLOW_PRODUCT_VARIANT=view
+ITKFLOW_PDB_INSTANCE=offline
 ```
 
-The value is passed to the frontend, API and worker together. In itkView the
-UI removes Triage/ingest, Staged/Outbox and every production authoring action;
-the API rejects unapproved mutations by default, forces
-`pdb_write_scope=disabled`, and the standalone worker exits without draining
-actions. Authentication, local administration, personal PDB/share credentials
-and reviewed read-sync POSTs remain available because they are required to
-maintain the local read-only mirror.
+There is no PDB test service. itkView never falls back from offline to
+production, and its product policy forces all PDB-write settings and workers
+off even for administrators and direct API calls.
 
-Also set `TZ` in `.env` to the institute deployment's local timezone (for
-example `Europe/Berlin`) before enabling a scheduled-sync window. Compose
-defaults to `Etc/UTC`; the backend image includes the timezone database.
+## What remains available
 
-- Frontend: http://localhost:8080
-- Backend API + OpenAPI docs: http://localhost:8000/docs
-- Health: http://localhost:8000/health — reports the active `pdb_instance`
+- component, test-definition, evidence, attachment, tool and shipment mirror
+  sync;
+- component search, scanner input, board, family and detail views;
+- locally mirrored images, original plots and generated plot fallbacks;
+- measurement exploration, collective IV/CV curves and production statistics;
+- production-hold indicators and required-test summaries;
+- local accounts, institute settings, personal PDB credentials and protected
+  public-share passwords;
+- local health information and bounded diagnostics.
 
-In an itkView deployment the worker container logs that it is disabled and
-exits once with status 0. It has no restart policy, so this is an intentional
-stopped service rather than a crash loop.
+Authoring and upload workflows are intentionally absent. In particular there
+is no Triage/Ingest, Staged/Outbox, assembly, registration, test entry, stage
+move, `Push to PDB`, `Discard`, reminder delivery or notification mutation.
 
-On the very first visit the app shows a **first-run setup screen**: create the
-initial admin account right in the browser — no shell access needed. The form
-disappears permanently once any account exists; from then on the admin manages
-accounts under **Users**. (The CLI fallback
-`docker compose exec backend python -m app.create_admin` still works.)
+## Persistent state and backups
 
-**Complete the setup immediately after the first start.** Until the first
-admin exists, anyone who can reach the port can claim the instance — do not
-expose the service beyond a trusted network before that account is created.
+Back up all three pieces together:
 
-Then sign in and connect your personal PDB access codes under **Account**.
-Compose enables production PDB **reads** out of the box — nothing contacts the
-PDB until a person connects their own codes. If the connection test says the
-deployment has **no PDB configured**, `ITKFLOW_PDB_INSTANCE=offline` is set in
-`.env`; remove it and restart to restore the default.
+1. the PostgreSQL volume;
+2. the attachment volume;
+3. `ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY` from the private `.env` file.
 
-## Safety
+Losing the key makes saved personal connections unreadable. Replacing it in
+place is not key rotation; users would have to reconnect their credentials.
+Never commit `.env` or a backup containing the key.
 
-There is no PDB test service; the code-level default (`pdb_instance=offline`)
-reaches no PDB, and this Compose file deliberately overrides it to
-production **reads** (docs/09). All PDB traffic runs under each person's own
-access codes, and writes remain confined to itkFlow-registered DUMMY
-module/hybrid components (`pdb_write_scope=dummy_only`). Set
-`ITKFLOW_PDB_INSTANCE=offline` in `.env` for a deployment that must reach no
-PDB at all.
+An existing itkFlow database is not an upgrade source for itkView. A new
+itkView installation intentionally starts with an empty, isolated mirror and
+needs its own first sync. This prevents old Outbox records, sessions and
+attachments from crossing the product boundary.
 
-For `ITKFLOW_PRODUCT_VARIANT=view`, the stronger product policy overrides that
-write scope to `disabled`; no DUMMY write exception exists in itkView.
+## Updating
 
-`ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY` must be the same stable, URL-safe
-base64 32-byte key in the backend and worker. Back it up separately from the
-database: losing it makes saved personal connections unreadable. Rotating it
-requires a dedicated re-encryption procedure; replacing it in-place does not.
+Pull or check out the intended itkView release, then rebuild the services:
 
-PDB access codes are not deployment variables. Each signed-in person opens
-**Account**, connects their own Plus4U/PDB access-code pair, and can remove or
-replace it without affecting anyone else. The API never returns saved codes.
+```bash
+docker compose up --build -d
+```
+
+Review the release notes before updating and keep a database, attachment and
+key backup. Do not remove the named volumes during a normal update.
+
+## Troubleshooting
+
+**The PDB connection says no PDB is configured.**
+`ITKFLOW_PDB_INSTANCE=offline` is active. Remove it only if this installation
+is allowed to perform production reads, then restart the stack.
+
+**The worker is stopped.**
+Expected. itkView has no Outbox drain or reminder scheduler.
+
+**Images or plots are missing after installation.**
+The mirror is intentionally empty on first start. Connect personal PDB
+credentials and run the component/evidence sync. Protected public shares also
+need their per-user password under **Account**; private CERN account links are
+reported as skipped because they require CERN OAuth rather than a stored CERN
+password.
+
+**A saved connection suddenly cannot be opened.**
+Restore the original credential-encryption key or reconnect the account's
+codes. Check that an itkFlow `.env` was not accidentally substituted.
+
+**The frontend opens but data does not persist.**
+Check that both named volumes are present and writable and that the backend
+uses `/data/attachments`. The health endpoint must report
+`"product_variant": "view"`, `"write_features_enabled": false` and a disabled
+PDB write scope.

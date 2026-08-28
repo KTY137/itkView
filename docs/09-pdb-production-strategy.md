@@ -109,6 +109,10 @@ serverseitige Produktgrenze, die auch fuer Admins und direkte API-Aufrufe gilt.
 - itkFlow und itkView teilen weder DB/Attachments/Keys/Logs noch Cookies. Eine
   alte, bereits `submitted` stehende itkFlow-Aktion kann daher nicht in den
   Viewer gelangen.
+- Das dedizierte Compose-Deployment setzt diese Grenze ebenfalls physisch um:
+  fester Projektname `itkview`, PostgreSQL-Datenbank/-User `itkview`, eigene
+  Datenbank- und Attachment-Volumes und ein neu erzeugter Credential-Key.
+  Eine itkFlow-`.env`, deren Key oder deren Volumes werden nicht uebernommen.
 
 Der vollstaendige Varianten- und Packaging-Vertrag steht in
 [`ADR 007`](adr/007-itkview-read-only-product.md).
@@ -135,8 +139,9 @@ Owner-Entscheidung dazu (Nachkonfiguration soll entfallen):
   Deployment, das nichts erreicht).
 - Das aendert nichts an den uebrigen Schichten: PDB-Traffic entsteht erst,
   wenn eine Person ihre persoenlichen Access-Codes verbindet
-  ([ADR 004](adr/004-personal-pdb-credentials.md)), und Writes bleiben
-  `dummy_only` ([ADR 003](adr/003-pdb-dummy-write-scope.md)).
+  ([ADR 004](adr/004-personal-pdb-credentials.md)). Fuer itkFlow bleiben Writes
+  `dummy_only` ([ADR 003](adr/003-pdb-dummy-write-scope.md)); itkView erzwingt
+  den staerkeren Scope `disabled` wie oben beschrieben.
 
 ## Zurueckgezogene Testlaeufe (`run_state`, 2026-08-27)
 

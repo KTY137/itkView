@@ -31,9 +31,11 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-28)
 
-- **itkView ist als separate fail-closed Read-only-Produktvariante im Aufbau
-  (2026-08-28):** Dieselbe Codebasis baut wahlweise das unveraenderte itkFlow
-  oder ein eigenstaendig gebrandetes itkView. Im Viewer verschwinden
+- **itkView wird als eigenes fail-closed Read-only-Release `v0.1.0`
+  vorbereitet (2026-08-28):** Der gemeinsam gepruefte Kern baut wahlweise
+  itkView oder fuer explizite Regressionen itkFlow; das dedizierte
+  itkView-Repository startet, testet und paketiert ohne Variantenschalter
+  immer das eigenstaendig gebrandete itkView. Im Viewer verschwinden
   `Staged`/Outbox, `Triage`, Assembly, Registrierung, Test-Dateiupload, manuelle
   Testerfassung, Stage-Moves und die zugehoerigen Edit-/Push-Einstiege;
   Mirror-Sync, Bilder, Plots, Statistics, Suche und Production-Hold-Anzeigen
@@ -42,11 +44,16 @@ vom Design-Ziel abdriftet.
   und Read-Sync-POSTs und sperrt PDB-Submitter, direkte Registrierung,
   In-Process- sowie Standalone-Outbox-Worker. Desktop-App-ID, Sidecar,
   Datenbank/Attachments/Logs, Credential-Key und hostweit geltende Cookies
-  sind zwischen beiden Produkten getrennt. Vertrag und Begruendung:
-  [`ADR 007`](adr/007-itkview-read-only-product.md). **Abnahme offen:** beide
-  Frontends und Backend-Suites, beide Desktop-Testvarianten, paketierter
-  itkView-Smoke sowie Seit-an-Seit-Isolation; vor dieser Abnahme kein Tag oder
-  Release.
+  sind zwischen beiden Produkten getrennt. Der dedizierte Compose-Stack
+  besitzt ausserdem den Projektnamen `itkview`, eine eigene PostgreSQL-
+  Datenbank und getrennte persistente Datenbank-/Attachment-Volumes; eine
+  itkFlow-`.env` oder deren Key ist keine Migrationsquelle. Vertrag und
+  Begruendung: [`ADR 007`](adr/007-itkview-read-only-product.md).
+  **Abnahme:** Backend offline `1282 passed` plus `41` fokussierte finale
+  Varianten-/Desktop-Tests, Frontend `316 passed`, View-Default- und expliziter
+  Flow-Regressionsbuild, sechs Desktop-Variantenvertraege sowie Compose-
+  Aufloesung sind gruen. Offen sind nur noch der paketierte Sidecar-Smoke, die
+  Installer-Pruefung, Tag und GitHub-Release.
 
 - **Modul-Uebersichten markieren konfigurierte Gate-Abweichungen
   fail-closed (2026-08-28):** `GET /api/components` und die Detailantwort

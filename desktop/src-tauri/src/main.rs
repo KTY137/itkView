@@ -31,23 +31,23 @@ const DESKTOP_LOG_MAX_BYTES: u64 = 1024 * 1024;
 const DESKTOP_LOG_BACKUPS: usize = 3;
 const PRODUCT_VARIANT: &str = match option_env!("ITKFLOW_PRODUCT_VARIANT") {
     Some(value) => value,
-    None => "flow",
+    None => "view",
 };
 const PRODUCT_NAME: &str = match option_env!("ITKFLOW_DESKTOP_PRODUCT_NAME") {
     Some(value) => value,
-    None => "itkFlow",
+    None => "itkView",
 };
 const DATA_SLUG: &str = match option_env!("ITKFLOW_DESKTOP_DATA_SLUG") {
     Some(value) => value,
-    None => "itkflow",
+    None => "itkview",
 };
 const DATA_DIR_OVERRIDE_ENV: &str = match option_env!("ITKFLOW_DESKTOP_DATA_DIR_ENV") {
     Some(value) => value,
-    None => "ITKFLOW_DATA_DIR",
+    None => "ITKVIEW_DATA_DIR",
 };
 const SIDECAR_NAME: &str = match option_env!("ITKFLOW_DESKTOP_SIDECAR_NAME") {
     Some(value) => value,
-    None => "itkflow-server",
+    None => "itkview-server",
 };
 
 fn log_hint() -> String {
