@@ -44,7 +44,7 @@ _SERVER_LOG_BACKUPS = 3
 def desktop_product_variant() -> Literal["flow", "view"]:
     """Resolve the packaged product before selecting any persistent paths."""
 
-    raw = os.environ.get("ITKFLOW_PRODUCT_VARIANT", "flow").strip().lower()
+    raw = os.environ.get("ITKFLOW_PRODUCT_VARIANT", "view").strip().lower()
     if raw == "flow":
         return "flow"
     if raw == "view":

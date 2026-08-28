@@ -11,7 +11,10 @@ export type Product = {
 };
 
 export function productForVariant(rawVariant: string | undefined): Product {
-  const variant: ProductVariant = rawVariant?.trim().toLowerCase() === "view" ? "view" : "flow";
+  // This dedicated repository is fail-closed: only an explicit Flow build may
+  // enable the authoring surface. Missing or misspelled build configuration
+  // must remain the read-only Viewer.
+  const variant: ProductVariant = rawVariant?.trim().toLowerCase() === "flow" ? "flow" : "view";
   if (variant === "view") {
     return {
       variant,

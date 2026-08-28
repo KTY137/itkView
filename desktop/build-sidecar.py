@@ -1,4 +1,4 @@
-"""Build an itkFlow desktop variant: frontend -> PyInstaller -> Tauri bundle.
+"""Build a desktop product variant: frontend -> PyInstaller -> Tauri bundle.
 
 Tauri's `externalBin` looks for a file named `<name>-<target-triple>` next to
 the configured path, so the sidecar step ends in a rename, not a copy into
@@ -46,6 +46,8 @@ class DesktopVariant:
     tauri_overlay: Path | None = None
 
 
+DEFAULT_VARIANT = "view"
+
 VARIANTS = {
     "flow": DesktopVariant(
         key="flow",
@@ -54,6 +56,7 @@ VARIANTS = {
         data_dir_env="ITKFLOW_DATA_DIR",
         sidecar_name="itkflow-server",
         tagline="ITk strip module production cockpit",
+        tauri_overlay=DESKTOP_DIR / "src-tauri" / "tauri.flow.conf.json",
     ),
     "view": DesktopVariant(
         key="view",
@@ -62,7 +65,6 @@ VARIANTS = {
         data_dir_env="ITKVIEW_DATA_DIR",
         sidecar_name="itkview-server",
         tagline="Read-only ITk strip module production viewer",
-        tauri_overlay=DESKTOP_DIR / "src-tauri" / "tauri.view.conf.json",
     ),
 }
 
@@ -140,16 +142,16 @@ def build_frontend(variant: DesktopVariant, environment: dict[str, str]) -> None
 
 
 def prepare_splash(variant: DesktopVariant) -> None:
-    """Generate the branded startup page consumed by the view overlay."""
-    if variant.key == "flow":
+    """Generate the non-default product's branded startup page."""
+    if variant.key == DEFAULT_VARIANT:
         return
     source = (DESKTOP_DIR / "splash" / "index.html").read_text(encoding="utf-8")
     branded = source.replace(
-        "<title>itkFlow</title>", f"<title>{variant.product_name}</title>"
+        "<title>itkView</title>", f"<title>{variant.product_name}</title>"
     )
-    branded = branded.replace("<h1>itkFlow</h1>", f"<h1>{variant.product_name}</h1>")
+    branded = branded.replace("<h1>itkView</h1>", f"<h1>{variant.product_name}</h1>")
     branded = branded.replace(
-        "ITk strip module production cockpit",
+        "Read-only ITk strip module production viewer",
         variant.tagline,
     )
     if branded == source:
@@ -238,8 +240,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--variant",
         choices=sorted(VARIANTS),
-        default="flow",
-        help="Desktop product to build (default: flow).",
+        default=DEFAULT_VARIANT,
+        help=f"Desktop product to build (default: {DEFAULT_VARIANT}).",
     )
     parser.add_argument(
         "--skip-frontend",

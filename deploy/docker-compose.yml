@@ -1,21 +1,22 @@
-# Shared itkFlow/itkView full stack. Copy .env.example to .env first.
-# Production PDB *reads* are enabled by default (docs/09): nothing contacts the
-# PDB until a signed-in person connects their own access codes. itkFlow writes
-# stay confined to DUMMY-batch components; itkView disables writes completely.
-# Set ITKFLOW_PDB_INSTANCE=offline in .env
-# for a deployment that must reach no PDB at all.
+# Dedicated itkView full stack. Copy .env.example to .env first.
+# Production PDB reads are enabled by default (docs/09), but nothing contacts
+# the PDB until a signed-in person connects personal access codes. itkView has
+# no PDB-write capability. Set ITKFLOW_PDB_INSTANCE=offline in .env for a
+# deployment that must reach no PDB at all.
+
+name: itkview
 
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: itkflow
-      POSTGRES_USER: itkflow
+      POSTGRES_DB: itkview
+      POSTGRES_USER: itkview
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - itkview_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U itkflow -d itkflow"]
+      test: ["CMD-SHELL", "pg_isready -U itkview -d itkview"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -28,20 +29,23 @@ services:
       # Scheduled-sync windows use this container-local wall clock. Set TZ in
       # deploy/.env to the institute's deployment timezone (docs/09).
       TZ: ${TZ:-Etc/UTC}
-      ITKFLOW_PRODUCT_VARIANT: ${ITKFLOW_PRODUCT_VARIANT:-flow}
-      ITKFLOW_DATABASE_URL: postgresql+psycopg://itkflow:${POSTGRES_PASSWORD}@postgres:5432/itkflow
+      ITKFLOW_PRODUCT_VARIANT: ${ITKFLOW_PRODUCT_VARIANT:-view}
+      ITKFLOW_DATABASE_URL: postgresql+psycopg://itkview:${POSTGRES_PASSWORD}@postgres:5432/itkview
+      ITKFLOW_ATTACHMENT_DIR: /data/attachments
       ITKFLOW_PDB_INSTANCE: ${ITKFLOW_PDB_INSTANCE:-production}
       ITKFLOW_ALLOW_PRODUCTION: ${ITKFLOW_ALLOW_PRODUCTION:-true}
       ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY: ${ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY:?set a stable encryption key in deploy/.env}
-      ITKFLOW_PDB_WRITE_SCOPE: dummy_only
-      # Both processes read this so the pair stays consistent: the default lets
-      # the worker fire reminders, and this service does not (docs/11).
-      ITKFLOW_REMINDER_SCHEDULER: ${ITKFLOW_REMINDER_SCHEDULER:-worker}
+      ITKFLOW_PDB_WRITE_SCOPE: disabled
+      ITKFLOW_ALLOW_PDB_WRITES: "false"
+      ITKFLOW_OUTBOX_PROCESSOR: "off"
+      ITKFLOW_REMINDER_SCHEDULER: "off"
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "8000:8000"
+    volumes:
+      - itkview_attachments:/data/attachments
 
   # Async outbox worker for itkFlow: the only process that writes reviewed
   # actions to the PDB. In itkView the container exits cleanly once and is not
@@ -54,7 +58,7 @@ services:
       - /bin/sh
       - -c
       - >-
-        if [ "${ITKFLOW_PRODUCT_VARIANT:-flow}" = "view" ]; then
+        if [ "${ITKFLOW_PRODUCT_VARIANT:-view}" = "view" ]; then
           echo "itkView: outbox worker disabled (read-only product).";
           exit 0;
         fi;
@@ -63,30 +67,34 @@ services:
       TZ: ${TZ:-Etc/UTC}
       # The worker receives the same product guard as the API. In the view
       # variant it must never turn a locally crafted action into a PDB write.
-      ITKFLOW_PRODUCT_VARIANT: ${ITKFLOW_PRODUCT_VARIANT:-flow}
-      ITKFLOW_DATABASE_URL: postgresql+psycopg://itkflow:${POSTGRES_PASSWORD}@postgres:5432/itkflow
+      ITKFLOW_PRODUCT_VARIANT: ${ITKFLOW_PRODUCT_VARIANT:-view}
+      ITKFLOW_DATABASE_URL: postgresql+psycopg://itkview:${POSTGRES_PASSWORD}@postgres:5432/itkview
+      ITKFLOW_ATTACHMENT_DIR: /data/attachments
       ITKFLOW_PDB_INSTANCE: ${ITKFLOW_PDB_INSTANCE:-production}
       ITKFLOW_ALLOW_PRODUCTION: ${ITKFLOW_ALLOW_PRODUCTION:-true}
       ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY: ${ITKFLOW_PDB_CREDENTIAL_ENCRYPTION_KEY:?set a stable encryption key in deploy/.env}
-      ITKFLOW_PDB_WRITE_SCOPE: dummy_only
+      ITKFLOW_PDB_WRITE_SCOPE: disabled
+      ITKFLOW_ALLOW_PDB_WRITES: "false"
+      ITKFLOW_OUTBOX_PROCESSOR: "off"
       ITKFLOW_WORKER_POLL_SECONDS: ${ITKFLOW_WORKER_POLL_SECONDS:-5}
-      # This process also fires due reminders, unless the pair is switched over
-      # to the API service (docs/11).
-      ITKFLOW_REMINDER_SCHEDULER: ${ITKFLOW_REMINDER_SCHEDULER:-worker}
+      ITKFLOW_REMINDER_SCHEDULER: "off"
     depends_on:
       postgres:
         condition: service_healthy
+    volumes:
+      - itkview_attachments:/data/attachments
 
   frontend:
     build:
       context: ..
       dockerfile: deploy/frontend.Dockerfile
       args:
-        ITKFLOW_PRODUCT_VARIANT: ${ITKFLOW_PRODUCT_VARIANT:-flow}
+        ITKFLOW_PRODUCT_VARIANT: ${ITKFLOW_PRODUCT_VARIANT:-view}
     depends_on:
       - backend
     ports:
       - "8080:80"
 
 volumes:
-  pgdata:
+  itkview_pgdata:
+  itkview_attachments:

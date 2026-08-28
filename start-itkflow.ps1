@@ -385,6 +385,11 @@ function Start-Backend {
     # explicit launcher switch; PDB write-test opt-in stays disabled either way.
     $credentialEncryptionKey = Get-OrCreate-PdbCredentialEncryptionKey
     $backendEnvironment = @{
+        # This compatibility launcher is the explicit writer-capable shared-
+        # core path. The dedicated repository and all unqualified commands
+        # default to the read-only itkView product.
+        ITKFLOW_PRODUCT_VARIANT = "flow"
+        ITKFLOW_DATABASE_URL = "sqlite:///./itkflow.db"
         ITKFLOW_PDB_INSTANCE = $ExpectedPdbInstance
         ITKFLOW_ALLOW_PRODUCTION = if ($EnableProductionReads) { "true" } else { "false" }
         ITKFLOW_ALLOW_PDB_WRITES = "false"
@@ -490,6 +495,18 @@ $frontendProcess = $null
 try {
     Stop-DevPortListeners
 
+    # Vite reads the product choice from the child process environment. Keep
+    # this legacy Flow launcher explicit now that an unqualified build is View.
+    $previousFrontendVariant = [Environment]::GetEnvironmentVariable(
+        "VITE_ITKFLOW_PRODUCT_VARIANT",
+        "Process"
+    )
+    [Environment]::SetEnvironmentVariable(
+        "VITE_ITKFLOW_PRODUCT_VARIANT",
+        "flow",
+        "Process"
+    )
+
     if ($EnableProductionReads) {
         Write-Host "PDB mode: production reads enabled; the outbox worker is not started."
     }
@@ -535,6 +552,12 @@ try {
         -RedirectStandardOutput $frontendOutputLog `
         -RedirectStandardError $frontendErrorLog `
         -PassThru
+
+    [Environment]::SetEnvironmentVariable(
+        "VITE_ITKFLOW_PRODUCT_VARIANT",
+        $previousFrontendVariant,
+        "Process"
+    )
 
     Wait-ForHttpEndpoint `
         -Uri $FrontendUrl `

@@ -26,9 +26,9 @@ class ProductionAccessError(RuntimeError):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ITKFLOW_", env_file=".env", extra="ignore")
 
-    product_variant: Literal["flow", "view"] = "flow"
-    app_name: str = "itkFlow"
-    database_url: str = "sqlite:///./itkflow.db"
+    product_variant: Literal["flow", "view"] = "view"
+    app_name: str = "itkView"
+    database_url: str = "sqlite:///./itkview.db"
 
     # --- Auth / sessions --------------------------------------------------
     # Mark the login (and CSRF) cookies `Secure` so browsers only send them over
@@ -185,6 +185,15 @@ class Settings(BaseSettings):
             self.reminder_scheduler = "off"
             self.allow_pdb_writes = False
             self.pdb_write_scope = "disabled"
+        else:
+            # The dedicated itkView repository defaults above must not leak
+            # into an explicitly requested shared-core Flow regression build.
+            if self.app_name == "itkView":
+                self.app_name = "itkFlow"
+            if self.database_url == "sqlite:///./itkview.db":
+                # An explicit local Flow regression must not open View's
+                # mirror or inherit its accounts/outbox by accident.
+                self.database_url = "sqlite:///./itkflow.db"
         return self
 
     @property

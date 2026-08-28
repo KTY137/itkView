@@ -17,9 +17,11 @@ SPEC_DIR = Path(SPECPATH).resolve()
 REPO_ROOT = SPEC_DIR.parent
 BACKEND_DIR = REPO_ROOT / "backend"
 FRONTEND_DIST = Path(
-    os.environ.get("ITKFLOW_FRONTEND_DIST", REPO_ROOT / "frontend" / "dist")
+    os.environ.get(
+        "ITKFLOW_FRONTEND_DIST", SPEC_DIR / "build" / "view" / "frontend"
+    )
 ).resolve()
-SIDECAR_NAME = os.environ.get("ITKFLOW_DESKTOP_SIDECAR_NAME", "itkflow-server")
+SIDECAR_NAME = os.environ.get("ITKFLOW_DESKTOP_SIDECAR_NAME", "itkview-server")
 
 if re.fullmatch(r"[a-z0-9-]+", SIDECAR_NAME) is None:
     raise SystemExit(f"Invalid desktop sidecar name: {SIDECAR_NAME!r}")

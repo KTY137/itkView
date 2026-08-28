@@ -297,7 +297,7 @@ async function loadApp(variant: "flow" | "view") {
       json: vi.fn().mockResolvedValue({
         status: "ok",
         app: variant === "view" ? "itkView" : "itkFlow",
-        version: "0.2.8",
+        version: "0.1.0",
         pdb_instance: "production",
       }),
     }),

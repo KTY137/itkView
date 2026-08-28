@@ -1,4 +1,11 @@
-# itkFlow-Doku: Einstieg und Lesepfade
+# itkView-Doku: Einstieg und Lesepfade
+
+Dieses dedizierte Release-Repository liefert itkView als fail-closed
+Read-only-Produkt. Die folgenden Planungsdokumente beschreiben weiterhin den
+gemeinsamen itkFlow-Kern und seine Historie; fuer die Viewer-Grenze und die
+sicheren Defaults sind [`ADR 007`](adr/007-itkview-read-only-product.md),
+[`04`](04-roadmap.md) und die produktseitige
+[`README`](../README.md) massgeblich.
 
 itkFlow ersetzt den Google-Sheet-, CERNBox- und zFlow-Workflow der
 ATLAS-ITk-Strip-Modulproduktion durch eine selbst hostbare, institutsneutrale

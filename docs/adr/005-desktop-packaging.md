@@ -35,13 +35,17 @@ keine reduzierte Zweitfassung, die auseinanderdriftet.
    wirklich antwortet, und navigiert erst dann. Ein reiner TCP-Connect wäre
    falsch: der Sidecar bindet den Socket, bevor die FastAPI-App steht.
    Scheitert das Binden, endet der Sidecar mit Status 2 statt zu hängen.
-5. **Zustand außerhalb des Bundles.** Datenbank, Credential-Key und Logs liegen
-   im Anwendungsdatenverzeichnis — bewusst dasselbe wie beim Windows-Launcher
-   (`%LOCALAPPDATA%\itkflow`), damit eine bereits verbundene PDB-Identität
-   erhalten bleibt. Ein vorhandener Key wird **nie** ersetzt: das würde jede
-   gespeicherte Verbindung unlesbar machen.
-6. **Keine Abkürzung an den Sicherheitsregeln vorbei.** Der Schreibbereich
-   bleibt `pdb_write_scope=dummy_only`, auch im Desktop-Bundle.
+5. **Zustand außerhalb des Bundles und pro Produkt getrennt.** Datenbank,
+   Attachments, Credential-Key und Logs liegen im jeweiligen
+   Anwendungsdatenverzeichnis. itkView verwendet `%LOCALAPPDATA%\itkview`;
+   der explizite Flow-Build und der historische Windows-Launcher verwenden
+   `%LOCALAPPDATA%\itkflow`. Ein vorhandener Key wird **nie** ersetzt: das
+   würde jede gespeicherte Verbindung unlesbar machen. Die Trennung verhindert
+   zugleich, dass itkView eine Flow-Outbox oder Flow-Session erbt.
+6. **Keine Abkürzung an den Sicherheitsregeln vorbei.** Der explizite
+   itkFlow-Build bleibt auf `pdb_write_scope=dummy_only` beschränkt; itkView
+   erzwingt den strengeren Scope `disabled` und startet keinen
+   Outbox-Prozessor.
 
    *Korrektur 2026-08-27:* Dieser Punkt nannte ursprünglich
    `pdb_instance=test`, `allow_production=false` als geerbte Defaults. Beides
@@ -52,25 +56,29 @@ keine reduzierte Zweitfassung, die auseinanderdriftet.
    `backend/app/desktop_server.py`, das die Overrides nur setzt, wenn die
    Umgebung sie nicht ohnehin vorgibt. PDB-Verkehr entsteht trotzdem erst,
    wenn eine Person ihre persönlichen Access-Codes verbindet
-   ([ADR 004](004-personal-pdb-credentials.md)). Schreiboperationen bleiben
-   auf selbst registrierte DUMMY-Komponenten beschränkt
-   ([ADR 003](003-pdb-dummy-write-scope.md)).
-7. **Zwei Produkt-Builds, weiterhin eine Shell.** Der Builder kennt `flow`
-   (Default) und `view`. itkView wird ueber ein Tauri-Config-Overlay mit
-   eigenem Product-/Binary-/Installer-Namen, eigener App-ID und eigenem
-   Sidecar gebaut; Rust gibt den kompilierten Produktmodus an den Python-
-   Sidecar weiter. Frontend-, PyInstaller-Work- und Dist-Ausgaben sind
-   variantenspezifisch, damit ein zuvor gebautes Flow-Artefakt nie als View-
-   Payload ausgegeben wird. Die Produkte verwenden getrennte Datenpfade und
-   Cookie-Namen und koennen deshalb gleichzeitig laufen. Die fachliche
-   Read-only-Grenze besitzt [ADR 007](007-itkview-read-only-product.md).
+   ([ADR 004](004-personal-pdb-credentials.md)). Im Flow-Build bleiben
+   Schreiboperationen auf selbst registrierte DUMMY-Komponenten beschränkt
+   ([ADR 003](003-pdb-dummy-write-scope.md)); itkView hat keine
+   PDB-Schreibfähigkeit ([ADR 007](007-itkview-read-only-product.md)).
+7. **Zwei Produkt-Builds, View als sicherer Repository-Default.** Der Builder
+   kennt `view` (Default im dedizierten itkView-Repository) und den nur
+   explizit ausgewaehlten `flow`-Regressionsbuild. Die Tauri-
+   Basiskonfiguration traegt Product-/Binary-/Installer-Name, App-ID und
+   Sidecar von itkView; Flow verwendet ein Overlay. Rust gibt den kompilierten
+   Produktmodus an den Python-Sidecar weiter. Frontend-, PyInstaller-Work-,
+   Dist- und Cargo-Ausgaben sind variantenspezifisch, damit ein zuvor gebautes
+   Flow-Artefakt nie als View-Payload ausgegeben wird. Die Produkte verwenden
+   getrennte Datenpfade und Cookie-Namen und koennen deshalb gleichzeitig
+   laufen. Die fachliche Read-only-Grenze besitzt
+   [ADR 007](007-itkview-read-only-product.md).
 
 ## Konsequenzen
 
 - Eine Codebasis mit zwei Produktvarianten und drei Betriebsarten
-  (Dev-Launcher, Compose, Desktop). Die
-  Desktop-Variante ist Einzelplatz: sie ersetzt das Institutsdeployment nicht,
-  weil Rollen, Audit und Outbox-Worker auf einen gemeinsamen Server zielen.
+  (Dev-Launcher, Compose, Desktop). Die Desktop-Variante ist Einzelplatz: sie
+  ersetzt das Institutsdeployment nicht, weil Rollen, Audit und gemeinsame
+  Mirror-Daten dort serverseitig geteilt werden; nur der explizite Flow-Betrieb
+  besitzt zusätzlich eine Outbox-Verarbeitung.
 - Der Sidecar ist ein Windowed-Build ohne nutzbares stdout. Ein frozener Lauf
   schreibt deshalb immer in `<datadir>/logs/server.log`; der Tauri-Host
   schreibt getrennt strukturierte Lifecycle-Daten nach `desktop.log` und

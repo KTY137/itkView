@@ -5,10 +5,12 @@ Status: akzeptiert (2026-08-28)
 ## Kontext
 
 Neben dem Produktionscockpit itkFlow wird eine zweite Anwendung benoetigt, die
-denselben lokalen PDB-Spiegel, Bilder, Kurven und Statistiken lesen kann, aber
-keine Produktionsdaten erfasst oder zur PDB hochlaedt. Eine Quellcodekopie
-waere dafuer die falsche Grenze: Bugfixes an Mirror, Attachments, Evidenz und
-Visualisierung wuerden sofort zwischen zwei Repositories driften.
+PDB-Spiegel, Bilder, Kurven und Statistiken lesen kann, aber keine
+Produktionsdaten erfasst oder zur PDB hochlaedt. itkView erhaelt dafuer ein
+eigenes Release-Repository und eigene sichere Defaults. Es bleibt trotzdem
+eine Produktvariante des gemeinsam geprueften Kerns: Eine unabhaengig
+neuimplementierte Quellcodekopie wuerde Sicherheitsfixes an Mirror,
+Attachments, Evidenz und Visualisierung sofort driften lassen.
 
 Nur Buttons auszublenden reicht ebenfalls nicht. Bereits gespeicherte
 Outbox-Aktionen koennten von einem In-Process- oder Standalone-Worker weiter
@@ -17,11 +19,13 @@ genutzter Datenordner koennte Schreibzustand aus itkFlow in den Viewer tragen.
 
 ## Entscheidung
 
-1. **Eine Codebasis, zwei Build-Varianten.** `ITKFLOW_PRODUCT_VARIANT` kennt
-   `flow` (Default, bisheriges Verhalten) und `view`. Der Frontend-Build erhaelt
-   denselben Wert ueber `VITE_ITKFLOW_PRODUCT_VARIANT`. Beide Produkte teilen
-   die Core-Version; Name, Capability und Packaging sind Varianten des
-   verifizierten Commits, keine Forks.
+1. **Gemeinsamer Kern, View als Repository-Default.**
+   `ITKFLOW_PRODUCT_VARIANT` kennt `flow` und `view`; der Frontend-Build
+   erhaelt denselben Wert ueber `VITE_ITKFLOW_PRODUCT_VARIANT`. Im dedizierten
+   itkView-Repository waehlen fehlende Produktvariablen fail-closed `view`.
+   `flow` bleibt nur als expliziter Wartungs-/Regression-Build des gemeinsamen
+   Kerns erreichbar. Name, Capability und Packaging muessen aus demselben
+   verifizierten Commit stammen.
 2. **itkView ist fail-closed.** Die UI entfernt `Staged`/Outbox, `Triage`,
    Assembly, Registrierung, Test-Dateiupload, manuelle Testerfassung,
    Stage-Moves und alle zugehoerigen Edit-/Push-/Discard-Einstiege. Rollen
@@ -56,16 +60,22 @@ genutzter Datenordner koennte Schreibzustand aus itkFlow in den Viewer tragen.
    Vorgesehen sind `org.itkflow.desktop` / `org.itkflow.view`,
    `%LOCALAPPDATA%\itkflow` / `%LOCALAPPDATA%\itkview` und die Cookie-Paare
    `itkflow_session`/`itkflow_csrf` bzw.
-   `itkview_session`/`itkview_csrf`.
-7. **Eigener reproduzierbarer Build, kein zweiter Quellbaum.** Der Desktop-
-   Builder waehlt `flow|view`, baut Frontend und PyInstaller-Arbeitsverzeichnis
-   variantenspezifisch und verwendet fuer itkView ein Tauri-Config-Overlay.
-   Alte Installer werden nicht als aktuelles Ergebnis aufgelistet. Web-/Compose-
-   Builds geben denselben Variantenschalter an Backend, Worker und Vite weiter.
+   `itkview_session`/`itkview_csrf`. Compose besitzt zusaetzlich den festen
+   Projektnamen `itkview`, eine eigene PostgreSQL-Datenbank sowie getrennte
+   Datenbank- und Attachment-Volumes. Seine `.env` und sein Credential-Key
+   werden nicht aus einem itkFlow-Deployment uebernommen.
+7. **Eigener reproduzierbarer View-Default-Build.** Der Desktop-Builder baut
+   ohne weitere Option itkView; Frontend-, PyInstaller-, Cargo- und
+   Installer-Ausgaben liegen variantenspezifisch. Die Tauri-Basiskonfiguration
+   traegt die View-App-ID, den View-Sidecar und das View-Branding; nur der
+   explizite Flow-Regressionsbuild verwendet ein Overlay. Web-/Compose-Builds
+   geben `view` gemeinsam an Backend, Worker und Vite weiter. Alte Installer
+   werden nicht als aktuelles Ergebnis aufgelistet.
 
 ## Konsequenzen
 
-- itkFlow bleibt ohne gesetzten Variantenschalter funktional unveraendert.
+- Das dedizierte itkView-Repository startet, testet und paketiert ohne
+  Variantenschalter immer itkView; ein Flow-Regressionslauf ist explizit.
 - Der itkView-Sidecar kann aus Wartungsgruenden weiterhin gemeinsamen Python-
   Code fuer Uploads enthalten; die Produktgarantie entsteht aus API-Policy,
   abgeschalteten Prozessoren und dem finalen Sink-Guard, nicht aus der
@@ -80,7 +90,9 @@ genutzter Datenordner koennte Schreibzustand aus itkFlow in den Viewer tragen.
 
 ## Verworfene Alternativen
 
-- **Repository-Fork:** zu hohes Drift- und Security-Patch-Risiko.
+- **Unabhaengig neuimplementierter Repository-Fork:** zu hohes Drift- und
+  Security-Patch-Risiko. Das eigene Release-Repository aendert den
+  Produktdefault, nicht die mehrschichtige Kern-Policy.
 - **Nur CSS/Buttons verstecken:** keine serverseitige oder Worker-Garantie.
 - **Alle Nicht-GET-Requests sperren:** wuerde Login, Credentials und die
   ausdruecklich erwuenschten lokalen Mirror-Syncs zerstoeren.
