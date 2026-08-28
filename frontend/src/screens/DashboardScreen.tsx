@@ -3,6 +3,7 @@ import { ApiError, getDashboardSummary, getInstitutes } from "../api";
 import type { CountBucket, DashboardSummary } from "../api";
 import { makeDemoDashboardSummary } from "../demoData";
 import { formatCount, formatRelative, formatTimestamp, t } from "../i18n";
+import { product } from "../product";
 import StageLegend from "../StageLegend";
 import { stageLabel, stageTone, statusTone } from "../ui";
 
@@ -159,26 +160,30 @@ export default function DashboardScreen() {
           value={formatCount(summary.trashed_components)}
           tone={summary.trashed_components > 0 ? "crit" : undefined}
         />
-        <Metric
-          label={t.dashboard.reviewOutbox}
-          value={formatCount(summary.review_outbox)}
-          tone={summary.review_outbox > 0 ? "warn" : undefined}
-        />
-        <Metric
-          label={t.dashboard.approvedOutbox}
-          value={formatCount(summary.approved_outbox)}
-          tone={summary.approved_outbox > 0 ? "warn" : undefined}
-        />
-        <Metric
-          label={t.dashboard.submittedOutbox}
-          value={formatCount(summary.submitted_outbox)}
-          tone={summary.submitted_outbox > 0 ? "warn" : undefined}
-        />
-        <Metric
-          label={t.dashboard.failedOutbox}
-          value={formatCount(summary.failed_outbox)}
-          tone={summary.failed_outbox > 0 ? "crit" : undefined}
-        />
+        {product.workflowWrites && (
+          <>
+            <Metric
+              label={t.dashboard.reviewOutbox}
+              value={formatCount(summary.review_outbox)}
+              tone={summary.review_outbox > 0 ? "warn" : undefined}
+            />
+            <Metric
+              label={t.dashboard.approvedOutbox}
+              value={formatCount(summary.approved_outbox)}
+              tone={summary.approved_outbox > 0 ? "warn" : undefined}
+            />
+            <Metric
+              label={t.dashboard.submittedOutbox}
+              value={formatCount(summary.submitted_outbox)}
+              tone={summary.submitted_outbox > 0 ? "warn" : undefined}
+            />
+            <Metric
+              label={t.dashboard.failedOutbox}
+              value={formatCount(summary.failed_outbox)}
+              tone={summary.failed_outbox > 0 ? "crit" : undefined}
+            />
+          </>
+        )}
       </div>
 
       <section className="chart-card">
@@ -194,10 +199,12 @@ export default function DashboardScreen() {
           <h2>{t.dashboard.byType}</h2>
           <ToneBars rows={typeRows} empty={t.dashboard.empty} />
         </section>
-        <section className="chart-card">
-          <h2>{t.dashboard.outboxByStatus}</h2>
-          <ToneBars rows={statusRows} empty={t.dashboard.empty} />
-        </section>
+        {product.workflowWrites && (
+          <section className="chart-card">
+            <h2>{t.dashboard.outboxByStatus}</h2>
+            <ToneBars rows={statusRows} empty={t.dashboard.empty} />
+          </section>
+        )}
         <section className="chart-card">
           <h2>{t.dashboard.byInstitute}</h2>
           <ToneBars

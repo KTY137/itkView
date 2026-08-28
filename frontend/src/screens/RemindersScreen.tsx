@@ -527,7 +527,7 @@ export default function RemindersScreen() {
               <div className="phase4-channel" key={item.name}>
                 <span className="mono">{item.name}</span>
                 <span className="chip neutral">{item.kind}</span>
-                {isAdmin && (
+                {isAdmin && canWrite && (
                   <button
                     type="button"
                     className="btn"

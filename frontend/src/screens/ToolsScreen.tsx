@@ -67,7 +67,7 @@ function filterToolRows(
 /** Full local tool registry: scanner lookup, mirror refresh, structured
  * create/edit/remove, and explicit active/flagged/blacklisted management. */
 export default function ToolsScreen() {
-  const { canWrite, isAdmin, user, demo: authDemo, showToast } = useAuth();
+  const { canWrite, canSync, isAdmin, user, demo: authDemo, showToast } = useAuth();
   const [tools, setTools] = useState<Tool[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -343,7 +343,7 @@ export default function ToolsScreen() {
         />
       )}
 
-      {!demo && canWrite && (
+      {!demo && canSync && (
         <div className="panel compact-panel">
           <div className="toolbar">
             <label className="control-label" htmlFor="tool-sync-institute">

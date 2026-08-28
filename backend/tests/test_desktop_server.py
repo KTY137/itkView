@@ -50,6 +50,26 @@ def test_settings_default_to_a_database_in_the_data_dir(data_dir, monkeypatch):
     assert settings.database_url.startswith("sqlite:///")
     assert "itkflow.db" in settings.database_url
     assert settings.pdb_credential_encryption_key is not None
+    assert settings.attachment_dir == str(data_dir / "attachments")
+
+
+def test_view_uses_an_isolated_default_data_dir_and_database(tmp_path, monkeypatch):
+    monkeypatch.delenv("ITKFLOW_DATA_DIR", raising=False)
+    monkeypatch.delenv("ITKFLOW_DATABASE_URL", raising=False)
+    monkeypatch.delenv("ITKFLOW_ATTACHMENT_DIR", raising=False)
+    monkeypatch.setenv("ITKFLOW_PRODUCT_VARIANT", "view")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(desktop_server.sys, "platform", "win32")
+
+    selected = desktop_server.application_data_dir()
+    settings = desktop_server.build_settings(selected, None)
+
+    assert selected == tmp_path / "itkview"
+    assert "itkview.db" in settings.database_url
+    assert settings.attachment_dir == str(selected / "attachments")
+    assert settings.product_variant == "view"
+    assert settings.outbox_processor == "off"
+    assert settings.reminder_scheduler == "off"
 
 
 def test_settings_enable_production_reads_by_default(data_dir, monkeypatch):

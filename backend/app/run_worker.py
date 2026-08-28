@@ -82,6 +82,8 @@ def main(argv: list[str] | None = None, settings: Settings | None = None) -> Non
     args = parser.parse_args(argv)
 
     settings = settings or get_settings()
+    if not settings.pdb_writes_enabled:
+        raise SystemExit("The outbox worker is disabled in itkView.")
     engine = make_engine(settings.database_url)
     # Idempotent: the worker shares the API's database, but stays self-sufficient
     # on a fresh one (same schema bootstrap as the app factory).

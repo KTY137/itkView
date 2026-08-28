@@ -1,4 +1,5 @@
 import type { OutboxStatus, Role, ToolStatus } from "./api";
+import { product } from "./product";
 
 /**
  * UI copy. English is the default (and currently only) locale; keeping every
@@ -76,6 +77,8 @@ const en = {
     backendOffline: "backend offline",
     pdb: "PDB",
     dummyWritesOnly: "DUMMY writes only",
+    productionReads: "Production reads",
+    readOnly: "read-only",
   },
   board: {
     loadError: "Could not load the board",
@@ -842,7 +845,7 @@ const en = {
     derivedFromStaged:
       "Stored with this staged upload and revalidated by the worker before submission — read-only.",
     derivedFromLatestRun:
-      "From the last recorded run — read-only. itkFlow never recomputes glue weight, target or tolerance in the browser; the judgement for the values above is derived on the server when this entry is checked.",
+      `From the last recorded run — read-only. ${product.name} never recomputes glue weight, target or tolerance in the browser; the judgement for the values above is derived on the server when this entry is checked.`,
     derivedProcessLabel: "Glue process",
     derivedProcessUnresolved: "not resolved",
     derivedProcessFromRun: "recorded with the run",
@@ -1199,16 +1202,18 @@ const en = {
   },
   opsHealth: {
     title: "Operations health",
-    subtitle: "Local worker, queue, scheduler, sync, and parser telemetry.",
+    subtitle: product.workflowWrites
+      ? "Local worker, queue, scheduler, sync, and parser telemetry."
+      : "Local scheduler, sync, and mirror telemetry.",
     refresh: "Refresh",
     instituteLabel: "Institute",
     allInstitutes: "All institutes",
     localOnlyHint:
-      "This view reads itkFlow's local database only. Refreshing it never contacts the PDB.",
+      `This view reads ${product.name}'s local database only. Refreshing it never contacts the PDB.`,
     loadFailed: (message: string) => `Could not load operations health: ${message}`,
     diagnosticsTitle: "Desktop diagnostics",
     diagnosticsHint:
-      "Download a local ZIP containing bounded rotated itkFlow logs and sanitized sync metadata. Review it before sharing; it can still contain component identifiers from application activity.",
+      `Download a local ZIP containing bounded rotated ${product.name} logs and sanitized sync metadata. Review it before sharing; it can still contain component identifiers from application activity.`,
     downloadDiagnostics: "Download diagnostics",
     overall: {
       healthy: "Healthy",
@@ -1459,18 +1464,18 @@ const en = {
     evidenceTypePlaceholder: "e.g. MODULE",
     autoSyncTitle: "Scheduled sync",
     autoSyncHint:
-      "Off unless you switch it on here. This is the only setting that makes itkFlow contact the ITk Production Database on its own, without anyone asking for it at that moment — everything else waits for a person to press sync.",
+      `Off unless you switch it on here. This is the only setting that makes ${product.name} contact the ITk Production Database on its own, without anyone asking for it at that moment — everything else waits for a person to press sync.`,
     autoSyncIdentityHint:
       "A scheduled refresh has no login of its own. It runs under the identity of the person whose own component sync for this institute succeeded most recently, and every scheduled job is labelled “scheduled refresh” so it never looks like they pressed anything. It only reads: a schedule never writes to the PDB.",
     autoSyncIdentityDetail:
       "Only an active operator or administrator for this institute can lend their access codes. Deactivated or downgraded accounts, users from another institute, missing codes, and codes with an unknown, corrupt, or invalid status are skipped; codes that were merely unreachable are still used. If nobody qualifies, this institute is simply never refreshed and the schedule stays quiet.",
     autoSyncClockHint:
-      "The window and the weekdays are read from the server’s own clock — the machine running itkFlow, not UTC and not your browser. A window may cross midnight: 22:00 to 06:00 runs overnight only, 07:00 to 19:00 runs during the day only, and leaving both fields empty allows any time of day. The interval below is measured in UTC from the newer of the last successful sync and the last scheduled attempt, so failures cannot create a request on every scheduler poll.",
+      `The window and the weekdays are read from the server’s own clock — the machine running ${product.name}, not UTC and not your browser. A window may cross midnight: 22:00 to 06:00 runs overnight only, 07:00 to 19:00 runs during the day only, and leaving both fields empty allows any time of day. The interval below is measured in UTC from the newer of the last successful sync and the last scheduled attempt, so failures cannot create a request on every scheduler poll.`,
     autoSyncEnabledLabel: "Refresh this institute on a schedule",
     autoSyncEnabledNote:
-      "On. itkFlow will contact the PDB by itself, within the limits below.",
+      `On. ${product.name} will contact the PDB by itself, within the limits below.`,
     autoSyncDisabledNote:
-      "Off. itkFlow reaches the PDB only when a person presses sync.",
+      `Off. ${product.name} reaches the PDB only when a person presses sync.`,
     autoSyncIntervalLabel: "Wait at least this long after sync activity",
     autoSyncIntervalHint: "At least 15 minutes. A smaller number is refused, not rounded up.",
     autoSyncWindowStartLabel: "Window start (server time, optional)",
@@ -1528,7 +1533,7 @@ const en = {
       `${fieldLabel} must be a whole number from ${minimum} to ${maximum}.`,
   },
   users: {
-    subtitle: "Local accounts for this itkFlow instance.",
+    subtitle: `Local accounts for this ${product.name} instance.`,
     subtitleInstitute: (code: string) => `Accounts in ${code}. New people join this institute.`,
     needsBackend: "User management needs a running backend.",
     addTitle: "Add a person",
@@ -1573,15 +1578,18 @@ const en = {
     roleLabel: "Role",
     instituteLabel: "Institute",
     pdbTitle: "Personal PDB connection",
-    pdbDescription:
-      "Use your own PDB access codes (+4Auth) for remote reads and authorised actions.",
+    pdbDescription: product.workflowWrites
+      ? "Use your own PDB access codes (+4Auth) for remote reads and authorised actions."
+      : "Use your own PDB access codes (+4Auth) to refresh the read-only mirror.",
     states: {
       not_configured: "Not connected",
       verified: "Connected",
       invalid: "Access codes rejected",
       unreachable: "PDB unavailable",
     },
-    notConfiguredHint: "Connect your personal PDB account before using remote PDB actions.",
+    notConfiguredHint: product.workflowWrites
+      ? "Connect your personal PDB account before using remote PDB actions."
+      : "Connect your personal PDB account before refreshing the read-only mirror.",
     verifiedHint: "Your personal PDB connection was verified successfully.",
     invalidHint: "The PDB rejected the saved access codes. Replace them to continue.",
     unreachableHint:
@@ -1594,7 +1602,7 @@ const en = {
     accessCode1Label: "Access code 1",
     accessCode2Label: "Access code 2",
     secretNote:
-      "The codes are sent to itkFlow for verification. Saved codes are never returned " +
+      `The codes are sent to ${product.name} for verification. Saved codes are never returned ` +
       "to this browser or displayed again.",
     bothCodesRequired: "Enter both PDB access codes.",
     connectAndTest: "Connect & test",
@@ -1605,7 +1613,7 @@ const en = {
     disconnect: "Disconnect",
     disconnectQuestion: "Remove your personal PDB connection?",
     disconnectHint:
-      "This removes only your saved PDB access codes. Your itkFlow account remains active.",
+      `This removes only your saved PDB access codes. Your ${product.name} account remains active.`,
     confirmDisconnect: "Remove connection",
     disconnecting: "Removing…",
     loadFailed: "Could not load the PDB connection",
@@ -1614,7 +1622,7 @@ const en = {
     disconnectFailed: "Could not remove the PDB connection",
     invalidCredentials: "The PDB rejected these access codes. Check both codes and try again.",
     pdbClientUnavailable:
-      "PDB support is not installed correctly on this itkFlow server. Contact the administrator.",
+      `PDB support is not installed correctly on this ${product.name} server. Contact the administrator.`,
     pdbUnavailable: "The PDB could not be reached. Check your network and try again.",
     notConfigured: "No personal PDB connection is configured.",
     connectedToast: "Personal PDB connection verified.",
@@ -1625,7 +1633,7 @@ const en = {
     sharesDescription:
       "Save a password for a password-protected public share. Access is checked only when evidence sync needs the link.",
     sharesPublicOnly:
-      "Public HTTPS share links only. Private CERNBox account links require CERN sign-in; itkFlow never asks for or stores your CERN account password.",
+      `Public HTTPS share links only. Private CERNBox account links require CERN sign-in; ${product.name} never asks for or stores your CERN account password.`,
     shareUrlLabel: "Public share link",
     shareUrlPlaceholder: "https://cernbox.cern.ch/s/...",
     sharePasswordLabel: "Share password",
@@ -1656,8 +1664,10 @@ const en = {
     previewOffHint: "Keep the compact staged-changes section without projecting the result.",
   },
   auth: {
-    signInTitle: "Sign in to itkFlow",
-    signInSubtitle: "Sign in to record production steps and push reviewed writes.",
+    signInTitle: `Sign in to ${product.name}`,
+    signInSubtitle: product.workflowWrites
+      ? "Sign in to record production steps and push reviewed writes."
+      : "Sign in to browse the read-only production mirror.",
     emailLabel: "Email",
     emailPlaceholder: "you@example.org",
     passwordLabel: "Password",
@@ -1678,7 +1688,7 @@ const en = {
     sessionExpired: "Your session ended — please sign in again.",
     needOperator: "Requires the operator role",
     needAdmin: "Requires the admin role",
-    setupTitle: "Welcome to itkFlow",
+    setupTitle: `Welcome to ${product.name}`,
     setupSubtitle: "No accounts exist yet. Create the first admin account to get started.",
     setupNameLabel: "Display name",
     setupNamePlaceholder: "Anna Abel",

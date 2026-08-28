@@ -614,10 +614,23 @@ class AuditOut(BaseModel):
     outbox_action_id: int | None
 
 
+class ProductCapabilitiesOut(BaseModel):
+    account_management: bool
+    mirror_sync: bool
+    test_uploads: bool
+    workflow_writes: bool
+    operations_writes: bool
+    pdb_writes: bool
+    outbound_notifications: bool
+
+
 class HealthOut(BaseModel):
     status: str
     app: str
     version: str
+    product_variant: Literal["flow", "view"]
+    write_features_enabled: bool
+    capabilities: ProductCapabilitiesOut
     pdb_instance: str
     pdb_write_scope: str
 
@@ -778,7 +791,7 @@ class MeOut(BaseModel):
     role: str
     institute_id: int | None
     institute_code: str | None
-    # Double-submit CSRF token, also set as the readable `itkflow_csrf` cookie.
+    # Double-submit CSRF token, also set as the product's readable CSRF cookie.
     # The frontend echoes it in the X-CSRF-Token header (docs/06).
     csrf_token: str
 

@@ -130,7 +130,7 @@ def collect_ops_health(
         _heartbeat_projection(
             session,
             OUTBOX_WORKER,
-            enabled=True,
+            enabled=settings.outbox_processor != "off",
             stale_after_seconds=stale_after,
             now=generated_at,
         ),

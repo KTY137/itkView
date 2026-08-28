@@ -2,12 +2,17 @@
   "name": "itkflow-desktop",
   "private": true,
   "version": "0.2.8",
-  "description": "Desktop shell for itkFlow: bundles the backend and the built frontend.",
+  "description": "Shared desktop shell for the itkFlow and itkView product variants.",
   "scripts": {
     "icon": "tauri icon icon-source.png",
     "sidecar": "python build-sidecar.py",
+    "sidecar:flow": "python build-sidecar.py --variant flow",
+    "sidecar:view": "python build-sidecar.py --variant view",
     "dev": "tauri dev",
-    "build": "python build-sidecar.py --bundle"
+    "build": "python build-sidecar.py --variant flow --bundle",
+    "build:flow": "python build-sidecar.py --variant flow --bundle",
+    "build:view": "python build-sidecar.py --variant view --bundle",
+    "test:variants": "python -m unittest discover -s tests -p test_*.py"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.1"

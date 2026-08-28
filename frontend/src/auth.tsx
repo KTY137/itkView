@@ -21,6 +21,7 @@ import {
 } from "./api";
 import type { MeOut, Role, SetupAdminBody } from "./api";
 import { t } from "./i18n";
+import { product } from "./product";
 
 /**
  * Session state machine:
@@ -41,6 +42,8 @@ type AuthContextValue = {
   role: Role | null;
   /** operator or admin (writes allowed). Demo mode keeps the app explorable. */
   canWrite: boolean;
+  /** operator or admin (read-only mirror refreshes allowed in either product). */
+  canSync: boolean;
   /** admin (institute / user management). Demo mode keeps the app explorable. */
   isAdmin: boolean;
   demo: boolean;
@@ -54,6 +57,18 @@ type AuthContextValue = {
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+export function deriveAuthCapabilities(
+  role: Role | null,
+  demo: boolean,
+  workflowWrites = product.workflowWrites,
+): Pick<AuthContextValue, "canWrite" | "canSync" | "isAdmin"> {
+  return {
+    canWrite: workflowWrites && (demo || role === "operator" || role === "admin"),
+    canSync: demo || role === "operator" || role === "admin",
+    isAdmin: demo || role === "admin",
+  };
+}
 
 export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext);
@@ -175,15 +190,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AuthContextValue>(() => {
     const demo = status === "demo";
     const role = user?.role ?? null;
+    const capabilities = deriveAuthCapabilities(role, demo);
     return {
       status,
       user,
       csrfToken: csrf,
       role,
-      // Demo mode grants full access so the offline experience is unchanged from
-      // before auth existed; live access follows the signed-in role.
-      canWrite: demo || role === "operator" || role === "admin",
-      isAdmin: demo || role === "admin",
+      // Demo mode grants the selected product's full capability set; live access
+      // follows the signed-in role. itkView never exposes workflow writes.
+      ...capabilities,
       demo,
       login,
       bootstrapAdmin,

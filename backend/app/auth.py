@@ -16,14 +16,28 @@ from datetime import datetime, timedelta, timezone
 ROLES = ("viewer", "operator", "admin")
 
 SESSION_COOKIE = "itkflow_session"
+VIEW_SESSION_COOKIE = "itkview_session"
 # Readable (non-httpOnly) cookie carrying the CSRF token for the double-submit
 # guard; the frontend echoes it back in the X-CSRF-Token header (docs/06).
 CSRF_COOKIE = "itkflow_csrf"
+VIEW_CSRF_COOKIE = "itkview_csrf"
 CSRF_HEADER = "X-CSRF-Token"
 SESSION_TTL = timedelta(hours=12)
 
 _PBKDF2_ROUNDS = 200_000
 _ALGO = "pbkdf2_sha256"
+
+
+def session_cookie_name(product_variant: str) -> str:
+    """Return the isolated session-cookie namespace for one product."""
+
+    return VIEW_SESSION_COOKIE if product_variant == "view" else SESSION_COOKIE
+
+
+def csrf_cookie_name(product_variant: str) -> str:
+    """Return the isolated CSRF-cookie namespace for one product."""
+
+    return VIEW_CSRF_COOKIE if product_variant == "view" else CSRF_COOKIE
 
 
 def hash_password(password: str) -> str:

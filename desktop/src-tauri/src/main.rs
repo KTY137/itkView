@@ -1,4 +1,4 @@
-// itkFlow desktop shell.
+// Shared itkFlow/itkView desktop shell.
 //
 // The shell starts the packaged backend, waits until it answers HTTP, and
 // then points the window at it. Backend and frontend share one localhost
@@ -29,13 +29,34 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const IO_TIMEOUT: Duration = Duration::from_millis(750);
 const DESKTOP_LOG_MAX_BYTES: u64 = 1024 * 1024;
 const DESKTOP_LOG_BACKUPS: usize = 3;
+const PRODUCT_VARIANT: &str = match option_env!("ITKFLOW_PRODUCT_VARIANT") {
+    Some(value) => value,
+    None => "flow",
+};
+const PRODUCT_NAME: &str = match option_env!("ITKFLOW_DESKTOP_PRODUCT_NAME") {
+    Some(value) => value,
+    None => "itkFlow",
+};
+const DATA_SLUG: &str = match option_env!("ITKFLOW_DESKTOP_DATA_SLUG") {
+    Some(value) => value,
+    None => "itkflow",
+};
+const DATA_DIR_OVERRIDE_ENV: &str = match option_env!("ITKFLOW_DESKTOP_DATA_DIR_ENV") {
+    Some(value) => value,
+    None => "ITKFLOW_DATA_DIR",
+};
+const SIDECAR_NAME: &str = match option_env!("ITKFLOW_DESKTOP_SIDECAR_NAME") {
+    Some(value) => value,
+    None => "itkflow-server",
+};
 
-// Raw string: the path is full of backslashes and every one of them is data.
-const LOG_HINT: &str = concat!(
-    "Close and reopen itkFlow. Your local data is preserved. Logs: ",
-    r"%LOCALAPPDATA%\itkflow\logs\server.log and ",
-    r"%LOCALAPPDATA%\itkflow\logs\desktop.log"
-);
+fn log_hint() -> String {
+    format!(
+        "Close and reopen {PRODUCT_NAME}. Your local data is preserved. Logs: \
+         %LOCALAPPDATA%\\{DATA_SLUG}\\logs\\server.log and \
+         %LOCALAPPDATA%\\{DATA_SLUG}\\logs\\desktop.log"
+    )
+}
 
 #[derive(Clone)]
 struct HostLogger {
@@ -162,13 +183,13 @@ fn nonempty_env(name: &str) -> Option<OsString> {
     env::var_os(name).filter(|value| !value.is_empty())
 }
 
-/// Resolve exactly the directory used by `backend/app/desktop_server.py`.
+/// Resolve the product-isolated directory used by `backend/app/desktop_server.py`.
 ///
-/// Tauri's `app_log_dir` uses the bundle identifier (`org.itkflow.desktop`)
-/// and is therefore intentionally not used: the backend and host logs must be
-/// beside the same database and survive an upgrade together.
+/// Tauri's identifier-derived directory is intentionally not used: backend
+/// and host logs must stay beside the same database, while the compiled slug
+/// keeps itkFlow and itkView from ever sharing mutable state by default.
 fn application_data_dir() -> Result<PathBuf, String> {
-    if let Some(override_dir) = nonempty_env("ITKFLOW_DATA_DIR") {
+    if let Some(override_dir) = nonempty_env(DATA_DIR_OVERRIDE_ENV) {
         return Ok(PathBuf::from(override_dir));
     }
 
@@ -176,7 +197,7 @@ fn application_data_dir() -> Result<PathBuf, String> {
     {
         return nonempty_env("LOCALAPPDATA")
             .or_else(|| nonempty_env("APPDATA"))
-            .map(|base| PathBuf::from(base).join("itkflow"))
+            .map(|base| PathBuf::from(base).join(DATA_SLUG))
             .ok_or_else(|| "Windows did not provide LOCALAPPDATA.".to_string());
     }
 
@@ -187,7 +208,7 @@ fn application_data_dir() -> Result<PathBuf, String> {
                 PathBuf::from(home)
                     .join("Library")
                     .join("Application Support")
-                    .join("itkflow")
+                    .join(DATA_SLUG)
             })
             .ok_or_else(|| "macOS did not provide HOME.".to_string());
     }
@@ -195,14 +216,14 @@ fn application_data_dir() -> Result<PathBuf, String> {
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     {
         if let Some(base) = nonempty_env("XDG_DATA_HOME") {
-            return Ok(PathBuf::from(base).join("itkflow"));
+            return Ok(PathBuf::from(base).join(DATA_SLUG));
         }
         nonempty_env("HOME")
             .map(|home| {
                 PathBuf::from(home)
                     .join(".local")
                     .join("share")
-                    .join("itkflow")
+                    .join(DATA_SLUG)
             })
             .ok_or_else(|| "The operating system did not provide a data directory.".to_string())
     }
@@ -262,10 +283,12 @@ fn health_ok(port: u16) -> bool {
 fn failure_script(message: &str, hint: &str) -> Option<String> {
     let message = serde_json::to_string(message).ok()?;
     let hint = serde_json::to_string(hint).ok()?;
+    let title = serde_json::to_string(&format!("{PRODUCT_NAME} needs attention")).ok()?;
     Some(format!(
         r##"(() => {{
           const message = {message};
           const hint = {hint};
+          const productTitle = {title};
           if (typeof window.itkflowFailed === "function") {{
             window.itkflowFailed(message, hint);
             return;
@@ -280,7 +303,7 @@ fn failure_script(message: &str, hint: &str) -> Option<String> {
           const panel = document.createElement("main");
           Object.assign(panel.style, {{ width: "min(520px, 90vw)", textAlign: "center" }});
           const title = document.createElement("h1");
-          title.textContent = "itkFlow needs attention";
+          title.textContent = productTitle;
           title.style.fontSize = "26px";
           const status = document.createElement("p");
           status.textContent = message;
@@ -299,7 +322,7 @@ fn show_failure(app: &AppHandle, message: &str) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    if let Some(script) = failure_script(message, LOG_HINT) {
+    if let Some(script) = failure_script(message, &log_hint()) {
         let _ = window.eval(&script);
     }
 }
@@ -337,7 +360,7 @@ fn open_when_ready(app: AppHandle, port: u16) {
                             "navigation_failed",
                             &[],
                         );
-                        show_failure(&app, &format!("Could not open itkFlow: {error}"));
+                        show_failure(&app, &format!("Could not open {PRODUCT_NAME}: {error}"));
                     }
                 }
                 Err(error) => {
@@ -358,7 +381,10 @@ fn open_when_ready(app: AppHandle, port: u16) {
         "backend_start_timeout",
         &[("port", port.to_string())],
     );
-    show_failure(&app, "The itkFlow server did not start in time.");
+    show_failure(
+        &app,
+        &format!("The {PRODUCT_NAME} server did not start in time."),
+    );
 }
 
 fn start_server(app: &AppHandle, data_dir: &Path) -> Result<(), String> {
@@ -376,11 +402,25 @@ fn start_server(app: &AppHandle, data_dir: &Path) -> Result<(), String> {
     }
 
     let port_arg = port.to_string();
-    let (mut events, child) = app
+    let mut command = app
         .shell()
-        .sidecar("itkflow-server")
+        .sidecar(SIDECAR_NAME)
         .map_err(|error| format!("Could not prepare the local server: {error}"))?
         .env("ITKFLOW_DATA_DIR", data_dir.as_os_str())
+        .env("ITKFLOW_PRODUCT_VARIANT", PRODUCT_VARIANT)
+        .env("ITKFLOW_APP_NAME", PRODUCT_NAME);
+    if PRODUCT_VARIANT == "view" {
+        // A machine-wide Flow development override must never merge the two
+        // products' state. Empty DATABASE_URL makes desktop_server select its
+        // compiled view database; attachments are pinned explicitly.
+        command = command
+            .env("ITKFLOW_DATABASE_URL", "")
+            .env("ITKFLOW_ATTACHMENT_DIR", data_dir.join("attachments"))
+            // A machine-wide development override must not replace the
+            // embedded, capability-matched itkView frontend.
+            .env("ITKFLOW_STATIC_DIR", "");
+    }
+    let (mut events, child) = command
         .args(["--host", HOST, "--port", &port_arg])
         .spawn()
         .map_err(|error| format!("Could not start the local server: {error}"))?;
@@ -452,7 +492,7 @@ fn start_server(app: &AppHandle, data_dir: &Path) -> Result<(), String> {
                     if unexpected {
                         show_failure(
                             &event_handle,
-                            "The local itkFlow server stopped unexpectedly.",
+                            &format!("The local {PRODUCT_NAME} server stopped unexpectedly."),
                         );
                     }
                     return;
@@ -544,6 +584,7 @@ fn main() {
         &[
             ("pid", std::process::id().to_string()),
             ("version", env!("CARGO_PKG_VERSION").to_string()),
+            ("product", PRODUCT_VARIANT.to_string()),
         ],
     );
 
@@ -666,11 +707,32 @@ mod tests {
 
     #[test]
     fn failure_script_has_a_post_navigation_fallback() {
-        let script = failure_script("Stopped 'safely'", LOG_HINT).expect("serialize script");
+        let script =
+            failure_script("Stopped 'safely'", &log_hint()).expect("serialize script");
 
         assert!(script.contains("typeof window.itkflowFailed"));
         assert!(script.contains("body.replaceChildren(panel)"));
         assert!(script.contains("Stopped 'safely'"));
+        assert!(script.contains(PRODUCT_NAME));
         assert!(script.contains("desktop.log"));
+    }
+
+    #[test]
+    fn compiled_product_contract_is_coherent() {
+        match PRODUCT_VARIANT {
+            "flow" => {
+                assert_eq!(PRODUCT_NAME, "itkFlow");
+                assert_eq!(DATA_SLUG, "itkflow");
+                assert_eq!(DATA_DIR_OVERRIDE_ENV, "ITKFLOW_DATA_DIR");
+                assert_eq!(SIDECAR_NAME, "itkflow-server");
+            }
+            "view" => {
+                assert_eq!(PRODUCT_NAME, "itkView");
+                assert_eq!(DATA_SLUG, "itkview");
+                assert_eq!(DATA_DIR_OVERRIDE_ENV, "ITKVIEW_DATA_DIR");
+                assert_eq!(SIDECAR_NAME, "itkview-server");
+            }
+            other => panic!("unsupported desktop product variant: {other}"),
+        }
     }
 }

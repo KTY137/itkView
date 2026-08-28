@@ -98,6 +98,13 @@ def _call_pdb(method, *args, unavailable_message: str, **kwargs):
         raise PdbSubmitUnavailable(unavailable_message) from None
 
 
+def _require_product_pdb_writes(settings: Settings) -> None:
+    """Fail closed before any product-level read-only variant reaches itkdb."""
+
+    if not settings.pdb_writes_enabled:
+        raise PdbSubmitUnavailable("PDB writes are disabled in itkView.")
+
+
 def make_pdb_submitter(
     settings: Settings,
     *,
@@ -110,6 +117,7 @@ def make_pdb_submitter(
     exists for the separately opted-in ``pdb_write`` integration test; it is
     never populated by :mod:`app.run_worker`.
     """
+    _require_product_pdb_writes(settings)
     if service_access_codes is not None and not settings.allow_pdb_writes:
         raise PdbSubmitUnavailable(
             "Explicit service credentials are reserved for opted-in PDB write tests."
@@ -324,6 +332,7 @@ def make_pdb_submitter(
         return SubmitOutcome.confirmed(external_ref or f"{parent_sn}:{child_sn}")
 
     def submit(session, action: OutboxAction) -> SubmitOutcome:
+        _require_product_pdb_writes(settings)
         if action.kind == "upload_test_run":
             return _submit_upload(session, action)
         if action.kind == "stage_move":
@@ -412,6 +421,7 @@ def register_dummy_component(
     Payload shape follows the zeuthenflow reference (`dbModule.registerModule`
     / `dbComponent.registerComponent`).
     """
+    _require_product_pdb_writes(settings)
     if settings.pdb_write_scope != "dummy_only":
         raise PdbSubmitUnavailable(
             "Component registration is only available in the dummy_only write scope."

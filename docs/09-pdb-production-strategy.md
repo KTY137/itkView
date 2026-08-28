@@ -85,6 +85,34 @@
 6. Die Offline-Testsuite bleibt netzwerkfrei; alle Guards sind mit Fakes
    getestet (`tests/test_pdb_scope.py`, `tests/test_outbox_worker.py`).
 
+## itkView: staerkerer Produkt-Scope als `dummy_only`
+
+`ITKFLOW_PRODUCT_VARIANT=view` baut itkView aus derselben Codebasis. Dieser
+Modus ist kein weiterer Rollenname und kein Alias fuer `viewer`: er ist eine
+serverseitige Produktgrenze, die auch fuer Admins und direkte API-Aufrufe gilt.
+
+- Die ausgelieferten Produktions-**Reads** bleiben moeglich. Persoenliche
+  Credentials, Component-/Testdefinition-/Evidence-/Attachment-/Tool- und
+  Shipment-Sync schreiben ausschliesslich den getrennten lokalen itkView-
+  Spiegel und duerfen deshalb weiterhin ueber explizit klassifizierte POST-
+  Routen gestartet werden.
+- Produktionsdatenerfassung und operative Mutationen (Ingest, Outbox,
+  Assembly, Registrierung, Stage-Move, Tool-/Glue-Registry-Aenderungen,
+  Shipment-Reception, Reminder/Notification) werden vor dem Handler zentral
+  abgelehnt. Eine neue unsichere Route ist in `view` standardmaessig gesperrt,
+  bis sie bewusst als notwendiger Read-Sync oder lokale Administration
+  klassifiziert wurde.
+- Settings erzwingen `pdb_write_scope=disabled`, `allow_pdb_writes=false`,
+  `outbox_processor=off` und `reminder_scheduler=off`. Zusaetzlich verweigern
+  `make_pdb_submitter`, `register_dummy_component` und der Standalone-Worker
+  jeden Drain. UI-Gating ist damit nur Darstellung, nie die Schutzgrenze.
+- itkFlow und itkView teilen weder DB/Attachments/Keys/Logs noch Cookies. Eine
+  alte, bereits `submitted` stehende itkFlow-Aktion kann daher nicht in den
+  Viewer gelangen.
+
+Der vollstaendige Varianten- und Packaging-Vertrag steht in
+[`ADR 007`](adr/007-itkview-read-only-product.md).
+
 ## Offline-Default und Reads ab Werk (2026-08-26)
 
 Die tote Testinstanz-Konfiguration ist gestrichen: `pdb_instance` kennt nur

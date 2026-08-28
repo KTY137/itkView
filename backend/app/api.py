@@ -19,13 +19,13 @@ from app.assembly import (
     evaluate_assembly,
 )
 from app.auth import (
-    CSRF_COOKIE,
     CSRF_HEADER,
-    SESSION_COOKIE,
     SESSION_TTL,
+    csrf_cookie_name,
     hash_password,
     new_csrf_token,
     new_session_token,
+    session_cookie_name,
     session_expiry,
     verify_password,
 )
@@ -143,6 +143,7 @@ from app.schemas import (
     OutboxTransition,
     PdbConnectionOut,
     PdbCredentialsPut,
+    ProductCapabilitiesOut,
     ProductionStatsOut,
     ReminderCreate,
     ReminderOccurrenceOut,
@@ -209,7 +210,8 @@ def _sync_job_out(job: SyncJob) -> SyncJobOut:
 
 def current_session(request: Request, db: Session = Depends(get_db)) -> UserSession | None:
     """Resolve the live (unexpired) session from the cookie, or None."""
-    token = request.cookies.get(SESSION_COOKIE)
+    cookie_name = session_cookie_name(request.app.state.settings.product_variant)
+    token = request.cookies.get(cookie_name)
     if not token:
         return None
     session = db.scalar(select(UserSession).where(UserSession.token == token))
@@ -316,7 +318,7 @@ def _me(user: User, csrf_token: str) -> MeOut:
 
 def _set_session_cookie(response: Response, token: str, settings: Settings) -> None:
     response.set_cookie(
-        SESSION_COOKIE,
+        session_cookie_name(settings.product_variant),
         token,
         httponly=True,
         samesite="lax",
@@ -329,7 +331,7 @@ def _set_csrf_cookie(response: Response, csrf_token: str, settings: Settings) ->
     # Readable by the frontend (NOT httpOnly) so it can echo the token back in
     # the X-CSRF-Token header (double-submit, docs/06).
     response.set_cookie(
-        CSRF_COOKIE,
+        csrf_cookie_name(settings.product_variant),
         csrf_token,
         httponly=False,
         samesite="lax",
@@ -394,14 +396,17 @@ def login(
 
 @router.post("/api/auth/logout", status_code=204, tags=["auth"])
 def logout(request: Request, response: Response, db: Session = Depends(get_db)) -> None:
-    token = request.cookies.get(SESSION_COOKIE)
+    settings = request.app.state.settings
+    session_cookie = session_cookie_name(settings.product_variant)
+    csrf_cookie = csrf_cookie_name(settings.product_variant)
+    token = request.cookies.get(session_cookie)
     if token:
         session = db.scalar(select(UserSession).where(UserSession.token == token))
         if session is not None:
             db.delete(session)
             db.commit()
-    response.delete_cookie(SESSION_COOKIE)
-    response.delete_cookie(CSRF_COOKIE)
+    response.delete_cookie(session_cookie)
+    response.delete_cookie(csrf_cookie)
 
 
 @router.get("/api/auth/me", response_model=MeOut, tags=["auth"])
@@ -533,9 +538,10 @@ def _verified_pdb_metadata(request: Request, access_codes: PdbAccessCodes) -> di
         # what the retired test-instance default used to produce.
         raise HTTPException(status_code=503, detail=str(exc)) from None
     except PdbClientUnavailable:
+        product_name = request.app.state.settings.app_name
         raise HTTPException(
             status_code=500,
-            detail="PDB client support is unavailable on this itkFlow server.",
+            detail=f"PDB client support is unavailable on this {product_name} server.",
         ) from None
     except Exception as exc:
         state = _pdb_failure_state(exc)
@@ -702,13 +708,19 @@ def put_personal_pdb_connection(
         db.rollback()
         raise HTTPException(
             status_code=409,
-            detail="This PDB identity is already connected to another itkFlow account.",
+            detail=(
+                f"This PDB identity is already connected to another "
+                f"{settings.app_name} account."
+            ),
         ) from None
     except IntegrityError:
         db.rollback()
         raise HTTPException(
             status_code=409,
-            detail="This PDB identity is already connected to another itkFlow account.",
+            detail=(
+                f"This PDB identity is already connected to another "
+                f"{settings.app_name} account."
+            ),
         ) from None
     except (CredentialKeyMissingError, CredentialKeyInvalidError):
         db.rollback()
@@ -1055,10 +1067,22 @@ def resolve_component(db: Session, parsed: ParsedTestRun) -> Component | None:
 @router.get("/health", response_model=HealthOut, tags=["meta"])
 def health(request: Request) -> HealthOut:
     settings = request.app.state.settings
+    flow_enabled = settings.product_variant == "flow"
     return HealthOut(
         status="ok",
         app=settings.app_name,
         version=__version__,
+        product_variant=settings.product_variant,
+        write_features_enabled=flow_enabled,
+        capabilities=ProductCapabilitiesOut(
+            account_management=True,
+            mirror_sync=True,
+            test_uploads=flow_enabled,
+            workflow_writes=flow_enabled,
+            operations_writes=flow_enabled,
+            pdb_writes=flow_enabled,
+            outbound_notifications=flow_enabled,
+        ),
         pdb_instance=settings.pdb_instance,
         pdb_write_scope=settings.pdb_write_scope,
     )
@@ -1206,13 +1230,18 @@ def operations_diagnostics(
             detail="Desktop diagnostics are not available on this server.",
         ) from None
     stamp = utcnow().strftime("%Y%m%d-%H%M%S")
+    product_name = (
+        "itkView"
+        if request.app.state.settings.product_variant == "view"
+        else "itkFlow"
+    )
     return Response(
         content=bundle,
         media_type="application/zip",
         headers={
             "Cache-Control": "no-store",
             "Content-Disposition": (
-                f'attachment; filename="itkFlow-diagnostics-{stamp}.zip"'
+                f'attachment; filename="{product_name}-diagnostics-{stamp}.zip"'
             ),
             "X-Content-Type-Options": "nosniff",
         },

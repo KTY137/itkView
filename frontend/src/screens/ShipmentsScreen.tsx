@@ -96,7 +96,7 @@ export default function ShipmentsScreen({
   onOpenComponent: (sn: string) => void;
   onAddTest: (sn: string, testType: string) => void;
 }) {
-  const { canWrite, showToast, user } = useAuth();
+  const { canWrite, canSync, showToast, user } = useAuth();
   const [shipments, setShipments] = useState<Shipment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -204,7 +204,7 @@ export default function ShipmentsScreen({
         {demo && <span className="badge warn">{t.common.demoBadge}</span>}
       </div>
 
-      {!demo && canWrite && (
+      {!demo && canSync && (
         <div className="panel compact-panel">
           <div className="toolbar">
             <label className="control-label" htmlFor="shipment-sync-institute">
@@ -542,11 +542,13 @@ function ShipmentDetail({
                         )}
                       </div>
                     ))}
-                    <p className="muted reception-write-scope-hint">
-                      {item.submittable
-                        ? t.shipments.dummyWriteHint
-                        : t.shipments.stagedOnlyHint}
-                    </p>
+                    {canWrite && (
+                      <p className="muted reception-write-scope-hint">
+                        {item.submittable
+                          ? t.shipments.dummyWriteHint
+                          : t.shipments.stagedOnlyHint}
+                      </p>
+                    )}
                   </div>
                 )}
               </li>
@@ -590,15 +592,24 @@ function ShipmentDetail({
               <ul className="phase4-check-list">
                 {checklist.map((entry, index) => (
                   <li key={`${index}-${entry.label}`}>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={entry.done}
-                        disabled={!canWrite || busy}
-                        onChange={() => toggleChecklist(index)}
-                      />
-                      <span>{entry.label}</span>
-                    </label>
+                    {canWrite ? (
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={entry.done}
+                          disabled={busy}
+                          onChange={() => toggleChecklist(index)}
+                        />
+                        <span>{entry.label}</span>
+                      </label>
+                    ) : (
+                      <>
+                        <span>{entry.label}</span>
+                        <span className={entry.done ? "chip green" : "chip neutral"}>
+                          {entry.done ? t.common.yes : t.common.no}
+                        </span>
+                      </>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -612,31 +623,47 @@ function ShipmentDetail({
               <ul className="phase4-check-list">
                 {items.map((item) => (
                   <li key={item.sn}>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={item.received}
-                        disabled={!canWrite || busy}
-                        aria-label={`${t.shipments.itemReceived}: ${item.sn}`}
-                        onChange={() => toggleItem(item.sn)}
-                      />
-                      <span className="mono">{item.sn}</span>
-                    </label>
+                    {canWrite ? (
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={item.received}
+                          disabled={busy}
+                          aria-label={`${t.shipments.itemReceived}: ${item.sn}`}
+                          onChange={() => toggleItem(item.sn)}
+                        />
+                        <span className="mono">{item.sn}</span>
+                      </label>
+                    ) : (
+                      <>
+                        <span className="mono">{item.sn}</span>
+                        <span className={item.received ? "chip green" : "chip neutral"}>
+                          {item.received ? t.common.yes : t.common.no}
+                        </span>
+                      </>
+                    )}
                   </li>
                 ))}
               </ul>
             )}
           </div>
         </div>
-        <label className="phase4-field">
-          <span className="field-label">{t.shipments.receptionNoteLabel}</span>
-          <textarea
-            className="phase4-textarea"
-            value={note}
-            disabled={!canWrite || busy}
-            onChange={(event) => setNote(event.target.value)}
-          />
-        </label>
+        {canWrite ? (
+          <label className="phase4-field">
+            <span className="field-label">{t.shipments.receptionNoteLabel}</span>
+            <textarea
+              className="phase4-textarea"
+              value={note}
+              disabled={busy}
+              onChange={(event) => setNote(event.target.value)}
+            />
+          </label>
+        ) : (
+          <div className="phase4-field">
+            <span className="field-label">{t.shipments.receptionNoteLabel}</span>
+            <p className="state-note">{note.trim() || t.common.none}</p>
+          </div>
+        )}
         {shipment.reception_by !== null && shipment.reception_updated_at !== null && (
           <p className="phase4-meta muted">
             {t.shipments.lastEdit(shipment.reception_by)} ·{" "}

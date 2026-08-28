@@ -1,6 +1,8 @@
 # Build context is the repository root (see docker-compose.yml).
 FROM node:22-alpine AS build
 WORKDIR /build
+ARG ITKFLOW_PRODUCT_VARIANT=flow
+ENV VITE_ITKFLOW_PRODUCT_VARIANT=${ITKFLOW_PRODUCT_VARIANT}
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-fund --no-audit
 COPY frontend/ ./

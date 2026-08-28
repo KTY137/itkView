@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import { ApiError } from "../api";
 import { useAuth } from "../auth";
 import { t } from "../i18n";
+import { product } from "../product";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -60,7 +61,7 @@ export default function SetupScreen() {
     <div className="login-view">
       <form className="login-card" onSubmit={(e) => void handleSubmit(e)}>
         <div className="login-brand">
-          itk<span>Flow</span>
+          {product.brandPrefix}<span>{product.brandAccent}</span>
         </div>
         <h1 className="login-title">{t.auth.setupTitle}</h1>
         <p className="login-sub">{t.auth.setupSubtitle}</p>

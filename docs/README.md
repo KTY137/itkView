@@ -171,6 +171,7 @@ heutigen Code beschreibt.
 | [`004-personal-pdb-credentials.md`](adr/004-personal-pdb-credentials.md) | Jedes Konto verbindet sein eigenes Access-Code-Paar, AES-256-GCM verschluesselt; Outbox-Aktionen sind an die PDB-Identitaet des Freigebenden gebunden. | Aktuell. |
 | [`005-desktop-packaging.md`](adr/005-desktop-packaging.md) | Tauri-Shell plus PyInstaller-Sidecar, das Backend liefert die SPA selbst aus; Zustand liegt im Anwendungsdatenverzeichnis. | Aktuell bis auf den PDB-Default in „Entscheidung" Punkt 6: dort steht noch die gestrichene `test`-Instanz. Massgeblich ist [`09`](09-pdb-production-strategy.md). |
 | [`006-staged-first-ui-auto-mirror.md`](adr/006-staged-first-ui-auto-mirror.md) | Die Komponentendetailseite ist der Arbeitsort, Staged ist eine Serverprojektion, und ein Komponentensync zieht automatisch Evidence und Dateien nach. | Aktuell; M1–M4 umgesetzt, die gemeinsame Abnahme wird in [`04`](04-roadmap.md) verfolgt. |
+| [`007-itkview-read-only-product.md`](adr/007-itkview-read-only-product.md) | itkView ist eine fail-closed Read-only-Buildvariante derselben Codebasis: Mirror-Syncs bleiben, Produktionsdatenerfassung, Outbox und finale PDB-Sinks sind gesperrt; App-Zustand und Cookies sind isoliert. | Aktuell. |
 
 ### Specs (`superpowers/specs/`)
 

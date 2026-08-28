@@ -55,6 +55,30 @@ im Frontend-i18n-Modul liegt.
   `aria-label` an Diagrammen; horizontale Scroll-Container fuer breite Tabellen/
   Boards statt Seiten-Overflow.
 
+## itkView-Variante (read-only)
+
+itkView verwendet dieselbe Informationsarchitektur, Typografie, Tokens und
+Read-Screens wie itkFlow. Der Produktname steht sichtbar in Splash, Login,
+Rail und Breadcrumb; ein permanenter `Read only`-Hinweis verhindert, dass die
+fehlenden Controls wie ein Rollen- oder Ladefehler wirken.
+
+Im itkView-Build gibt es keinen `Staged`-Navigationseintrag und keinen
+Assembly-Wizard. `Assemble`, `Add test result`, Datei-Drop, manuelle Erfassung,
+Requirement-Stifte, `Record test`, Registrierung, Stage-Move, `Push to PDB`,
+`Discard` sowie Links in Staged-/Ghost-Authoring werden nicht disabled
+gerendert, sondern fehlen. Tools, Glue batches, Shipments und Reminders bleiben
+als lesbare Bestandsansichten ohne Mutationscontrols; Components, Board,
+Dashboard, Statistics, Bilder, Runs/Plots, Suche, Sync-Status und Operations
+Health bleiben vollwertig. Auch `Triage` verschwindet, weil dieser Screen der
+Eingang fuer Datei-Ingest und Upload-Vorschlaege ist. Account-Credentials sowie
+lokale User- und Institutsadministration sind keine Produktionsdatenerfassung
+und bleiben fuer den Betrieb erreichbar.
+
+Die UI-Capability ist Buildzeit-Konfiguration und gilt auch fuer Demo/Admin;
+die Serverpolicy aus [`ADR 007`](adr/007-itkview-read-only-product.md) bleibt
+die Sicherheitsgrenze. Ein versehentlich gegen ein itkView-Backend gebautes
+itkFlow-Frontend kann deshalb keine verbotene Mutation ausfuehren.
+
 ## Screens & Muster (Soll-Zustand)
 
 1. **Assembly-Board (Kanban):** Spalten = PDB-Stages

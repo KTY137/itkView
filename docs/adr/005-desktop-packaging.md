@@ -55,10 +55,20 @@ keine reduzierte Zweitfassung, die auseinanderdriftet.
    ([ADR 004](004-personal-pdb-credentials.md)). Schreiboperationen bleiben
    auf selbst registrierte DUMMY-Komponenten beschränkt
    ([ADR 003](003-pdb-dummy-write-scope.md)).
+7. **Zwei Produkt-Builds, weiterhin eine Shell.** Der Builder kennt `flow`
+   (Default) und `view`. itkView wird ueber ein Tauri-Config-Overlay mit
+   eigenem Product-/Binary-/Installer-Namen, eigener App-ID und eigenem
+   Sidecar gebaut; Rust gibt den kompilierten Produktmodus an den Python-
+   Sidecar weiter. Frontend-, PyInstaller-Work- und Dist-Ausgaben sind
+   variantenspezifisch, damit ein zuvor gebautes Flow-Artefakt nie als View-
+   Payload ausgegeben wird. Die Produkte verwenden getrennte Datenpfade und
+   Cookie-Namen und koennen deshalb gleichzeitig laufen. Die fachliche
+   Read-only-Grenze besitzt [ADR 007](007-itkview-read-only-product.md).
 
 ## Konsequenzen
 
-- Eine Codebasis, drei Betriebsarten (Dev-Launcher, Compose, Desktop). Die
+- Eine Codebasis mit zwei Produktvarianten und drei Betriebsarten
+  (Dev-Launcher, Compose, Desktop). Die
   Desktop-Variante ist Einzelplatz: sie ersetzt das Institutsdeployment nicht,
   weil Rollen, Audit und Outbox-Worker auf einen gemeinsamen Server zielen.
 - Der Sidecar ist ein Windowed-Build ohne nutzbares stdout. Ein frozener Lauf
