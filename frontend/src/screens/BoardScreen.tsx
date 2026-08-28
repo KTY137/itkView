@@ -3,6 +3,10 @@ import { ApiError, getComponents } from "../api";
 import type { ComponentOut } from "../api";
 import { filterDemoComponents } from "../demoData";
 import { t } from "../i18n";
+import {
+  ProductionStatusMarker,
+  hasProductionStatusAttention,
+} from "../ProductionStatusMarker";
 import { describeComponent, stageLabel, stageTone } from "../ui";
 
 function errorMessage(err: unknown): string {
@@ -66,7 +70,19 @@ export default function BoardScreen({
 
   const present = new Set(modules.map((m) => m.stage));
   const stages = orderedStages(present);
-  const byStage = (stage: string) => modules.filter((m) => m.stage === stage);
+  const byStage = (stage: string) =>
+    modules
+      .filter((m) => m.stage === stage)
+      .sort((a, b) => {
+        const rank = (component: ComponentOut) =>
+          component.production_status === "hold"
+            ? 0
+            : component.production_status === "unknown" &&
+                hasProductionStatusAttention(component)
+              ? 1
+              : 2;
+        return rank(a) - rank(b);
+      });
 
   return (
     <div className="screen">
@@ -104,13 +120,22 @@ export default function BoardScreen({
                   {byStage(stage).map((m) => {
                     const movedAway = m.location !== "" && m.location !== m.institute_code;
                     const hasFlags = m.is_dummy || m.stale || m.trashed || movedAway;
+                    const productionTone =
+                      m.production_status === "hold"
+                        ? "crit"
+                        : m.production_status === "unknown" && hasProductionStatusAttention(m)
+                          ? "warn"
+                          : stageTone(stage);
                     return (
                       <button
                         type="button"
                         className={
-                          "card" + (m.trashed ? " trashed" : "") + (m.stale ? " is-stale" : "")
+                          "card" +
+                          (m.trashed ? " trashed" : "") +
+                          (m.stale ? " is-stale" : "") +
+                          (m.production_status === "hold" ? " has-production-hold" : "")
                         }
-                        data-tone={m.trashed ? "crit" : stageTone(stage)}
+                        data-tone={m.trashed ? "crit" : productionTone}
                         key={m.sn}
                         onClick={() => onOpen(m.sn)}
                       >
@@ -118,6 +143,7 @@ export default function BoardScreen({
                           <span className="nm-label" title={m.local_name ?? m.sn}>
                             {m.local_name ?? m.sn}
                           </span>
+                          <ProductionStatusMarker component={m} mode="icon" />
                           <span className="typ" title={describeComponent(m)}>
                             {m.type_code}
                           </span>

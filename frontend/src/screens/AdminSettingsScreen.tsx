@@ -172,6 +172,12 @@ type SettingsDraft = {
   logoUrl: string;
   pdbProject: string;
   stages: StageRow[];
+  /**
+   * Explicit owner approval for using this institute's stage model in
+   * production-status decisions. Any edit to the stage order or requirements
+   * clears it; only the separate checkbox below may set it again.
+   */
+  stagePolicyApproved: boolean;
   channels: ChannelDraft[];
   receptionChecklist: TextRow[];
   receptionTests: ReceptionTestRow[];
@@ -264,6 +270,8 @@ export type AdminOperationalSettings = {
   stage_order: string[];
   /** One entry per listed stage, so the saved profile is fully explicit. */
   stage_requirements: Record<string, string[]>;
+  /** Explicit admin acknowledgement of the exact order and requirements. */
+  stage_policy_approved: boolean;
 };
 
 export type GlueWeightInputMapping = {
@@ -378,6 +386,10 @@ export type AdminSettingsLabels = {
   stagesHint: string;
   stagesImpact: string;
   stagesDirtyWarning: string;
+  stagePolicyApprovedLabel: string;
+  stagePolicyApprovedHint: string;
+  stagePolicyUnapprovedLabel: string;
+  stagePolicyUnapprovedWarning: string;
   addStage: string;
   stageRowLabel: (index: number) => string;
   stageNameLabel: string;
@@ -885,6 +897,43 @@ function stageRowsFromSettings(settings: Record<string, unknown>): StageRow[] {
   }));
 }
 
+/**
+ * Match the backend's fail-closed definition of an explicit stage policy.
+ * A raw approval bit is ineffective when the stored model still inherits any
+ * seed order/requirement entry, so the UI must not present that state as
+ * approved either.
+ */
+function hasExplicitStagePolicy(settings: Record<string, unknown>): boolean {
+  const order = stringArray(settings.stage_order);
+  const requirements = asObject(settings.stage_requirements);
+  if (order === null || requirements === null) return false;
+  if (
+    Object.values(requirements).some(
+      (tests) =>
+        !Array.isArray(tests) ||
+        tests.some((test) => typeof test !== "string" || test.length === 0),
+    )
+  ) {
+    return false;
+  }
+
+  const effectiveRequirementStages = [
+    ...Object.keys(SEED_STAGE_REQUIREMENTS),
+    ...Object.keys(requirements).filter(
+      (stage) => !(stage in SEED_STAGE_REQUIREMENTS),
+    ),
+  ];
+  const effectiveOrder = [
+    ...order,
+    ...effectiveRequirementStages.filter((stage) => !order.includes(stage)),
+  ];
+  return (
+    effectiveOrder.length === order.length &&
+    effectiveOrder.every((stage, index) => stage === order[index]) &&
+    effectiveOrder.every((stage) => Object.hasOwn(requirements, stage))
+  );
+}
+
 type AutoSyncDraft = Pick<
   SettingsDraft,
   | "autoSyncEnabled"
@@ -1022,6 +1071,8 @@ function draftFromInstitute(institute: Institute): SettingsDraft {
     logoUrl: stringSetting(settings, "logo_url"),
     pdbProject: stringSetting(settings, "pdb_project"),
     stages: stageRowsFromSettings(settings),
+    stagePolicyApproved:
+      settings.stage_policy_approved === true && hasExplicitStagePolicy(settings),
     channels: channelRows(settings.notification_channels),
     receptionChecklist: stringList(
       settings.shipment_reception_checklist,
@@ -1058,6 +1109,7 @@ function emptyDraft(): SettingsDraft {
     logoUrl: "",
     pdbProject: "",
     stages: [],
+    stagePolicyApproved: false,
     channels: [],
     receptionChecklist: [],
     receptionTests: [],
@@ -1146,6 +1198,7 @@ function comparableDraft(draft: SettingsDraft): string {
     logoUrl: draft.logoUrl,
     pdbProject: draft.pdbProject,
     stages: comparableStages(draft),
+    stagePolicyApproved: draft.stagePolicyApproved,
     channels: draft.channels.map(({ key: _key, ...row }) => row),
     receptionChecklist: draft.receptionChecklist.map((row) => row.value),
     receptionTests: draft.receptionTests.map((row) => ({
@@ -1724,6 +1777,7 @@ function validateAndBuildUpdate(
         reminder_escalation: reminderEscalation,
         stage_order: stageOrder,
         stage_requirements: stageRequirements,
+        stage_policy_approved: draft.stagePolicyApproved,
       },
     },
   };
@@ -1826,7 +1880,17 @@ export default function AdminSettingsScreen({
   }
 
   function changeStages(updater: (rows: StageRow[]) => StageRow[]) {
-    changeDraft((current) => ({ ...current, stages: updater(current.stages) }));
+    changeDraft((current) => {
+      const stages = updater(current.stages);
+      if (stages === current.stages) return current;
+      return {
+        ...current,
+        stages,
+        // Approval belongs to the exact stage order and requirement set that
+        // was reviewed. A changed policy must be consciously approved again.
+        stagePolicyApproved: false,
+      };
+    });
   }
 
   function updateStage(key: string, updater: (row: StageRow) => StageRow) {
@@ -2124,6 +2188,36 @@ export default function AdminSettingsScreen({
             {stageModelDirty && (
               <div className="info-banner admin-settings-message" role="status">
                 <span>{labels.stagesDirtyWarning}</span>
+              </div>
+            )}
+            <div className="admin-settings-row">
+              <label className="admin-settings-toggle" htmlFor="admin-stage-policy-approved">
+                <input
+                  id="admin-stage-policy-approved"
+                  type="checkbox"
+                  checked={draft.stagePolicyApproved}
+                  disabled={busy}
+                  aria-describedby="admin-stage-policy-approved-hint"
+                  onChange={(event) =>
+                    changeDraft((current) => ({
+                      ...current,
+                      stagePolicyApproved: event.target.checked,
+                    }))
+                  }
+                />
+                <span>{labels.stagePolicyApprovedLabel}</span>
+              </label>
+              <p
+                className="muted admin-settings-copy"
+                id="admin-stage-policy-approved-hint"
+              >
+                {labels.stagePolicyApprovedHint}
+              </p>
+            </div>
+            {!draft.stagePolicyApproved && (
+              <div className="info-banner admin-settings-message" role="status">
+                <span className="chip amber">{labels.stagePolicyUnapprovedLabel}</span>
+                <span>{labels.stagePolicyUnapprovedWarning}</span>
               </div>
             )}
             <datalist id={TEST_TYPE_LIST_ID}>

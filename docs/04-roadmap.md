@@ -31,6 +31,31 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-28)
 
+- **Modul-Uebersichten markieren konfigurierte Gate-Abweichungen
+  fail-closed (2026-08-28):** `GET /api/components` und die Detailantwort
+  tragen eine serverseitig gebatchte `production_status`-Projektion. Ein rotes
+  `Production hold` erscheint erst, wenn ein Modul eine konfigurierte
+  Requirement-Stage bereits ueberschritten hat und deren neueste lebende
+  Evidenz `failed`/`missing` ist; ein Test in der aktuellen Arbeitsstage ist
+  weiterhin normales WIP. Board, Komponentenliste, Family-Tree und Detailkopf
+  zeigen den textlich/barrierefrei erklaerten `!`-Marker, Hold-Karten verlieren
+  den irrefuehrenden gruenen `FINISHED`-Ton, Liste/Board koennen Holds priorisieren
+  und die Detailseite zeigt einen persistenten Hinweis. Seed- oder nicht
+  explizit mit `stage_policy_approved=true` abgenommene Profile heissen
+  `provisional workflow`; ohne Abweichung liefern sie niemals ein fachliches
+  `clear`. Admin Settings bietet dafuer eine separate bewusste Freigabe; jede
+  Aenderung an Stage-Reihenfolge oder Requirements verwirft sie automatisch.
+  Modellfremde/stale
+  Module bleiben `unknown`, Nicht-Module und trashed Zeilen `not_applicable`.
+  Gleichzeitig ist die Evidence-Fusion gehaertet: nur worker-bestaetigte,
+  institutsrichtige Uploads mit External-Ref und echtem Boolean zaehlen
+  provisorisch; ein spaeterer bzw. derselbe gespiegelte PDB-Lauf bleibt
+  autoritativ. Operatoren koennen `confirmed`/`failed` nicht mehr ueber den
+  generischen Transition-Endpunkt setzen. **Offen:** TUDO braucht weiterhin
+  das fachlich abgenommene, familien-/Requirement-Modi-faehige Profil aus
+  [`10`](10-itk-domain-reference.md) §7; der Marker ist keine Aussage ueber
+  einen physischen Defekt.
+
 - **Manuelle Testerfassung entscheidet jetzt fail-closed aus dem effektiven
   Schema (2026-08-27):** `TestForm.manualEntryCapability()` ist die gemeinsame
   Entscheidung fuer Karte und Worksheet-Edit-Strip, jeweils **nach** dem

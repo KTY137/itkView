@@ -40,6 +40,22 @@ class InstituteOut(BaseModel):
     created_at: datetime
 
 
+class ProductionStatusReasonOut(BaseModel):
+    """One fail-closed reason attached to a component production marker."""
+
+    code: Literal[
+        "required_test_failed",
+        "required_test_missing",
+        "unknown_stage",
+        "missing_profile",
+        "stale_mirror",
+        "trashed",
+        "provisional_profile",
+    ]
+    stage: str | None = None
+    test_type: str | None = None
+
+
 class ComponentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -55,6 +71,15 @@ class ComponentOut(BaseModel):
     trashed: bool
     stale: bool
     synced_at: datetime
+    # Calculated from the institute stage model and the local evidence mirror
+    # by component read endpoints. Optional defaults keep non-overview helper
+    # endpoints backwards compatible until they opt into the projection.
+    production_status: Literal["clear", "hold", "unknown", "not_applicable"] | None = None
+    production_policy_source: Literal[
+        "profile_override", "seed_default", "missing_profile"
+    ] | None = None
+    production_policy_approved: bool | None = None
+    production_status_reasons: list[ProductionStatusReasonOut] = Field(default_factory=list)
 
 
 class ComponentDetailOut(ComponentOut):
@@ -490,6 +515,7 @@ class OutboxContractOut(BaseModel):
     statuses: list[str]
     transitions: dict[str, list[str]]
     terminal: list[str]
+    worker_owned_targets: list[str]
 
 
 class IngestFileCreate(BaseModel):

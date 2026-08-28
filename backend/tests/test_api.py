@@ -38,14 +38,12 @@ def test_outbox_lifecycle_with_audit_trail(client: TestClient, tudo: dict, as_op
     assert action["status"] == "draft"
     action_id = action["id"]
 
-    # draft -> validated -> approved -> submitted -> failed -> submitted -> confirmed
+    # Operators own review and submission; only the worker may resolve a
+    # submitted action to failed/confirmed after talking to the PDB.
     steps = [
         ("validated", 200),
         ("approved", 200),
         ("submitted", 200),
-        ("failed", 200),
-        ("submitted", 200),
-        ("confirmed", 200),
     ]
     for target, expected in steps:
         response = client.post(
@@ -55,8 +53,8 @@ def test_outbox_lifecycle_with_audit_trail(client: TestClient, tudo: dict, as_op
         assert response.status_code == expected, response.text
 
     final = client.get(f"/api/outbox/{action_id}").json()
-    assert final["status"] == "confirmed"
-    assert final["attempts"] == 2  # two submission attempts, one retry after failure
+    assert final["status"] == "submitted"
+    assert final["attempts"] == 1
 
     audit = client.get("/api/audit").json()
     subjects = {event["subject"] for event in audit}
@@ -97,6 +95,30 @@ def test_outbox_contract_is_public_and_not_an_action_id(client: TestClient):
     assert body["transitions"]["draft"] == ["validated", "cancelled"]
     assert body["transitions"]["submitted"] == ["confirmed", "failed"]
     assert body["terminal"] == ["cancelled", "confirmed"]
+    assert body["worker_owned_targets"] == ["confirmed", "failed"]
+
+
+def test_operator_cannot_forge_worker_owned_outbox_result(
+    client: TestClient, tudo: dict, as_operator
+):
+    action = client.post(
+        "/api/outbox",
+        json={"institute_code": "TUDO", "kind": "upload_test_run", "created_by": "aa"},
+    ).json()
+    for target in ("validated", "approved", "submitted"):
+        response = client.post(
+            f"/api/outbox/{action['id']}/transition", json={"to": target, "actor": "aa"}
+        )
+        assert response.status_code == 200, response.text
+
+    for target in ("confirmed", "failed"):
+        response = client.post(
+            f"/api/outbox/{action['id']}/transition", json={"to": target, "actor": "aa"}
+        )
+        assert response.status_code == 403
+        assert "worker-owned" in response.json()["detail"]
+
+    assert client.get(f"/api/outbox/{action['id']}").json()["status"] == "submitted"
 
 
 def test_outbox_rejects_invalid_transition(client: TestClient, tudo: dict, as_operator):

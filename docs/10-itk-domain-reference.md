@@ -529,6 +529,18 @@ zFlow-Ablauf nur naeherungsweise nachbilden.
 
 ### 7.7 Weitere Abweichungen Seed ↔ Realitaet
 
+**UI-Sicherheitsmarker (2026-08-28):** Board, Komponentenliste und Detailseite
+zeigen `Production hold`, wenn eine Modul-Stage nach dem *effektiven
+konfigurierten Modell* bereits ueber eine Requirement-Stage hinausgelaufen ist,
+deren neueste lebende Evidenz fehlt oder fehlschlaegt. Tests der aktuellen
+Arbeitsstage sind noch kein Verstoss. Modellfremde/stale Stages bleiben
+`unassessed`; Nicht-Module werden nicht gegen das Modulmodell geprueft. Solange
+das effektive Profil nicht explizit mit `stage_policy_approved=true` fachlich
+abgenommen ist, nennt jeder Treffer `provisional workflow` und ein unauffaelliger
+Befund wird nicht als fachliches `clear` ausgegeben. Der
+Marker ist damit eine priorisierte Konfigurationsabweichung, kein Beweis fuer
+einen physischen Defekt und kein Ersatz fuer die Profilentscheidung aus §7.6.
+
 - **Stages im Mirror, die es im Seed nicht gibt:** `FAILED` (26 Module),
   `AT_LOADING_SITE` (5), `ON_CORE` (4), `LIMBO` (1), `STUFFED` (1) — zusammen
   37 von 263 (14 %). Aus `stage_event` zusaetzlich als reale Uebergaenge

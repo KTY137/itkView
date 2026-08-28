@@ -10,7 +10,11 @@ import pytest
 from authutil import authenticate
 from sqlalchemy import select
 
-from app.domain.stages import DEFAULT_STAGE_ORDER, stage_model_from_settings
+from app.domain.stages import (
+    DEFAULT_STAGE_ORDER,
+    DEFAULT_STAGE_REQUIREMENTS,
+    stage_model_from_settings,
+)
 from app.institute_settings import (
     InstituteSettingsValidationError,
     normalize_institute_settings_update,
@@ -490,8 +494,68 @@ def test_invalid_stage_model_is_rejected(patch):
 
 def test_empty_requirements_object_is_a_valid_no_override():
     assert normalize_institute_settings_update({}, {"stage_requirements": {}}) == {
-        "stage_requirements": {}
+        "stage_requirements": {},
+        "stage_policy_approved": False,
     }
+
+
+def test_stage_workflow_edit_clears_approval_unless_deliberately_reapproved():
+    explicit_requirements = {
+        stage: list(DEFAULT_STAGE_REQUIREMENTS[stage]) for stage in DEFAULT_STAGE_ORDER
+    }
+    existing = {
+        "stage_order": list(DEFAULT_STAGE_ORDER),
+        "stage_requirements": explicit_requirements,
+        "stage_policy_approved": True,
+    }
+
+    assert normalize_institute_settings_update(
+        existing,
+        {"stage_requirements": {stage: [] for stage in DEFAULT_STAGE_ORDER}},
+    )["stage_policy_approved"] is False
+    assert normalize_institute_settings_update(
+        existing,
+        {
+            "stage_requirements": {stage: [] for stage in DEFAULT_STAGE_ORDER},
+            "stage_policy_approved": True,
+        },
+    )["stage_policy_approved"] is True
+
+
+@pytest.mark.parametrize(
+    "existing,patch",
+    [
+        ({}, {"stage_policy_approved": True}),
+        (
+            {"stage_order": list(DEFAULT_STAGE_ORDER)},
+            {"stage_policy_approved": True},
+        ),
+        (
+            {},
+            {
+                "stage_order": list(DEFAULT_STAGE_ORDER),
+                "stage_requirements": {"GLUED": []},
+                "stage_policy_approved": True,
+            },
+        ),
+    ],
+    ids=["seed-only", "missing-requirements", "partial-requirements"],
+)
+def test_stage_policy_approval_rejects_seed_or_partial_profiles(existing, patch):
+    with pytest.raises(
+        InstituteSettingsValidationError,
+        match="fully define the effective stage policy",
+    ):
+        normalize_institute_settings_update(existing, patch)
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", [], {}])
+def test_stage_policy_approval_requires_a_boolean(value):
+    with pytest.raises(
+        InstituteSettingsValidationError,
+        match="stage_policy_approved must be true or false",
+    ):
+        normalize_institute_settings_update({}, {"stage_policy_approved": value})
 
 
 def test_invalid_stage_model_leaves_the_profile_untouched(as_admin, session_factory, tudo):
