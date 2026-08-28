@@ -31,6 +31,8 @@ export function productionStatusExplanation(component: ComponentOut): string {
   const label =
     component.production_status === "hold"
       ? t.components.productionHold
+      : component.production_status === "incomplete"
+        ? t.components.productionIncomplete
       : t.components.productionUnknown;
   const provisional =
     component.production_policy_source !== "missing_profile" &&
@@ -53,7 +55,12 @@ export function productionStatusExplanation(component: ComponentOut): string {
 }
 
 export function hasProductionStatusAttention(component: ComponentOut): boolean {
-  if (component.production_status === "hold") return true;
+  if (
+    component.production_status === "hold" ||
+    component.production_status === "incomplete"
+  ) {
+    return true;
+  }
   if (component.production_status !== "unknown") return false;
   return (component.production_status_reasons ?? []).some(
     (reason) => reason.code !== "provisional_profile",
@@ -74,6 +81,8 @@ export function ProductionStatusMarker({
   const label =
     component.production_status === "hold"
       ? t.components.productionHold
+      : component.production_status === "incomplete"
+        ? t.components.productionIncomplete
       : t.components.productionUnknown;
   const visibleLabel =
     mode === "full"
@@ -81,6 +90,8 @@ export function ProductionStatusMarker({
       : mode === "compact"
         ? component.production_status === "hold"
           ? "Hold"
+          : component.production_status === "incomplete"
+            ? t.components.productionIncompleteShort
           : t.components.productionUnknownShort
         : null;
   return (
@@ -90,7 +101,9 @@ export function ProductionStatusMarker({
       title={title}
       aria-label={title}
     >
-      <span aria-hidden="true">!</span>
+      <span aria-hidden="true">
+        {component.production_status === "incomplete" ? "?" : "!"}
+      </span>
       {visibleLabel !== null && <span aria-hidden="true">{visibleLabel}</span>}
     </span>
   );

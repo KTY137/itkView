@@ -77,10 +77,12 @@ export default function BoardScreen({
         const rank = (component: ComponentOut) =>
           component.production_status === "hold"
             ? 0
+            : component.production_status === "incomplete"
+              ? 1
             : component.production_status === "unknown" &&
                 hasProductionStatusAttention(component)
-              ? 1
-              : 2;
+              ? 2
+              : 3;
         return rank(a) - rank(b);
       });
 

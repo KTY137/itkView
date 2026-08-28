@@ -64,6 +64,7 @@ import {
   subscribeStagedPreviewPreference,
 } from "../stagedPreview";
 import type { StagedPreviewMode } from "../stagedPreview";
+import { readSyncModePreference } from "../syncPreferences";
 import { describeComponent, isDisplayableImage, outboxStatusChipClass, roleLabel, stageChipClass, stageLabel } from "../ui";
 import RegisterModuleForm from "./RegisterModuleForm";
 
@@ -107,9 +108,11 @@ function sortRows(rows: ComponentOut[], sortBy: string): ComponentOut[] {
       const rank = (component: ComponentOut) =>
         component.production_status === "hold"
           ? 0
-          : component.production_status === "unknown" && hasProductionStatusAttention(component)
+          : component.production_status === "incomplete"
             ? 1
-            : 2;
+          : component.production_status === "unknown" && hasProductionStatusAttention(component)
+            ? 2
+            : 3;
       sorted.sort((a, b) => rank(a) - rank(b) || bySn(a, b));
       break;
     }
@@ -464,7 +467,9 @@ export default function ComponentsScreen({
           ? true
           : productionFilter === "hold"
             ? r.production_status === "hold"
-            : r.production_status === "hold" || r.production_status === "unknown",
+            : r.production_status === "hold" ||
+              r.production_status === "incomplete" ||
+              r.production_status === "unknown",
       ),
     sortBy,
   );
@@ -508,8 +513,6 @@ export default function ComponentsScreen({
                   disabled={
                     componentSync.active ||
                     componentSync.discovering ||
-                    evidenceSync.active ||
-                    evidenceSync.discovering ||
                     selectedInstitute === ""
                   }
                   onClick={() => void handleSyncSelectedInstitute()}
@@ -524,8 +527,6 @@ export default function ComponentsScreen({
                   type="button"
                   className="btn"
                   disabled={
-                    componentSync.active ||
-                    componentSync.discovering ||
                     evidenceSync.active ||
                     evidenceSync.discovering ||
                     selectedInstitute === ""
@@ -538,6 +539,11 @@ export default function ComponentsScreen({
                     ? t.components.syncingEvidenceInstitute
                     : t.components.syncEvidenceInstitute}
                 </button>
+                <span className="chip neutral" title={t.components.syncModeHint}>
+                  {readSyncModePreference() === "lightweight"
+                    ? t.components.syncModeLightweight
+                    : t.components.syncModeStandard}
+                </span>
               </>
             )}
             {isAdmin && user?.institute_id === null && (
@@ -1385,11 +1391,15 @@ export function ComponentDetailPanel({
           className={
             detail.production_status === "hold"
               ? "production-status-banner hold"
+              : detail.production_status === "incomplete"
+                ? "production-status-banner incomplete"
               : "production-status-banner unknown"
           }
           role={detail.production_status === "hold" ? "alert" : "status"}
         >
-          <span aria-hidden="true">!</span>
+          <span aria-hidden="true">
+            {detail.production_status === "incomplete" ? "?" : "!"}
+          </span>
           <span>{productionStatusExplanation(detail)}</span>
         </div>
       )}

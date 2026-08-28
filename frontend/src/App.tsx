@@ -110,7 +110,7 @@ function initials(name: string): string {
 function AppShell() {
   const { user, demo, logout, isAdmin } = useAuth();
   const componentSync = useComponentSyncJob(!demo);
-  const evidenceSync = useEvidenceSyncJob(!demo, componentSync.job);
+  const evidenceSync = useEvidenceSyncJob(!demo);
   const [screen, setScreen] = useState<ScreenId>("board");
   const [health, setHealth] = useState<Health | null>(null);
   const [healthError, setHealthError] = useState(false);
@@ -274,6 +274,45 @@ function AppShell() {
           {brandCode && <span className="inst">{brandCode}</span>}
           {!product.workflowWrites && <span className="chip neutral">{t.nav.readOnly}</span>}
         </div>
+        {user !== null ? (
+          <div className="me rail-user" title={t.auth.signedInAs}>
+            <button
+              type="button"
+              className="me-account"
+              aria-current={screen === "account" ? "page" : undefined}
+              aria-label={`${t.nav.account}: ${user.display_name}`}
+              title={t.account.openSettings}
+              onClick={() => goToScreen("account")}
+            >
+              <span className="ava">{initials(user.display_name)}</span>
+              <span className="me-id">
+                <span className="me-name">{user.display_name}</span>
+                <span className="role">
+                  {roleName(user.role)}
+                  {user.institute_code ? ` · ${user.institute_code}` : ""}
+                </span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="logout-btn"
+              onClick={() => void logout()}
+              title={t.auth.signOut}
+              aria-label={t.auth.signOut}
+            >
+              ⏻
+            </button>
+          </div>
+        ) : (
+          <div className="me rail-user" title={demo ? t.auth.demoHint : undefined}>
+            <span className="ava">D</span>
+            <span className="me-id">
+              <span className="me-name">{t.auth.demoUser}</span>
+              <span className="role">{t.auth.demoRole}</span>
+            </span>
+          </div>
+        )}
+        <div className="rail-nav-scroll">
         <div className="grp">{t.nav.groupProduction}</div>
         <nav aria-label="Main navigation">
           {VISIBLE_PRODUCTION_SCREENS.map((s) => (
@@ -344,48 +383,11 @@ function AppShell() {
             </button>
           </>
         )}
+        </div>
         <div className="rail-bottom">
           {logoUrl !== null && (
             <div className="rail-logo">
               <img src={logoUrl} alt={brandCode ? `${brandCode} logo` : "Institute logo"} />
-            </div>
-          )}
-          {user !== null ? (
-            <div className="me" title={t.auth.signedInAs}>
-              <button
-                type="button"
-                className="me-account"
-                aria-current={screen === "account" ? "page" : undefined}
-                aria-label={`${t.nav.account}: ${user.display_name}`}
-                title={t.account.openSettings}
-                onClick={() => goToScreen("account")}
-              >
-                <span className="ava">{initials(user.display_name)}</span>
-                <span className="me-id">
-                  <span className="me-name">{user.display_name}</span>
-                  <span className="role">
-                    {roleName(user.role)}
-                    {user.institute_code ? ` · ${user.institute_code}` : ""}
-                  </span>
-                </span>
-              </button>
-              <button
-                type="button"
-                className="logout-btn"
-                onClick={() => void logout()}
-                title={t.auth.signOut}
-                aria-label={t.auth.signOut}
-              >
-                ⏻
-              </button>
-            </div>
-          ) : (
-            <div className="me" title={demo ? t.auth.demoHint : undefined}>
-              <span className="ava">D</span>
-              <span className="me-id">
-                <span className="me-name">{t.auth.demoUser}</span>
-                <span className="role">{t.auth.demoRole}</span>
-              </span>
             </div>
           )}
         </div>

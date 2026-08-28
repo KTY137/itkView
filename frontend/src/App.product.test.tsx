@@ -339,6 +339,12 @@ describe("compile-time product UI", () => {
 
     expect(document.querySelector(".rail .brand")).toHaveTextContent("itkView");
     expect(document.querySelector(".rail .brand")).toHaveTextContent("read-only");
+    expect(document.querySelector(".rail > .rail-user")).toContainElement(
+      screen.getByRole("button", { name: "Account: View Admin" }),
+    );
+    expect(document.querySelector(".rail-nav-scroll")).not.toContainElement(
+      screen.getByRole("button", { name: "Account: View Admin" }),
+    );
     expect(screen.getByText("itkView", { selector: ".crumb b" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Ingest log" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Staged" })).not.toBeInTheDocument();
@@ -346,8 +352,8 @@ describe("compile-time product UI", () => {
 
     await user.click(screen.getByRole("button", { name: "Components" }));
     expect(await screen.findByText("TUDO-M-001")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Sync components & evidence" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Refresh test evidence" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sync components" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sync test evidence" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Register module/ })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "TUDO-M-001" }));

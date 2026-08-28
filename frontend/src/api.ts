@@ -37,7 +37,13 @@ export type ComponentOut = {
   trashed: boolean;
   stale: boolean;
   synced_at: string;
-  production_status?: "clear" | "hold" | "unknown" | "not_applicable" | null;
+  production_status?:
+    | "clear"
+    | "hold"
+    | "incomplete"
+    | "unknown"
+    | "not_applicable"
+    | null;
   production_policy_source?: "profile_override" | "seed_default" | "missing_profile" | null;
   production_policy_approved?: boolean | null;
   production_status_reasons?: ProductionStatusReason[];
@@ -274,6 +280,7 @@ export type ComponentSyncResult = {
 
 export type EvidenceSyncJobResult = {
   institute_code: string;
+  sync_mode: "standard" | "lightweight";
   component_types: string[];
   components_processed: number;
   created: number;
@@ -1307,9 +1314,13 @@ export function startComponentSyncJob(instituteCode: string): Promise<ComponentS
 }
 
 /** Start (or join) the single-flight background evidence/attachment sync. */
-export function startEvidenceSyncJob(instituteCode: string): Promise<EvidenceSyncJob> {
+export function startEvidenceSyncJob(
+  instituteCode: string,
+  syncMode: "standard" | "lightweight" = "standard",
+): Promise<EvidenceSyncJob> {
+  const query = new URLSearchParams({ mode: syncMode });
   return request<EvidenceSyncJob>(
-    `/api/sync/jobs/evidence/${encodeURIComponent(instituteCode)}`,
+    `/api/sync/jobs/evidence/${encodeURIComponent(instituteCode)}?${query.toString()}`,
     { method: "POST" },
   );
 }

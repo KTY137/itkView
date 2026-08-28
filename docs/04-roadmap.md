@@ -31,6 +31,20 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-28)
 
+- **Appearance und manuelle Sync-Schnitte sind fuer itkView konfigurierbar
+  (2026-08-28):** Account bietet eine browserlokale Theme-Wahl
+  (`System`/`Light`/`Dark`) und vier barrierearme Akzentpaletten. Der Wert wird
+  vor dem ersten React-Render angewandt, damit beim Start kein falsches Theme
+  aufblitzt, und folgt im Systemmodus spaeteren OS-Wechseln. Komponenten- und
+  Test-Evidence-Sync sind als getrennte manuelle Jobs sichtbar und technisch
+  entkoppelt; nur der bewusst konfigurierte unbeaufsichtigte Refresh darf
+  weiterhin den vollstaendigen Folgejob ausloesen. Ein browserlokaler
+  `Lightweight`-Modus beschraenkt manuelle Evidence-Sweeps auf Module und laedt
+  keine neuen Attachment-Bytes, ohne vorhandene Spiegelzeilen oder Dateien zu
+  loeschen. Der Scope liegt restartfest im queued Job, automatische Retries
+  behalten ihn bei, und der Abschluss nennt den tatsaechlich ausgefuehrten
+  Modus.
+
 - **itkView ist als eigenes fail-closed Read-only-Release `v0.1.0`
   abgenommen (2026-08-28):** Der gemeinsam gepruefte Kern baut wahlweise
   itkView oder fuer explizite Regressionen itkFlow; das dedizierte
@@ -65,9 +79,11 @@ vom Design-Ziel abdriftet.
   tragen eine serverseitig gebatchte `production_status`-Projektion. Ein rotes
   `Production hold` erscheint erst, wenn ein Modul eine konfigurierte
   Requirement-Stage bereits ueberschritten hat und deren neueste lebende
-  Evidenz `failed`/`missing` ist; ein Test in der aktuellen Arbeitsstage ist
-  weiterhin normales WIP. Board, Komponentenliste, Family-Tree und Detailkopf
-  zeigen den textlich/barrierefrei erklaerten `!`-Marker, Hold-Karten verlieren
+  Evidenz `failed` ist; nur fehlende faellige Evidenz ergibt stattdessen
+  `incomplete` mit neutralem `Required tests missing`-Marker und ohne kritische
+  Einfaerbung. Ein Test in der aktuellen Arbeitsstage ist weiterhin normales
+  WIP. Board, Komponentenliste, Family-Tree und Detailkopf zeigen den
+  textlich/barrierefrei erklaerten Marker, Hold-Karten verlieren
   den irrefuehrenden gruenen `FINISHED`-Ton, Liste/Board koennen Holds priorisieren
   und die Detailseite zeigt einen persistenten Hinweis. Seed- oder nicht
   explizit mit `stage_policy_approved=true` abgenommene Profile heissen
@@ -726,7 +742,12 @@ vom Design-Ziel abdriftet.
   Auf-/Zuklapp- und Edit-Verhalten nicht mehr teilt. Nebenbefund: die
   aufgeklappte Lauf-Ansicht rendierte Dict-Ergebnisse (Metrologie, fuenf
   Map-Felder; Wire Bonding, acht) als woertlichen Text `[object Object]` —
-  Maps rendern jetzt als Position/Wert-Paare. Das Staged-Fenster zeigt pro
+  Maps rendern jetzt als Position/Wert-Paare. Ein Layout-Nachzug laesst jede
+  Map eine volle Zeile mit responsivem Paar-Grid belegen, sodass lange
+  Metrologie-Labels/Positionscodes nicht mehr ueberlappen; die breitere Shell
+  gibt der Worksheet-Spalte zusaetzlich mehr Raum. Der Account-Block sitzt fest
+  oberhalb der separat scrollenden Navigation und wandert bei langen Menues
+  nicht mehr aus dem sichtbaren Bereich. Das Staged-Fenster zeigt pro
   offenem Test-Upload jetzt Komponente, Testtyp und die vorgeschlagenen
   Messwerte im selben kompakten Worksheet-Format (Arrays/Maps als
   Umfangs-Chip); die Werte kommen aus den Preview-Ghost-Eintraegen, kein

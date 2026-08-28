@@ -95,7 +95,7 @@ def test_component_projection_marks_only_crossed_configured_gates(
     assert rows["CURRENT-FAILED"]["production_status"] == "clear"
     assert rows["CLEAR"]["production_status"] == "clear"
 
-    assert rows["PAST-MISSING"]["production_status"] == "hold"
+    assert rows["PAST-MISSING"]["production_status"] == "incomplete"
     assert rows["PAST-MISSING"]["production_status_reasons"] == [
         {
             "code": "required_test_missing",
@@ -164,7 +164,7 @@ def test_projection_is_fail_closed_for_unassessed_and_provisional_workflows(
     assert rows["SEED-WIP"]["production_status_reasons"] == [
         {"code": "provisional_profile", "stage": None, "test_type": None}
     ]
-    assert rows["SEED-HOLD"]["production_status"] == "hold"
+    assert rows["SEED-HOLD"]["production_status"] == "incomplete"
     assert {reason["code"] for reason in rows["SEED-HOLD"]["production_status_reasons"]} >= {
         "provisional_profile",
         "required_test_missing",

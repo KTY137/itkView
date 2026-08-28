@@ -32,10 +32,9 @@
   --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
   --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --shadow: 0 1px 2px rgba(15, 18, 24, 0.06), 0 4px 14px rgba(15, 18, 24, 0.06);
-  color-scheme: light dark;
+  color-scheme: light;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
+:root[data-theme="dark"] {
     --bg: #101215;
     --surface: #1a1c20;
     --surface2: #22252b;
@@ -56,8 +55,38 @@
     --stage-stitch: #33b3b8;
     --stage-bonded: #35b892;
     --stage-tested: #45bd77;
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 4px 16px rgba(0, 0, 0, 0.3);
-  }
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 4px 16px rgba(0, 0, 0, 0.3);
+  color-scheme: dark;
+}
+:root[data-accent="blue"] {
+  --accent: #2d6da8;
+  --accent-hi: #1f527f;
+  --accent-soft: rgba(45, 109, 168, 0.13);
+}
+:root[data-accent="teal"] {
+  --accent: #177c78;
+  --accent-hi: #0f5e5b;
+  --accent-soft: rgba(23, 124, 120, 0.13);
+}
+:root[data-accent="violet"] {
+  --accent: #7655a9;
+  --accent-hi: #593d86;
+  --accent-soft: rgba(118, 85, 169, 0.13);
+}
+:root[data-theme="dark"][data-accent="blue"] {
+  --accent: #65a8ec;
+  --accent-hi: #91c4f5;
+  --accent-soft: rgba(101, 168, 236, 0.16);
+}
+:root[data-theme="dark"][data-accent="teal"] {
+  --accent: #54bdb6;
+  --accent-hi: #7fd3ce;
+  --accent-soft: rgba(84, 189, 182, 0.16);
+}
+:root[data-theme="dark"][data-accent="violet"] {
+  --accent: #b49ae3;
+  --accent-hi: #cfbdf0;
+  --accent-soft: rgba(180, 154, 227, 0.16);
 }
 
 * {
@@ -86,7 +115,8 @@ button {
   display: grid;
   grid-template-columns: 216px 1fr;
   min-height: 100vh;
-  max-width: 1440px;
+  width: 100%;
+  max-width: 1920px;
   margin: 0 auto;
 }
 .rail {
@@ -96,6 +126,10 @@ button {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow: hidden;
 }
 .brand {
   display: flex;
@@ -123,6 +157,13 @@ button {
   letter-spacing: 0.09em;
   color: var(--muted);
   padding: 14px 10px 6px;
+}
+.rail-nav-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
 }
 .nav-btn {
   display: flex;
@@ -191,6 +232,13 @@ button {
   align-items: center;
   color: var(--ink2);
   font-size: 12.5px;
+}
+.rail .me.rail-user {
+  flex: 0 0 auto;
+  border-top: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 10px 10px;
+  margin-bottom: 2px;
 }
 .me-account {
   flex: 1 1 auto;
@@ -655,6 +703,10 @@ code {
   color: var(--crit-text);
   background: color-mix(in srgb, var(--crit) 9%, var(--surface));
 }
+.production-status-marker.incomplete {
+  color: var(--warn-text);
+  background: var(--surface);
+}
 .production-status-marker.unknown {
   color: var(--warn-text);
   background: color-mix(in srgb, var(--warn) 10%, var(--surface));
@@ -690,6 +742,11 @@ code {
 .production-status-banner.hold {
   color: var(--crit-text);
   background: color-mix(in srgb, var(--crit) 8%, var(--surface));
+}
+.production-status-banner.incomplete {
+  color: var(--ink2);
+  border-color: var(--line);
+  background: var(--surface);
 }
 .production-status-banner.unknown {
   color: var(--warn-text);
@@ -1069,10 +1126,20 @@ code {
     max-width: 100vw;
     padding: 8px 10px;
     overflow-x: auto;
+    overflow-y: hidden;
+    position: static;
+    height: auto;
     overscroll-behavior-x: contain;
     scrollbar-width: thin;
     border-right: none;
     border-bottom: 1px solid var(--line);
+  }
+  .rail-nav-scroll {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+    overflow: visible;
   }
   .rail .brand {
     position: sticky;
@@ -1109,10 +1176,13 @@ code {
   .rail-logo {
     display: none;
   }
-  .rail .me {
+  .rail .me,
+  .rail .me.rail-user {
     flex: 0 0 auto;
     padding: 0 4px 0 10px;
+    margin: 0;
     border-top: 0;
+    border-bottom: 0;
     border-left: 1px solid var(--line);
   }
   .rail .me-id {
@@ -1304,7 +1374,7 @@ code {
 /* ---- Two-column detail ---- */
 .det {
   display: grid;
-  grid-template-columns: minmax(320px, 5fr) minmax(320px, 6fr);
+  grid-template-columns: minmax(280px, 4fr) minmax(0, 8fr);
   gap: 16px;
   align-items: start;
 }
@@ -2287,6 +2357,9 @@ code {
   padding: 0;
   border: 0;
 }
+.preference-options-two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
 .preference-options legend {
   position: absolute;
   width: 1px;
@@ -2330,6 +2403,62 @@ code {
   font-size: 11.5px;
   line-height: 1.4;
 }
+.accent-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 0;
+  padding: 0;
+  border: 0;
+}
+.accent-options legend {
+  flex-basis: 100%;
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.accent-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface2);
+  color: var(--ink2);
+  cursor: pointer;
+}
+.accent-option:has(input:checked) {
+  border-color: var(--accent);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--accent-soft);
+}
+.accent-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.accent-swatch {
+  width: 14px;
+  height: 14px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 50%;
+  background: #b4641f;
+}
+.accent-option[data-accent-preview="blue"] .accent-swatch {
+  background: #2d6da8;
+}
+.accent-option[data-accent-preview="teal"] .accent-swatch {
+  background: #177c78;
+}
+.accent-option[data-accent-preview="violet"] .accent-swatch {
+  background: #7655a9;
+}
 
 @media (max-width: 900px) {
   .account-layout {
@@ -2347,7 +2476,8 @@ code {
   .account-connection-meta,
   .account-share-list,
   .account-share-form,
-  .preference-options {
+  .preference-options,
+  .preference-options-two {
     grid-template-columns: 1fr;
   }
   .connection-chip {
@@ -2436,6 +2566,11 @@ code {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  min-width: 0;
+}
+.run {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .run + .run {
   border-top: 1px solid var(--line);
@@ -2472,9 +2607,10 @@ code {
    collapses to one when the pane is narrow, without a media query. */
 .measure-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
   gap: 4px 16px;
   margin: 0;
+  min-width: 0;
 }
 .measure {
   display: flex;
@@ -2483,6 +2619,7 @@ code {
   gap: 10px;
   padding: 3px 0;
   border-bottom: 1px dotted var(--line);
+  min-width: 0;
 }
 .measure dt {
   color: var(--ink2);
@@ -2490,11 +2627,40 @@ code {
   /* Long PDB names ("Weight of glue under hybrid 1 [g]") must wrap rather
      than push the value out of the column. */
   min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
 }
 .measure dd {
   margin: 0;
   font-size: 12.5px;
-  white-space: nowrap;
+  min-width: 0;
+  max-width: 60%;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.map-measure {
+  grid-column: 1 / -1;
+  display: block;
+  padding: 8px 0 10px;
+}
+.map-measure > dt {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--ink);
+  font-weight: 650;
+}
+.map-measure > dd {
+  width: 100%;
+  max-width: none;
+  text-align: left;
+}
+.map-measure > dd > .measure-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  gap: 2px 20px;
+}
+.map-measure .measure dd {
+  white-space: normal;
+  text-align: right;
 }
 
 .curve {

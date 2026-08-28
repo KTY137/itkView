@@ -39,10 +39,12 @@ from app.sync_jobs import (
 class RecordingManager:
     def __init__(self) -> None:
         self.started: list[int] = []
+        self.component_followups: list[bool] = []
         self.evidence_started: list[int] = []
 
-    def start(self, job_id: int, fetcher) -> None:
+    def start(self, job_id: int, fetcher, *, follow_with_evidence: bool = True) -> None:
         self.started.append(job_id)
+        self.component_followups.append(follow_with_evidence)
 
     def start_evidence(self, job_id: int) -> None:
         self.evidence_started.append(job_id)
@@ -78,6 +80,7 @@ def test_component_job_is_global_single_flight_and_discoverable(
     assert second.status_code == 202
     assert second.json()["id"] == body["id"]
     assert manager.started == [body["id"]]
+    assert manager.component_followups == [False]
 
     active = client.get("/api/sync/jobs/active", params={"kind": "components"})
     assert active.status_code == 200
@@ -620,6 +623,70 @@ def test_evidence_job_mirrors_detail_and_attachments_from_profile_scope(
     assert client.get("/api/sync/jobs/active", params={"kind": "evidence"}).status_code == 204
 
 
+def test_lightweight_evidence_sync_limits_scope_and_skips_new_attachment_bytes(
+    client: TestClient,
+    session_factory,
+    tudo: dict,
+    as_operator,
+    tmp_path,
+):
+    client.app.state.settings.attachment_dir = str(tmp_path / "attachments")
+    with session_factory() as session:
+        session.add_all(
+            [
+                Component(
+                    sn="20USEM00000111",
+                    component_type="MODULE",
+                    type_code="R5M0",
+                    stage="GLUED",
+                    location="TUDO",
+                    institute_code="TUDO",
+                ),
+                Component(
+                    sn="20USES00000111",
+                    component_type="SENSOR",
+                    type_code="S",
+                    stage="READY",
+                    location="TUDO",
+                    institute_code="TUDO",
+                ),
+            ]
+        )
+        session.commit()
+
+    manager = RecordingManager()
+    client.app.state.sync_job_manager = manager
+    queued = client.post(
+        "/api/sync/jobs/evidence/TUDO", params={"mode": "lightweight"}
+    )
+    assert queued.status_code == 202
+    assert queued.json()["result"] is None
+    job_id = queued.json()["id"]
+    with session_factory() as session:
+        assert session.get(SyncJob, job_id).result["_sync_mode"] == "lightweight"
+
+    fake_client = _EvidenceClient()
+    run_evidence_sync_job(
+        session_factory,
+        client.app.state.settings,
+        lambda settings, access_codes: _EvidenceGateway(fake_client),
+        job_id,
+    )
+
+    status = client.get(f"/api/sync/jobs/{job_id}").json()
+    assert status["status"] == "succeeded"
+    assert status["result"]["sync_mode"] == "lightweight"
+    assert status["result"]["component_types"] == ["MODULE"]
+    assert status["result"]["components_processed"] == 1
+    assert status["result"]["attachments_total"] == 0
+    assert status["result"]["attachments_downloaded"] == 0
+    assert fake_client.component_requests == ["20USEM00000111"]
+    with session_factory() as session:
+        attachment = session.scalar(select(TestRunAttachment))
+        assert attachment is None
+    assert not (tmp_path / "attachments").exists()
+
+
 def test_manager_wires_component_success_to_evidence_enqueue(client, session_factory):
     class _RecordingExecutor:
         def __init__(self):
@@ -642,6 +709,12 @@ def test_manager_wires_component_success_to_evidence_enqueue(client, session_fac
     assert function is run_component_sync_job
     assert args[:4] == (session_factory, client.app.state.settings, fetcher, 123)
     assert args[4] == manager.enqueue_evidence
+
+    manager.start(124, fetcher, follow_with_evidence=False)
+    function, args = executor.call
+    assert function is run_component_sync_job
+    assert args[:4] == (session_factory, client.app.state.settings, fetcher, 124)
+    assert args[4] is None
 
 
 def test_evidence_lease_converges_without_stacking(session_factory, tudo: dict, as_operator):

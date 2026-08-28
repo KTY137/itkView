@@ -60,6 +60,8 @@ EVIDENCE_SYNC_KIND = "evidence"
 EVIDENCE_SYNC_ACTIVE_KEY_PREFIX = "evidence:"
 EVIDENCE_FOLLOWUP_PENDING_KEY = "_evidence_followup_pending"
 EVIDENCE_FOLLOWUP_RETRY_KEY = "_evidence_followup_retry"
+EVIDENCE_SYNC_MODE_KEY = "_sync_mode"
+EvidenceSyncMode = Literal["standard", "lightweight"]
 FOLLOWUP_RETRY_DUE = "due"
 FOLLOWUP_RETRY_BLOCKED = "blocked"
 FOLLOWUP_RETRY_EXHAUSTED = "exhausted"
@@ -174,6 +176,7 @@ class EvidenceSyncContext:
     # is reconstructed from that component row, so the process-local timer
     # must re-enter reconciliation rather than enqueue blindly.
     followup_retry_managed: bool = False
+    sync_mode: EvidenceSyncMode = "standard"
 
 
 def auto_retry_requested_by(original: str) -> str:
@@ -279,6 +282,7 @@ def acquire_evidence_sync_lease(
     institute_code: str,
     requested_by: str,
     user_id: int | None,
+    sync_mode: EvidenceSyncMode = "standard",
 ) -> SyncLease:
     """Acquire one evidence-sync lease per institute without duplicate jobs.
 
@@ -288,6 +292,8 @@ def acquire_evidence_sync_lease(
     manager's single worker continues to serialize the actual writes.
     """
 
+    if sync_mode not in ("standard", "lightweight"):
+        raise ValueError(f"Unsupported evidence sync mode '{sync_mode}'.")
     last_busy: OperationalError | None = None
     active_key = evidence_sync_active_key(institute_code)
     for attempt in range(SYNC_LEASE_MAX_ATTEMPTS):
@@ -313,7 +319,12 @@ def acquire_evidence_sync_lease(
                 current=0,
                 total=None,
                 percent=None,
-                message="Evidence sync is queued.",
+                message=(
+                    "Lightweight evidence sync is queued."
+                    if sync_mode == "lightweight"
+                    else "Evidence sync is queued."
+                ),
+                result={EVIDENCE_SYNC_MODE_KEY: sync_mode},
                 requested_by=requested_by,
                 user_id=user_id,
                 active_key=active_key,
@@ -467,9 +478,21 @@ class SyncJobManager:
         self._watch_thread: threading.Thread | None = None
         self._resume_evidence_followups()
 
-    def start(self, job_id: int, fetcher: ComponentFetcher) -> None:
+    def start(
+        self,
+        job_id: int,
+        fetcher: ComponentFetcher,
+        *,
+        follow_with_evidence: bool = True,
+    ) -> None:
         def schedule_retry(context: ComponentSyncContext) -> None:
-            self._schedule_retry(lambda: self._start_component_retry(fetcher, context))
+            self._schedule_retry(
+                lambda: self._start_component_retry(
+                    fetcher,
+                    context,
+                    follow_with_evidence=follow_with_evidence,
+                )
+            )
 
         self._watch_queued(job_id)
         try:
@@ -479,7 +502,7 @@ class SyncJobManager:
                 self._settings,
                 fetcher,
                 job_id,
-                self.enqueue_evidence,
+                self.enqueue_evidence if follow_with_evidence else None,
                 schedule_retry,
             )
         except Exception:
@@ -781,6 +804,7 @@ class SyncJobManager:
         institute_code: str,
         requested_by: str,
         user_id: int,
+        sync_mode: EvidenceSyncMode = "standard",
     ) -> SyncLease:
         """Queue the post-component evidence mirror, converging on one live job."""
 
@@ -790,6 +814,7 @@ class SyncJobManager:
                 institute_code=institute_code,
                 requested_by=requested_by,
                 user_id=user_id,
+                sync_mode=sync_mode,
             )
         if lease.created:
             try:
@@ -831,7 +856,11 @@ class SyncJobManager:
         self._schedule_retry(lambda: self._start_evidence_retry(context))
 
     def _start_component_retry(
-        self, fetcher: ComponentFetcher, context: ComponentSyncContext
+        self,
+        fetcher: ComponentFetcher,
+        context: ComponentSyncContext,
+        *,
+        follow_with_evidence: bool = True,
     ) -> None:
         lease: SyncLease | None = None
         try:
@@ -843,7 +872,11 @@ class SyncJobManager:
                     user_id=context.user_id,
                 )
             if lease.created:
-                self.start(lease.job.id, fetcher)
+                self.start(
+                    lease.job.id,
+                    fetcher,
+                    follow_with_evidence=follow_with_evidence,
+                )
         except Exception:
             # Lease creation commits before executor submission. A rejected
             # submit must release that new lease instead of letting the queued
@@ -867,6 +900,7 @@ class SyncJobManager:
                 context.institute.code,
                 auto_retry_requested_by(context.requested_by),
                 context.user_id,
+                context.sync_mode,
             )
         except Exception:
             log.error("The automatic evidence sync retry could not be queued.")
@@ -1163,7 +1197,12 @@ def run_inline_component_sync(
     return result
 
 
-def _evidence_component_types(institute: InstituteProfile) -> tuple[str, ...]:
+def _evidence_component_types(
+    institute: InstituteProfile,
+    sync_mode: EvidenceSyncMode = "standard",
+) -> tuple[str, ...]:
+    if sync_mode == "lightweight":
+        return ("MODULE",)
     raw = (institute.settings or {}).get("evidence_component_types")
     if not isinstance(raw, list):
         return DEFAULT_EVIDENCE_COMPONENT_TYPES
@@ -1213,6 +1252,10 @@ def _claim_evidence_job(
         if expected_active_key is None:
             return None
         canonical_active_key = evidence_sync_active_key(job.institute_code)
+        raw_sync_mode = (job.result or {}).get(EVIDENCE_SYNC_MODE_KEY)
+        sync_mode: EvidenceSyncMode = (
+            "lightweight" if raw_sync_mode == "lightweight" else "standard"
+        )
         started = utcnow()
         try:
             claimed = session.execute(
@@ -1259,6 +1302,7 @@ def _claim_evidence_job(
             requested_by=requested_by,
             active_key=canonical_active_key,
             auto_retry=requested_by.startswith(AUTO_RETRY_REQUESTED_BY_PREFIX),
+            sync_mode=sync_mode,
         )
 
 
@@ -1443,7 +1487,9 @@ def run_evidence_sync_job(
                 encryption_key=settings.pdb_credential_encryption_key,
             )
         gateway = gateway_factory(settings, access_codes)
-        component_types = _evidence_component_types(context.institute)
+        component_types = _evidence_component_types(
+            context.institute, context.sync_mode
+        )
         with session_factory() as scope_session:
             component_sns = list(
                 scope_session.scalars(
@@ -1852,12 +1898,13 @@ def run_evidence_sync_job(
         # download loop.
         attachment_plan: list[tuple[str, list[dict[str, Any]]]] = []
         attachment_total = 0
-        for component_sn in component_sns:
-            with session_factory() as plan_session:
-                descriptors = pending_attachments(plan_session, component_sn)
-            if descriptors:
-                attachment_plan.append((component_sn, descriptors))
-                attachment_total += len(descriptors)
+        if context.sync_mode == "standard":
+            for component_sn in component_sns:
+                with session_factory() as plan_session:
+                    descriptors = pending_attachments(plan_session, component_sn)
+                if descriptors:
+                    attachment_plan.append((component_sn, descriptors))
+                    attachment_total += len(descriptors)
         attachment_stats = AttachmentSyncStats()
         processed_files = 0
         _update_progress(
@@ -1866,7 +1913,11 @@ def run_evidence_sync_job(
             "attachments",
             0,
             attachment_total,
-            message=f"Mirroring {attachment_total} attachment files.",
+            message=(
+                "Lightweight sync keeps existing attachments and skips new file downloads."
+                if context.sync_mode == "lightweight"
+                else f"Mirroring {attachment_total} attachment files."
+            ),
         )
         def attachment_heartbeat() -> None:
             # Fired by the store after every processed file and before every
@@ -1961,6 +2012,7 @@ def run_evidence_sync_job(
         )
         result = {
             "institute_code": context.institute.code,
+            "sync_mode": context.sync_mode,
             "component_types": list(component_types),
             "components_processed": component_total,
             "created": evidence_stats.created,

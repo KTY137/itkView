@@ -200,7 +200,22 @@ def get_db(request: Request) -> Iterator[Session]:
 def _sync_job_out(job: SyncJob) -> SyncJobOut:
     """Serialize heartbeat state with the server's canonical stale clock."""
 
-    return SyncJobOut.model_validate(job).model_copy(
+    # Queued evidence jobs keep their requested scope in a private result key
+    # so a process restart cannot silently turn lightweight into standard.
+    # The public contract still exposes no result until the worker completes.
+    raw_result = job.result
+    public_result = (
+        None
+        if isinstance(raw_result, dict) and "institute_code" not in raw_result
+        else raw_result
+    )
+    payload = {
+        name: getattr(job, name)
+        for name in SyncJobOut.model_fields
+        if hasattr(job, name)
+    }
+    payload["result"] = public_result
+    return SyncJobOut.model_validate(payload).model_copy(
         update={
             "heartbeat_stale": _job_heartbeat_stale(job),
             "stale_after_seconds": int(SYNC_HEARTBEAT_GRACE.total_seconds()),
@@ -2387,6 +2402,7 @@ def start_component_sync_job(
         request.app.state.sync_job_manager.start(
             lease.job.id,
             request.app.state.component_fetcher,
+            follow_with_evidence=False,
         )
     except Exception as exc:
         fail_sync_job(request.app.state.session_factory, lease.job.id, exc)
@@ -2403,6 +2419,7 @@ def start_component_sync_job(
 def start_evidence_sync_job(
     institute_code: str,
     request: Request,
+    mode: Literal["standard", "lightweight"] = Query(default="standard"),
     db: Session = Depends(get_db),
     user: User = Depends(require_operator),
 ) -> SyncJobOut:
@@ -2421,6 +2438,7 @@ def start_evidence_sync_job(
             institute_code=institute.code,
             requested_by=user.email,
             user_id=user.id,
+            sync_mode=mode,
         )
     except SyncLeaseBusy as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

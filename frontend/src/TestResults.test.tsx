@@ -98,6 +98,7 @@ describe("generated plots in expanded test results", () => {
     expect(screen.getAllByText("SENSOR_RIGHT").length).toBeGreaterThan(0);
     expect(screen.getAllByText("1.25").length).toBeGreaterThan(0);
     expect(screen.getAllByText("-0.5").length).toBeGreaterThan(0);
+    expect(container.querySelector(".map-measure > dd > .measure-grid")).not.toBeNull();
   });
 
   it("keeps finite numeric pairs in the table without inventing plot axes", () => {
@@ -121,6 +122,34 @@ describe("generated plots in expanded test results", () => {
     expect(screen.getByText(t.testResults.numericPair("-0.3", "0.4"))).toBeInTheDocument();
     expect(container).not.toHaveTextContent("Δx");
     expect(container).not.toHaveTextContent("Δy");
+  });
+
+  it("gives every map result its own full-width responsive value block", () => {
+    const metrology = run(
+      {
+        INTERBOARD_GLUE_THICKNESS: {
+          ABC_R5H0_0: 147.9588,
+          ABC_R5H0_1: 159.0245,
+        },
+        HYBRID_POSITION_DEVIATION: {
+          H_R5H0_P1: [-125, 525],
+          H_R5H0_P2: [-36, -21],
+        },
+      },
+      {
+        INTERBOARD_GLUE_THICKNESS: "Interboard glue thickness [um]",
+        HYBRID_POSITION_DEVIATION: "Hybrid position deviation [um]",
+      },
+    );
+
+    const { container } = render(<RunScalars run={metrology} />);
+
+    const maps = [...container.querySelectorAll(".map-measure")];
+    expect(maps).toHaveLength(2);
+    for (const map of maps) {
+      expect(map.parentElement).toHaveClass("measure-grid");
+      expect(map.querySelector(":scope > dd > .measure-grid")).not.toBeNull();
+    }
   });
 
   it("does not let a categorical fallback replace an original numeric-array curve", () => {

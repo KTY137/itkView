@@ -40,6 +40,17 @@ const CLEAR: ComponentOut = {
   production_status_reasons: [],
 };
 
+const INCOMPLETE: ComponentOut = {
+  ...HELD,
+  sn: "MODULE-INCOMPLETE",
+  local_name: "Module with missing tests",
+  production_status: "incomplete",
+  production_policy_source: "profile_override",
+  production_status_reasons: [
+    { code: "required_test_missing", stage: "GLUED", test_type: "MODULE_METROLOGY" },
+  ],
+};
+
 beforeEach(() => {
   vi.mocked(getComponents).mockResolvedValue([CLEAR, HELD]);
 });
@@ -88,4 +99,21 @@ it("does not claim a configured workflow when the institute profile is missing",
     name: /No institute workflow profile is available/,
   });
   expect(marker).not.toHaveAccessibleName(/Based on the configured workflow/);
+});
+
+it("flags missing required tests without applying the critical card tone", async () => {
+  vi.mocked(getComponents).mockResolvedValue([INCOMPLETE]);
+
+  render(<BoardScreen onOpen={vi.fn()} onAssemble={vi.fn()} />);
+
+  expect(
+    await screen.findByRole("img", { name: /Required tests missing/ }),
+  ).toHaveTextContent("?");
+  expect(screen.getByRole("button", { name: /Module with missing tests/ })).toHaveAttribute(
+    "data-tone",
+    "good",
+  );
+  expect(screen.getByRole("button", { name: /Module with missing tests/ })).not.toHaveClass(
+    "has-production-hold",
+  );
 });

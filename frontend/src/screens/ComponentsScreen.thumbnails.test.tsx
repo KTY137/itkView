@@ -88,12 +88,12 @@ it("uses the source-qualified thumbnail locator in the component list", async ()
   });
 });
 
-it("shows the configured-gate hold beside a module in the component overview", async () => {
+it("shows missing required tests without a production hold in the component overview", async () => {
   vi.mocked(getComponents).mockResolvedValue([
     {
       ...COMPONENT,
       stage: "FINISHED",
-      production_status: "hold",
+      production_status: "incomplete",
       production_policy_source: "profile_override",
       production_policy_approved: true,
       production_status_reasons: [
@@ -117,9 +117,10 @@ it("shows the configured-gate hold beside a module in the component overview", a
 
   expect(
     await screen.findByLabelText(
-      /Production hold: MODULE_METROLOGY is missing at the configured Glued gate/,
+      /Required tests missing: MODULE_METROLOGY is missing at the configured Glued gate/,
     ),
-  ).toHaveTextContent("!Hold");
+  ).toHaveTextContent("?Tests missing");
+  expect(screen.queryByLabelText(/Production hold/)).not.toBeInTheDocument();
 });
 
 it("includes provisional-only unknown modules in the holds and unassessed filter", async () => {

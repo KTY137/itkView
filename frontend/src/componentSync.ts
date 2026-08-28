@@ -7,6 +7,7 @@ import {
 } from "./api";
 import type { SyncJob, SyncJobKind } from "./api";
 import { parseApiTimestamp } from "./i18n";
+import { readSyncModePreference } from "./syncPreferences";
 
 const POLL_INTERVAL_MS = 1_000;
 const POLL_RETRY_MS = 3_000;
@@ -344,27 +345,14 @@ export function useComponentSyncJob(enabled = true): ComponentSyncController {
 }
 
 /**
- * App-shell-owned evidence-sync state. A successful component job triggers a
- * bounded rediscovery so its automatically queued evidence follow-up becomes
- * visible despite the small commit/enqueue race.
+ * App-shell-owned evidence-sync state. Manual component and evidence jobs are
+ * independent; each evidence start and retry uses the current browser scope.
  */
-export function useEvidenceSyncJob(
-  enabled = true,
-  componentJob: SyncJob | null = null,
-): EvidenceSyncController {
-  const followUpDiscoveryKey =
-    componentJob?.kind === "components" && componentJob.status === "succeeded"
-      ? componentJob.id
-      : null;
-  const followUpInstituteCode =
-    componentJob?.kind === "components" && componentJob.status === "succeeded"
-      ? componentJob.institute_code
-      : null;
-  return usePersistedSyncJob(
-    "evidence",
-    startEvidenceSyncJob,
-    enabled,
-    followUpDiscoveryKey,
-    followUpInstituteCode,
+export function useEvidenceSyncJob(enabled = true): EvidenceSyncController {
+  const startWithPreference = useCallback(
+    (instituteCode: string) =>
+      startEvidenceSyncJob(instituteCode, readSyncModePreference()),
+    [],
   );
+  return usePersistedSyncJob("evidence", startWithPreference, enabled);
 }

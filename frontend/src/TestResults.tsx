@@ -370,7 +370,7 @@ export function RunScalars({ run }: { run: DisplayTestRun }) {
       {scalars.map(([code, value]) => {
         const entries = asMap(value);
         return (
-          <div className="measure" key={code}>
+          <div className={entries === null ? "measure" : "measure map-measure"} key={code}>
             <dt title={code}>{label(run, code)}</dt>
             {entries === null ? (
               <dd className={value === null || value === undefined ? "muted" : "mono"}>

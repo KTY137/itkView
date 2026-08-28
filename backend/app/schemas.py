@@ -74,7 +74,9 @@ class ComponentOut(BaseModel):
     # Calculated from the institute stage model and the local evidence mirror
     # by component read endpoints. Optional defaults keep non-overview helper
     # endpoints backwards compatible until they opt into the projection.
-    production_status: Literal["clear", "hold", "unknown", "not_applicable"] | None = None
+    production_status: Literal[
+        "clear", "hold", "incomplete", "unknown", "not_applicable"
+    ] | None = None
     production_policy_source: Literal[
         "profile_override", "seed_default", "missing_profile"
     ] | None = None
@@ -99,6 +101,7 @@ class ComponentSyncOut(BaseModel):
 
 class EvidenceSyncJobResultOut(BaseModel):
     institute_code: str
+    sync_mode: Literal["standard", "lightweight"] = "standard"
     component_types: list[str]
     components_processed: int
     created: int

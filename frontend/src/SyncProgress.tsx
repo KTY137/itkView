@@ -163,7 +163,7 @@ function resultLabel(job: SyncJob): string | null {
       job.result.skipped,
     );
   }
-  return t.syncJob.evidenceResult(
+  return `${t.syncJob.evidenceModeResult(job.result.sync_mode)} ${t.syncJob.evidenceResult(
     job.result.components_processed,
     job.result.created,
     job.result.updated,
@@ -175,7 +175,7 @@ function resultLabel(job: SyncJob): string | null {
     job.result.attachments_skipped ?? 0,
     job.result.attachments_authentication_required ?? 0,
     job.result.attachments_total,
-  );
+  )}`;
 }
 
 /** Compact, clickable telemetry shown in the sticky topbar on every screen. */

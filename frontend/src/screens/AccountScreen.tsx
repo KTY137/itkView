@@ -8,6 +8,15 @@ import {
   testPdbConnection,
 } from "../api";
 import type { PdbConnectionOut, PdbConnectionState } from "../api";
+import {
+  readAppearancePreference,
+  writeAppearancePreference,
+} from "../appearance";
+import type {
+  AppearanceAccent,
+  AppearancePreference,
+  AppearanceTheme,
+} from "../appearance";
 import { useAuth } from "../auth";
 import { formatTimestamp, roleName, t } from "../i18n";
 import { product } from "../product";
@@ -16,6 +25,11 @@ import {
   writeStagedPreviewPreference,
 } from "../stagedPreview";
 import type { StagedPreviewMode } from "../stagedPreview";
+import {
+  readSyncModePreference,
+  writeSyncModePreference,
+} from "../syncPreferences";
+import type { SyncMode } from "../syncPreferences";
 import ShareCredentialsPanel from "../ShareCredentialsPanel";
 
 type BusyAction = "connect" | "test" | "disconnect" | null;
@@ -84,10 +98,24 @@ export default function AccountScreen() {
   const [stagedPreviewMode, setStagedPreviewMode] = useState<StagedPreviewMode>(() =>
     readStagedPreviewPreference(),
   );
+  const [appearance, setAppearance] = useState<AppearancePreference>(() =>
+    readAppearancePreference(),
+  );
+  const [syncMode, setSyncMode] = useState<SyncMode>(() => readSyncModePreference());
 
   function changeStagedPreviewMode(mode: StagedPreviewMode) {
     setStagedPreviewMode(mode);
     writeStagedPreviewPreference(mode);
+  }
+
+  function changeAppearance(next: AppearancePreference) {
+    setAppearance(next);
+    writeAppearancePreference(next);
+  }
+
+  function changeSyncMode(mode: SyncMode) {
+    setSyncMode(mode);
+    writeSyncModePreference(mode);
   }
 
   useEffect(() => {
@@ -116,6 +144,8 @@ export default function AccountScreen() {
           <h1>{t.nav.account}</h1>
         </div>
         <p className="state-note">{t.account.requiresSignIn}</p>
+        <AppearancePreferences preference={appearance} onChange={changeAppearance} />
+        <SyncPreferences mode={syncMode} onChange={changeSyncMode} />
         {product.workflowWrites && (
           <StagedPreviewPreferences
             mode={stagedPreviewMode}
@@ -470,6 +500,8 @@ export default function AccountScreen() {
           ) : null}
         </section>
         <ShareCredentialsPanel />
+        <AppearancePreferences preference={appearance} onChange={changeAppearance} />
+        <SyncPreferences mode={syncMode} onChange={changeSyncMode} />
         {product.workflowWrites && (
           <StagedPreviewPreferences
             mode={stagedPreviewMode}
@@ -478,6 +510,108 @@ export default function AccountScreen() {
         )}
       </div>
     </div>
+  );
+}
+
+function AppearancePreferences({
+  preference,
+  onChange,
+}: {
+  preference: AppearancePreference;
+  onChange: (preference: AppearancePreference) => void;
+}) {
+  const themes: Array<{ mode: AppearanceTheme; label: string; hint: string }> = [
+    { mode: "system", label: t.account.themeSystem, hint: t.account.themeSystemHint },
+    { mode: "light", label: t.account.themeLight, hint: t.account.themeLightHint },
+    { mode: "dark", label: t.account.themeDark, hint: t.account.themeDarkHint },
+  ];
+  const accents: Array<{ accent: AppearanceAccent; label: string }> = [
+    { accent: "copper", label: t.account.accentCopper },
+    { accent: "blue", label: t.account.accentBlue },
+    { accent: "teal", label: t.account.accentTeal },
+    { accent: "violet", label: t.account.accentViolet },
+  ];
+
+  return (
+    <section className="panel account-panel account-preferences" aria-labelledby="appearance-title">
+      <h2 className="section-title" id="appearance-title">{t.account.appearanceTitle}</h2>
+      <p className="account-panel-copy">{t.account.appearanceDescription}</p>
+      <fieldset className="preference-options">
+        <legend>{t.account.themeTitle}</legend>
+        {themes.map((option) => (
+          <label className="preference-option" key={option.mode}>
+            <input
+              type="radio"
+              name="appearance-theme"
+              value={option.mode}
+              checked={preference.theme === option.mode}
+              onChange={() => onChange({ ...preference, theme: option.mode })}
+            />
+            <span>
+              <strong>{option.label}</strong>
+              <small>{option.hint}</small>
+            </span>
+          </label>
+        ))}
+      </fieldset>
+      <fieldset className="accent-options">
+        <legend>{t.account.accentTitle}</legend>
+        {accents.map((option) => (
+          <label className="accent-option" key={option.accent} data-accent-preview={option.accent}>
+            <input
+              type="radio"
+              name="appearance-accent"
+              value={option.accent}
+              checked={preference.accent === option.accent}
+              onChange={() => onChange({ ...preference, accent: option.accent })}
+            />
+            <span className="accent-swatch" aria-hidden="true" />
+            <span>{option.label}</span>
+          </label>
+        ))}
+      </fieldset>
+    </section>
+  );
+}
+
+function SyncPreferences({
+  mode,
+  onChange,
+}: {
+  mode: SyncMode;
+  onChange: (mode: SyncMode) => void;
+}) {
+  const options: Array<{ mode: SyncMode; label: string; hint: string }> = [
+    { mode: "standard", label: t.account.syncStandard, hint: t.account.syncStandardHint },
+    {
+      mode: "lightweight",
+      label: t.account.syncLightweight,
+      hint: t.account.syncLightweightHint,
+    },
+  ];
+  return (
+    <section className="panel account-panel account-preferences" aria-labelledby="sync-preferences-title">
+      <h2 className="section-title" id="sync-preferences-title">{t.account.syncPreferencesTitle}</h2>
+      <p className="account-panel-copy">{t.account.syncPreferencesDescription}</p>
+      <fieldset className="preference-options preference-options-two">
+        <legend>{t.account.syncModeTitle}</legend>
+        {options.map((option) => (
+          <label className="preference-option" key={option.mode}>
+            <input
+              type="radio"
+              name="sync-mode"
+              value={option.mode}
+              checked={mode === option.mode}
+              onChange={() => onChange(option.mode)}
+            />
+            <span>
+              <strong>{option.label}</strong>
+              <small>{option.hint}</small>
+            </span>
+          </label>
+        ))}
+      </fieldset>
+    </section>
   );
 }
 

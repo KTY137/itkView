@@ -1,9 +1,9 @@
-"""Fail-closed production status projection for component overview surfaces.
+"""Production status projection for component overview surfaces.
 
 The current stage is a work area: missing or failed tests assigned to that
 stage are normal until the component advances. A component is held only when
-it crossed a configured gate with missing/failed evidence, or when the mirror
-cannot be trusted for a production decision.
+it crossed a configured gate with failed evidence. Missing evidence after a
+gate remains visible as incomplete, but is not presented as a physical defect.
 """
 
 from dataclasses import dataclass
@@ -125,11 +125,21 @@ def production_status_for_components(
                         )
                     )
 
-        has_gate_issue = any(
-            reason.code in {"required_test_failed", "required_test_missing"}
-            for reason in reasons
+        has_failed_gate = any(
+            reason.code == "required_test_failed" for reason in reasons
         )
-        status = "hold" if has_gate_issue else ("clear" if policy_approved else "unknown")
+        has_missing_gate = any(
+            reason.code == "required_test_missing" for reason in reasons
+        )
+        status = (
+            "hold"
+            if has_failed_gate
+            else "incomplete"
+            if has_missing_gate
+            else "clear"
+            if policy_approved
+            else "unknown"
+        )
         projected[component.sn] = ComponentProductionStatus(
             status, policy_source, policy_approved, reasons
         )

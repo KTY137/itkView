@@ -39,9 +39,11 @@ im Frontend-i18n-Modul liegt.
 
 ## Design-Sprache
 
-- **Thema „Cleanroom-Cockpit":** Silizium-Grau als Grund, Kapton-Kupfer
-  (`--accent`) als einziger Akzent, Mono-Schrift als „Datenstimme" fuer
-  Seriennummern/Messwerte, Sans fuer Fliesstext.
+- **Thema „Cleanroom-Cockpit":** Silizium-Grau als Grund, eine einzelne
+  ausgewaehlte Akzentpalette (Default: Kapton-Kupfer), Mono-Schrift als
+  „Datenstimme" fuer Seriennummern/Messwerte, Sans fuer Fliesstext. Blue,
+  Teal und Violet ersetzen die Akzent-Tokens konsistent; sie kommen niemals
+  zusaetzlich als zweite Dekorfarbe hinzu.
 - **Design-Tokens** stehen als CSS-Variablen im `:root` des Mockups (Farben,
   Radius, Schatten, Fonts). Light **und** Dark sind definiert
   (`prefers-color-scheme` + `data-theme`-Override). Neue UI nutzt dieselben
@@ -85,10 +87,12 @@ itkFlow-Frontend kann deshalb keine verbotene Mutation ausfuehren.
    (`HV_TAB_ATTACHED → GLUED → STITCH_BONDING → BONDED → TESTED → FINISHED`),
    Karten = Module mit lokalem Namen, Typ-Badge, SN und Status-Chips. Karte →
    Detailseite. „Geist"-Karte zum Anlegen (Sensor scannen).
-   Eine serverseitig festgestellte Abweichung von einem bereits ueberschrittenen
-   konfigurierten Gate traegt ein sichtbares rotes `!` plus Text/Tooltip
-   `Production hold`; die Karte verwendet dann den kritischen Ton auch in
-   `FINISHED` und wird innerhalb ihrer Stage vor unauffaelligen Karten gezeigt.
+   Ein `failed` an einem bereits ueberschrittenen konfigurierten Gate traegt ein
+   sichtbares rotes `!` plus Text/Tooltip `Production hold`; die Karte verwendet
+   dann den kritischen Ton auch in `FINISHED` und wird innerhalb ihrer Stage vor
+   unauffaelligen Karten gezeigt. Nur fehlende faellige Evidenz traegt dagegen
+   einen neutralen `?`-Marker `Required tests missing`: Karte und Tabellenzeile
+   behalten ihren normalen Stage-Ton und werden nicht als Gefahr eingefaerbt.
    Current-Stage-Tests sind normales WIP und erzeugen den Marker noch nicht.
    Treffer auf dem Seed oder einem nicht explizit mit
    `stage_policy_approved=true` abgenommenen Profil nennen immer
@@ -202,7 +206,12 @@ itkFlow-Frontend kann deshalb keine verbotene Mutation ausfuehren.
    Instituten und Pruefzeitpunkten. Codes sind zwei leere Password-Felder und
    werden nie maskiert zurueckgelesen oder im Browser gespeichert. Muster:
    Connect & test, Test, Replace sowie Disconnect mit Inline-Bestaetigung. Ein
-   eigenes `Preferences`-Panel bietet `Staged preview: Tabs | Inline | Off`.
+   eigene Preferences-Panels bieten `Theme: System | Light | Dark`, eine von
+   vier Akzentpaletten, `Sync mode: Standard | Lightweight` und im itkFlow-Build
+   zusaetzlich `Staged preview: Tabs | Inline | Off`. Appearance und Sync-Mode
+   bleiben browserlokal. Lightweight begrenzt manuelle Evidence-Sweeps auf
+   Module und ueberspringt neue Attachment-Downloads; bestehende Spiegelzeilen
+   und Dateien bleiben unangetastet.
    Ein getrenntes Panel `Public share passwords` akzeptiert nur
    passwortfaehige oeffentliche HTTPS-Links und ein write-only Share-Passwort.
    `Save password` validiert nur die sichere Public-Link-Form und speichert das
@@ -461,6 +470,12 @@ ersten Oeffnen von „All mirrored runs".
   Tabelle, weil die Anzeige keine Punkte erfinden oder Werte umdeuten darf.
   Der bestehende Array-/IV-Kurvenpfad bleibt unveraendert und hat zusammen mit
   einem echten darstellbaren Plot-Attachment Vorrang vor diesem Fallback.
+  Map-Ergebnisse belegen im aufgeklappten Lauf eine volle Zeile: ihr Label steht
+  als Blocktitel ueber einem responsiven Position/Wert-Grid. Lange Labels,
+  Positionscodes und Werte duerfen umbrechen, aber niemals in Nachbarspalten
+  ragen. Auf breiten Fenstern nutzt die Shell bis zu 1920 px und gewichtet die
+  Daten-/Worksheet-Spalte staerker als die Stammdaten-Spalte. Der Account-Block
+  bleibt direkt unter der Marke sichtbar; nur die Navigation darunter scrollt.
 - **Edit-Strip statt Sprung:** Der Ghost-Stift oeffnet die schema-getriebenen
   Felder jetzt **innerhalb der Zeile**, vorbelegt aus dem juengsten Lauf, und
   stageed ueber den unveraenderten Weg manual-entry-Ingest → Dry-Run →
@@ -731,10 +746,13 @@ gar keiner Steuerung.
   Fortschrittsbalken. Die Components-Ansicht ergaenzt ein kompaktes Detailpanel
   mit Phase, Laufzeit, letztem Update und persistentem Erfolg/Fehler. Vor dem
   ersten Gesamtwert ist der Balken unbestimmt; Farbe ist nie der einzige
-  Statustraeger. Nach erfolgreichem Component-Mirror folgt sichtbar der
-  Evidence-/Attachment-Mirror; `Sync complete` darf erst den vorgesehenen
-  Offline-Umfang ehrlich benennen. Der Sync laeuft als Server-Job weiter, nicht
-  als Lebensdauer des gerade montierten React-Screens.
+  Statustraeger. `Sync components` und `Sync test evidence` sind getrennte
+  manuelle Aktionen und duerfen unabhaengig gestartet bzw. wiederholt werden;
+  ein manueller Component-Mirror reiht keinen versteckten Evidence-Job ein.
+  Nur der ausdruecklich konfigurierte unbeaufsichtigte Vollrefresh darf beide
+  Schritte verketten. `Sync complete` benennt den tatsaechlichen Standard- oder
+  Lightweight-Umfang ehrlich. Der Sync laeuft als Server-Job weiter, nicht als
+  Lebensdauer des gerade montierten React-Screens.
 - **Freeze-/Retry-Vertrag (2026-08-27):** `Check status` liest einen
   vermeintlich haengenden Job neu. Erst wenn das Backend dessen Heartbeat nach
   derselben Lease-Grenze als stale markiert, bietet die UI `Retry sync` an.

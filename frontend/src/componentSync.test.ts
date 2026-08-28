@@ -145,6 +145,7 @@ describe("useEvidenceSyncJob rolling readout", () => {
 
     expect(first).toBe(second);
     expect(startEvidenceSyncJob).toHaveBeenCalledTimes(1);
+    expect(startEvidenceSyncJob).toHaveBeenCalledWith("EXAMPLE", "standard");
     expect(result.current.starting).toBe(true);
 
     await act(async () => {
