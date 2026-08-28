@@ -110,7 +110,7 @@ function initials(name: string): string {
 function AppShell() {
   const { user, demo, logout, isAdmin } = useAuth();
   const componentSync = useComponentSyncJob(!demo);
-  const evidenceSync = useEvidenceSyncJob(!demo);
+  const evidenceSync = useEvidenceSyncJob(!demo, componentSync.job);
   const [screen, setScreen] = useState<ScreenId>("board");
   const [health, setHealth] = useState<Health | null>(null);
   const [healthError, setHealthError] = useState(false);

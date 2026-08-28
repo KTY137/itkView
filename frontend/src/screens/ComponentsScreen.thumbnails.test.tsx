@@ -119,7 +119,7 @@ it("shows missing required tests without a production hold in the component over
     await screen.findByLabelText(
       /Required tests missing: MODULE_METROLOGY is missing at the configured Glued gate/,
     ),
-  ).toHaveTextContent("?Tests missing");
+  ).toHaveTextContent("ℹTests missing");
   expect(screen.queryByLabelText(/Production hold/)).not.toBeInTheDocument();
 });
 

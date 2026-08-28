@@ -130,8 +130,21 @@ def evidence_sync_active_key(institute_code: str) -> str:
     return f"{EVIDENCE_SYNC_ACTIVE_KEY_PREFIX}{institute_code}"
 
 
+def evidence_job_sync_mode(job: SyncJob) -> EvidenceSyncMode:
+    """Return the durable requested/completed scope, defaulting old rows safely."""
+
+    value = (job.result or {}).get(EVIDENCE_SYNC_MODE_KEY)
+    if value is None:
+        value = (job.result or {}).get("sync_mode")
+    return "lightweight" if value == "lightweight" else "standard"
+
+
 class SyncLeaseBusy(RuntimeError):
     """The short database lease transaction stayed busy after bounded retry."""
+
+
+class EvidenceSyncModeConflict(RuntimeError):
+    """A live evidence job cannot honestly satisfy the requested sync scope."""
 
 
 class SyncLeaseLost(RuntimeError):
@@ -220,6 +233,22 @@ def acquire_component_sync_lease(
     last_busy: OperationalError | None = None
     for attempt in range(SYNC_LEASE_MAX_ATTEMPTS):
         try:
+            evidence_active = session.scalar(
+                select(SyncJob).where(
+                    SyncJob.active_key == evidence_sync_active_key(institute_code)
+                )
+            )
+            if evidence_active is not None:
+                if not _job_heartbeat_stale(evidence_active):
+                    raise SyncLeaseBusy(
+                        "Test evidence sync is active for this institute; "
+                        "wait for it to finish before syncing components."
+                    )
+                if not _close_stale_job_if_unchanged(session, evidence_active):
+                    session.rollback()
+                    continue
+                session.commit()
+
             active = session.scalar(
                 select(SyncJob).where(SyncJob.active_key == COMPONENT_SYNC_ACTIVE_KEY)
             )
@@ -303,6 +332,13 @@ def acquire_evidence_sync_lease(
             )
             if active is not None:
                 if not _job_heartbeat_stale(active):
+                    active_mode = evidence_job_sync_mode(active)
+                    if active_mode != sync_mode:
+                        raise EvidenceSyncModeConflict(
+                            f"A {active_mode} evidence sync is already active for "
+                            f"'{institute_code}'. Wait for it to finish before "
+                            f"starting a {sync_mode} sync."
+                        )
                     return SyncLease(job=active, created=False)
                 # Same zombie takeover as the component lease (see there).
                 if not _close_stale_job_if_unchanged(session, active):
@@ -640,7 +676,11 @@ class SyncJobManager:
                     ),
                     None,
                 )
-                if covering_attempt is not None and covering_attempt.status == "succeeded":
+                if (
+                    covering_attempt is not None
+                    and covering_attempt.status == "succeeded"
+                    and evidence_job_sync_mode(covering_attempt) == "standard"
+                ):
                     for component_job in pending:
                         result = dict(component_job.result or {})
                         result[EVIDENCE_FOLLOWUP_PENDING_KEY] = False
@@ -1272,7 +1312,7 @@ def _claim_evidence_job(
                     total=None,
                     percent=None,
                     message="Loading the local evidence sync scope.",
-                    result=None,
+                    result={EVIDENCE_SYNC_MODE_KEY: sync_mode},
                     active_key=canonical_active_key,
                     started_at=started,
                     updated_at=started,

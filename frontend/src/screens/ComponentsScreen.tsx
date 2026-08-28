@@ -513,6 +513,8 @@ export default function ComponentsScreen({
                   disabled={
                     componentSync.active ||
                     componentSync.discovering ||
+                    evidenceSync.active ||
+                    evidenceSync.discovering ||
                     selectedInstitute === ""
                   }
                   onClick={() => void handleSyncSelectedInstitute()}
@@ -527,6 +529,8 @@ export default function ComponentsScreen({
                   type="button"
                   className="btn"
                   disabled={
+                    componentSync.active ||
+                    componentSync.discovering ||
                     evidenceSync.active ||
                     evidenceSync.discovering ||
                     selectedInstitute === ""
@@ -1398,7 +1402,7 @@ export function ComponentDetailPanel({
           role={detail.production_status === "hold" ? "alert" : "status"}
         >
           <span aria-hidden="true">
-            {detail.production_status === "incomplete" ? "?" : "!"}
+            {detail.production_status === "incomplete" ? "ℹ" : "!"}
           </span>
           <span>{productionStatusExplanation(detail)}</span>
         </div>

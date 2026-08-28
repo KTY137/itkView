@@ -180,6 +180,7 @@ from app.sync import UnknownParentError
 from app.sync_jobs import (
     ACTIVE_SYNC_STATUSES,
     COMPONENT_SYNC_KIND,
+    EvidenceSyncModeConflict,
     SYNC_HEARTBEAT_GRACE,
     SyncLeaseBusy,
     SyncLeaseLost,
@@ -2440,6 +2441,8 @@ def start_evidence_sync_job(
             user_id=user.id,
             sync_mode=mode,
         )
+    except EvidenceSyncModeConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SyncLeaseBusy as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not lease.created:

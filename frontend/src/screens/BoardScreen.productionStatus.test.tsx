@@ -108,7 +108,7 @@ it("flags missing required tests without applying the critical card tone", async
 
   expect(
     await screen.findByRole("img", { name: /Required tests missing/ }),
-  ).toHaveTextContent("?");
+  ).toHaveTextContent("ℹ");
   expect(screen.getByRole("button", { name: /Module with missing tests/ })).toHaveAttribute(
     "data-tone",
     "good",

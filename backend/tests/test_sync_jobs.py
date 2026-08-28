@@ -112,6 +112,40 @@ def test_evidence_job_is_single_flight_and_discoverable(
     assert active.json()["id"] == body["id"]
 
 
+def test_evidence_single_flight_rejects_a_different_requested_mode(
+    client: TestClient, tudo: dict, as_operator
+):
+    manager = RecordingManager()
+    client.app.state.sync_job_manager = manager
+
+    lightweight = client.post(
+        "/api/sync/jobs/evidence/TUDO", params={"mode": "lightweight"}
+    )
+    standard = client.post(
+        "/api/sync/jobs/evidence/TUDO", params={"mode": "standard"}
+    )
+
+    assert lightweight.status_code == 202
+    assert standard.status_code == 409
+    assert "lightweight evidence sync is already active" in standard.json()["detail"]
+    assert manager.evidence_started == [lightweight.json()["id"]]
+
+
+def test_component_start_waits_for_active_evidence_sync(
+    client: TestClient, tudo: dict, as_operator
+):
+    manager = RecordingManager()
+    client.app.state.sync_job_manager = manager
+    evidence = client.post("/api/sync/jobs/evidence/TUDO")
+
+    component = client.post("/api/sync/jobs/components/TUDO")
+
+    assert evidence.status_code == 202
+    assert component.status_code == 503
+    assert "evidence sync is active" in component.json()["detail"].lower()
+    assert manager.started == []
+
+
 def test_evidence_jobs_queue_independently_per_institute(
     client: TestClient, session_factory, tudo: dict, as_operator
 ):

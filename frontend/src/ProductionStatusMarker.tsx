@@ -102,7 +102,7 @@ export function ProductionStatusMarker({
       aria-label={title}
     >
       <span aria-hidden="true">
-        {component.production_status === "incomplete" ? "?" : "!"}
+        {component.production_status === "incomplete" ? "ℹ" : "!"}
       </span>
       {visibleLabel !== null && <span aria-hidden="true">{visibleLabel}</span>}
     </span>

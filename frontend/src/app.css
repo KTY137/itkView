@@ -704,7 +704,8 @@ code {
   background: color-mix(in srgb, var(--crit) 9%, var(--surface));
 }
 .production-status-marker.incomplete {
-  color: var(--warn-text);
+  color: var(--ink3);
+  border-color: var(--line);
   background: var(--surface);
 }
 .production-status-marker.unknown {
@@ -744,8 +745,9 @@ code {
   background: color-mix(in srgb, var(--crit) 8%, var(--surface));
 }
 .production-status-banner.incomplete {
-  color: var(--ink2);
+  color: var(--ink3);
   border-color: var(--line);
+  border-style: dashed;
   background: var(--surface);
 }
 .production-status-banner.unknown {

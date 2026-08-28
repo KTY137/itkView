@@ -348,11 +348,28 @@ export function useComponentSyncJob(enabled = true): ComponentSyncController {
  * App-shell-owned evidence-sync state. Manual component and evidence jobs are
  * independent; each evidence start and retry uses the current browser scope.
  */
-export function useEvidenceSyncJob(enabled = true): EvidenceSyncController {
+export function useEvidenceSyncJob(
+  enabled = true,
+  componentJob: SyncJob | null = null,
+): EvidenceSyncController {
   const startWithPreference = useCallback(
     (instituteCode: string) =>
       startEvidenceSyncJob(instituteCode, readSyncModePreference()),
     [],
   );
-  return usePersistedSyncJob("evidence", startWithPreference, enabled);
+  const followUpDiscoveryKey =
+    componentJob?.kind === "components" && componentJob.status === "succeeded"
+      ? componentJob.id
+      : null;
+  const followUpInstituteCode =
+    componentJob?.kind === "components" && componentJob.status === "succeeded"
+      ? componentJob.institute_code
+      : null;
+  return usePersistedSyncJob(
+    "evidence",
+    startWithPreference,
+    enabled,
+    followUpDiscoveryKey,
+    followUpInstituteCode,
+  );
 }
