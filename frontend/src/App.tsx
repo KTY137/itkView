@@ -5,6 +5,7 @@ import { useAuth } from "./auth";
 import { useComponentSyncJob, useEvidenceSyncJob } from "./componentSync";
 import { roleName, t } from "./i18n";
 import { CompactSyncStatus } from "./SyncProgress";
+import { product } from "./product";
 import AccountScreen from "./screens/AccountScreen";
 import AdminSettingsScreen from "./screens/AdminSettingsScreen";
 import type { AdminSettingsUpdate } from "./screens/AdminSettingsScreen";
@@ -56,6 +57,10 @@ const SETTINGS_NAV = { id: "adminSettings", label: t.nav.settings, icon: "⚙" }
 const ACCOUNT_SCREEN = { id: "account", label: t.nav.account } as const;
 const ASSEMBLY_SCREEN = { id: "assembly", label: t.nav.assembly } as const;
 
+const VISIBLE_PRODUCTION_SCREENS = product.workflowWrites
+  ? SCREENS
+  : SCREENS.filter((screen) => screen.id !== "triage" && screen.id !== "staged");
+
 export type ScreenId =
   | (typeof SCREENS)[number]["id"]
   | (typeof SITE_SCREENS)[number]["id"]
@@ -83,7 +88,7 @@ export default function App() {
     return (
       <div className="auth-splash">
         <div className="login-brand">
-          itk<span>Flow</span>
+          {product.brandPrefix}<span>{product.brandAccent}</span>
         </div>
         <p className="muted">{t.auth.checkingSession}</p>
       </div>
@@ -176,6 +181,14 @@ function AppShell() {
    * intent so the screen drops any open component detail and shows the list —
    * clicking the nav item that you're already on still resets it. */
   function goToScreen(id: ScreenId) {
+    if (
+      !product.workflowWrites &&
+      (id === "triage" || id === "staged" || id === "assembly")
+    ) {
+      setNav((prev) => ({ token: prev.token + 1 }));
+      setScreen("components");
+      return;
+    }
     if (id === "components") setNav((prev) => ({ token: prev.token + 1 }));
     setScreen(id);
   }
@@ -237,8 +250,8 @@ function AppShell() {
   // advances. The backend contract still needs an authoritative revision for
   // non-sync mutations; this job/epoch tuple is the safe frontend seam today.
   const measurementCacheScope = demo
-    ? "demo"
-    : `user:${user?.id ?? "unknown"}:institute:${user?.institute_code ?? "all"}`;
+    ? `${product.variant}:demo`
+    : `${product.variant}:user:${user?.id ?? "unknown"}:institute:${user?.institute_code ?? "all"}`;
   const evidenceRevisionPhase =
     evidenceSync.job?.status === "queued" || evidenceSync.job?.status === "running"
       ? `progress:${evidenceSync.dataEpoch}`
@@ -257,12 +270,13 @@ function AppShell() {
     <div className="frame">
       <aside className="rail">
         <div className="brand">
-          itk<span>Flow</span>
+          {product.brandPrefix}<span>{product.brandAccent}</span>
           {brandCode && <span className="inst">{brandCode}</span>}
+          {!product.workflowWrites && <span className="chip neutral">{t.nav.readOnly}</span>}
         </div>
         <div className="grp">{t.nav.groupProduction}</div>
         <nav aria-label="Main navigation">
-          {SCREENS.map((s) => (
+          {VISIBLE_PRODUCTION_SCREENS.map((s) => (
             <button
               key={s.id}
               type="button"
@@ -380,7 +394,7 @@ function AppShell() {
       <div className="main">
         <header className="top">
           <span className="crumb">
-            <b>itkFlow</b> · {activeLabel}
+            <b>{product.name}</b> · {activeLabel}
           </span>
           <form className="scan" role="search" onSubmit={handleScan}>
             <span aria-hidden="true">⌕</span>
@@ -413,7 +427,9 @@ function AppShell() {
               ? t.nav.backendOffline
               : health
                 ? health.pdb_instance === "production"
-                  ? `${t.nav.pdb} production (${t.nav.dummyWritesOnly}) · API v${health.version}`
+                  ? product.workflowWrites
+                    ? `${t.nav.pdb} production (${t.nav.dummyWritesOnly}) · API v${health.version}`
+                    : `${t.nav.productionReads} · ${t.nav.readOnly} · API v${health.version}`
                   : `${t.nav.pdb} ${health.pdb_instance} · API v${health.version}`
                 : t.common.loading}
           </span>
@@ -423,9 +439,9 @@ function AppShell() {
           {screen === "board" ? (
             <BoardScreen
               onOpen={(sn) => navigateTo({ sn, returnTo: "board" })}
-              onAssemble={() => setScreen("assembly")}
+              onAssemble={product.workflowWrites ? () => setScreen("assembly") : undefined}
             />
-          ) : screen === "assembly" ? (
+          ) : screen === "assembly" && product.workflowWrites ? (
             <AssemblyWizardScreen
               onBack={() => setScreen("board")}
               onStaged={() => setScreen("staged")}
@@ -433,15 +449,15 @@ function AppShell() {
           ) : screen === "components" ? (
             <ComponentsScreen
               nav={nav}
-              onNavigate={(target) => setScreen(target)}
+              onNavigate={goToScreen}
               componentSync={componentSync}
               evidenceSync={evidenceSync}
             />
-          ) : screen === "triage" ? (
+          ) : screen === "triage" && product.workflowWrites ? (
             <TriageScreen
               onOpenComponent={(sn: string) => navigateTo({ sn, returnTo: "triage" })}
             />
-          ) : screen === "staged" ? (
+          ) : screen === "staged" && product.workflowWrites ? (
             <StagedScreen
               onOpenComponent={(sn: string) => navigateTo({ sn, returnTo: "staged" })}
             />
@@ -468,7 +484,7 @@ function AppShell() {
               selectedCode={adminInstituteCode}
               allowAllInstitutes={user?.institute_code == null}
               onSelectedCodeChange={setAdminInstituteCode}
-              onNavigate={setScreen}
+              onNavigate={goToScreen}
             />
           ) : screen === "adminSettings" ? (
             <AdminSettingsScreen
@@ -476,7 +492,9 @@ function AppShell() {
               selectedCode={adminInstituteCode}
               onSelectedCodeChange={setAdminInstituteCode}
               onSave={handleSaveAdminSettings}
-              onTestChannel={(code, channel) => postNotificationTest(channel, code).then(() => {})}
+              onTestChannel={product.workflowWrites
+                ? (code, channel) => postNotificationTest(channel, code).then(() => {})
+                : undefined}
               labels={t.adminSettings}
             />
           ) : screen === "statistics" ? (

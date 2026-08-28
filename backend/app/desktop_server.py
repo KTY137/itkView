@@ -29,22 +29,38 @@ import os
 import socket
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 READY_PREFIX = "ITKFLOW_READY"
 _APP_DIR_NAME = "itkflow"
+_VIEW_APP_DIR_NAME = "itkview"
 _KEY_FILE_NAME = "pdb-credential.key"
 _DB_FILE_NAME = "itkflow.db"
+_VIEW_DB_FILE_NAME = "itkview.db"
 _SERVER_LOG_MAX_BYTES = 5 * 1024 * 1024
 _SERVER_LOG_BACKUPS = 3
+
+
+def desktop_product_variant() -> Literal["flow", "view"]:
+    """Resolve the packaged product before selecting any persistent paths."""
+
+    raw = os.environ.get("ITKFLOW_PRODUCT_VARIANT", "flow").strip().lower()
+    if raw == "flow":
+        return "flow"
+    if raw == "view":
+        return "view"
+    raise RuntimeError("ITKFLOW_PRODUCT_VARIANT must be 'flow' or 'view'.")
 
 
 def application_data_dir() -> Path:
     """Per-user, writable directory for desktop state.
 
-    Deliberately the same location the Windows dev launcher uses, so a person
-    who used `start-itkflow.ps1` keeps their connected PDB credentials.
+    Flow deliberately keeps the location used by the Windows dev launcher;
+    View uses a sibling tree so it cannot inherit Flow credentials or outbox
+    state.
     """
+    variant = desktop_product_variant()
+    app_dir_name = _VIEW_APP_DIR_NAME if variant == "view" else _APP_DIR_NAME
     override = os.environ.get("ITKFLOW_DATA_DIR")
     if override:
         directory = Path(override)
@@ -52,12 +68,12 @@ def application_data_dir() -> Path:
         base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
         if not base:
             raise RuntimeError("Windows did not provide LOCALAPPDATA.")
-        directory = Path(base) / _APP_DIR_NAME
+        directory = Path(base) / app_dir_name
     elif sys.platform == "darwin":
-        directory = Path.home() / "Library" / "Application Support" / _APP_DIR_NAME
+        directory = Path.home() / "Library" / "Application Support" / app_dir_name
     else:
         base = os.environ.get("XDG_DATA_HOME")
-        directory = (Path(base) if base else Path.home() / ".local" / "share") / _APP_DIR_NAME
+        directory = (Path(base) if base else Path.home() / ".local" / "share") / app_dir_name
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
@@ -186,11 +202,14 @@ def reserve_port(host: str, port: int) -> socket.socket:
 def build_settings(data_dir: Path, static_dir: Path | None):
     from app.config import Settings
 
+    product_variant = desktop_product_variant()
     database_url = os.environ.get("ITKFLOW_DATABASE_URL")
     if not database_url:
-        database_url = f"sqlite:///{(data_dir / _DB_FILE_NAME).as_posix()}"
+        database_file = _VIEW_DB_FILE_NAME if product_variant == "view" else _DB_FILE_NAME
+        database_url = f"sqlite:///{(data_dir / database_file).as_posix()}"
 
     overrides: dict[str, object] = {
+        "product_variant": product_variant,
         "database_url": database_url,
         "pdb_credential_encryption_key": ensure_encryption_key(data_dir),
         # The bundle ships one process, so the API has to fire due reminders
@@ -200,6 +219,8 @@ def build_settings(data_dir: Path, static_dir: Path | None):
         # itself; otherwise a pushed change stops at `submitted` forever.
         "outbox_processor": os.environ.get("ITKFLOW_OUTBOX_PROCESSOR", "app"),
     }
+    if "ITKFLOW_ATTACHMENT_DIR" not in os.environ:
+        overrides["attachment_dir"] = str(data_dir / "attachments")
     if static_dir is not None:
         overrides["static_dir"] = str(static_dir)
     # The desktop bundle is an end-user artifact: production *reads* are on by

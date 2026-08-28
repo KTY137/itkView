@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getOpsHealth } from "../api";
 import type { Institute, OpsHealth, OpsHeartbeat, SyncJob } from "../api";
 import { formatCount, formatDuration, formatRelative, formatTimestamp, t } from "../i18n";
+import { product } from "../product";
 
 type OpsTarget = "staged" | "triage" | "reminders";
 
@@ -30,6 +31,23 @@ function overallTone(status: OpsHealth["status"]): string {
   return "red";
 }
 
+function viewOverallStatus(health: OpsHealth): OpsHealth["status"] {
+  const visibleHeartbeats = health.heartbeats.filter(
+    (heartbeat) => heartbeat.service !== "outbox-worker",
+  );
+  if (visibleHeartbeats.some((heartbeat) => heartbeat.status === "error")) return "critical";
+  if (
+    health.sync.stale_active > 0 ||
+    health.reminders.failed_occurrences > 0 ||
+    visibleHeartbeats.some(
+      (heartbeat) => heartbeat.status === "missing" || heartbeat.status === "stale",
+    )
+  ) {
+    return "warning";
+  }
+  return "healthy";
+}
+
 function serviceLabel(service: OpsHeartbeat["service"]): string {
   return service === "outbox-worker"
     ? t.opsHealth.outboxWorker
@@ -52,6 +70,12 @@ export default function OpsHealthScreen({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const visibleStatus =
+    health === null || product.workflowWrites ? health?.status : viewOverallStatus(health);
+  const visibleHeartbeats =
+    health === null || product.workflowWrites
+      ? (health?.heartbeats ?? [])
+      : health.heartbeats.filter((heartbeat) => heartbeat.service !== "outbox-worker");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -85,9 +109,9 @@ export default function OpsHealthScreen({
       <div className="sc-head">
         <h1>{t.opsHealth.title}</h1>
         <span className="sub">{t.opsHealth.subtitle}</span>
-        {health !== null && (
-          <span className={`chip ${overallTone(health.status)}`}>
-            {t.opsHealth.overall[health.status]}
+        {visibleStatus !== undefined && (
+          <span className={`chip ${overallTone(visibleStatus)}`}>
+            {t.opsHealth.overall[visibleStatus]}
           </span>
         )}
         <span className="cta">
@@ -144,43 +168,51 @@ export default function OpsHealthScreen({
       {health !== null && (
         <>
           <div className="metric-grid" aria-label={t.opsHealth.summaryLabel}>
-            <Metric
-              label={t.opsHealth.outboxBacklog}
-              value={health.outbox.backlog}
-              tone={health.outbox.failed > 0 ? "crit" : undefined}
-              hint={t.opsHealth.failedCount(health.outbox.failed)}
-            />
-            <Metric
-              label={t.opsHealth.attemptLimit}
-              value={health.outbox.at_attempt_limit}
-              tone={health.outbox.at_attempt_limit > 0 ? "crit" : undefined}
-            />
+            {product.workflowWrites && (
+              <>
+                <Metric
+                  label={t.opsHealth.outboxBacklog}
+                  value={health.outbox.backlog}
+                  tone={health.outbox.failed > 0 ? "crit" : undefined}
+                  hint={t.opsHealth.failedCount(health.outbox.failed)}
+                />
+                <Metric
+                  label={t.opsHealth.attemptLimit}
+                  value={health.outbox.at_attempt_limit}
+                  tone={health.outbox.at_attempt_limit > 0 ? "crit" : undefined}
+                />
+              </>
+            )}
             <Metric
               label={t.opsHealth.openReminderTasks}
               value={health.reminders.open_occurrences}
               tone={health.reminders.failed_occurrences > 0 ? "warn" : undefined}
               hint={t.opsHealth.failedCount(health.reminders.failed_occurrences)}
             />
-            <Metric
-              label={t.opsHealth.parserIssues}
-              value={health.ingest.parser_issues}
-              tone={health.ingest.parser_issues > 0 ? "warn" : undefined}
-              hint={t.opsHealth.triageCount(health.ingest.triage)}
-            />
+            {product.workflowWrites && (
+              <Metric
+                label={t.opsHealth.parserIssues}
+                value={health.ingest.parser_issues}
+                tone={health.ingest.parser_issues > 0 ? "warn" : undefined}
+                hint={t.opsHealth.triageCount(health.ingest.triage)}
+              />
+            )}
             <Metric
               label={t.opsHealth.activeSyncs}
               value={health.sync.active.length}
               tone={health.sync.stale_active > 0 ? "warn" : undefined}
               hint={t.opsHealth.staleCount(health.sync.stale_active)}
             />
-            <Metric
-              label={t.opsHealth.oldestStaged}
-              value={
-                health.outbox.oldest_open_age_seconds === null
-                  ? t.common.none
-                  : formatDuration(health.outbox.oldest_open_age_seconds)
-              }
-            />
+            {product.workflowWrites && (
+              <Metric
+                label={t.opsHealth.oldestStaged}
+                value={
+                  health.outbox.oldest_open_age_seconds === null
+                    ? t.common.none
+                    : formatDuration(health.outbox.oldest_open_age_seconds)
+                }
+              />
+            )}
           </div>
 
           <section className="panel phase4-detail ops-health-panel" aria-labelledby="ops-services">
@@ -196,7 +228,7 @@ export default function OpsHealthScreen({
               </span>
             </div>
             <div className="ops-heartbeat-grid">
-              {health.heartbeats.map((heartbeat) => (
+              {visibleHeartbeats.map((heartbeat) => (
                 <article className="ops-heartbeat" key={heartbeat.service}>
                   <div className="ops-heartbeat-head">
                     <strong>{serviceLabel(heartbeat.service)}</strong>
@@ -267,28 +299,32 @@ export default function OpsHealthScreen({
           </section>
 
           <div className="ops-action-grid">
-            <OpsAction
-              title={t.opsHealth.stagedTitle}
-              copy={t.opsHealth.stagedCopy(
-                health.outbox.backlog,
-                health.outbox.failed,
-                health.outbox.at_attempt_limit,
-              )}
-              label={t.opsHealth.openStaged}
-              tone={health.outbox.at_attempt_limit > 0 ? "crit" : undefined}
-              onClick={() => onNavigate("staged")}
-            />
-            <OpsAction
-              title={t.opsHealth.ingestTitle}
-              copy={t.opsHealth.ingestCopy(
-                health.ingest.total,
-                health.ingest.parser_issues,
-                health.ingest.unassigned,
-              )}
-              label={t.opsHealth.openIngest}
-              tone={health.ingest.parser_issues > 0 ? "warn" : undefined}
-              onClick={() => onNavigate("triage")}
-            />
+            {product.workflowWrites && (
+              <OpsAction
+                title={t.opsHealth.stagedTitle}
+                copy={t.opsHealth.stagedCopy(
+                  health.outbox.backlog,
+                  health.outbox.failed,
+                  health.outbox.at_attempt_limit,
+                )}
+                label={t.opsHealth.openStaged}
+                tone={health.outbox.at_attempt_limit > 0 ? "crit" : undefined}
+                onClick={() => onNavigate("staged")}
+              />
+            )}
+            {product.workflowWrites && (
+              <OpsAction
+                title={t.opsHealth.ingestTitle}
+                copy={t.opsHealth.ingestCopy(
+                  health.ingest.total,
+                  health.ingest.parser_issues,
+                  health.ingest.unassigned,
+                )}
+                label={t.opsHealth.openIngest}
+                tone={health.ingest.parser_issues > 0 ? "warn" : undefined}
+                onClick={() => onNavigate("triage")}
+              />
+            )}
             <OpsAction
               title={t.opsHealth.remindersTitle}
               copy={t.opsHealth.remindersCopy(

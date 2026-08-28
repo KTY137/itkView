@@ -10,6 +10,7 @@ import {
 import type { PdbConnectionOut, PdbConnectionState } from "../api";
 import { useAuth } from "../auth";
 import { formatTimestamp, roleName, t } from "../i18n";
+import { product } from "../product";
 import {
   readStagedPreviewPreference,
   writeStagedPreviewPreference,
@@ -115,10 +116,12 @@ export default function AccountScreen() {
           <h1>{t.nav.account}</h1>
         </div>
         <p className="state-note">{t.account.requiresSignIn}</p>
-        <StagedPreviewPreferences
-          mode={stagedPreviewMode}
-          onChange={changeStagedPreviewMode}
-        />
+        {product.workflowWrites && (
+          <StagedPreviewPreferences
+            mode={stagedPreviewMode}
+            onChange={changeStagedPreviewMode}
+          />
+        )}
       </div>
     );
   }
@@ -467,10 +470,12 @@ export default function AccountScreen() {
           ) : null}
         </section>
         <ShareCredentialsPanel />
-        <StagedPreviewPreferences
-          mode={stagedPreviewMode}
-          onChange={changeStagedPreviewMode}
-        />
+        {product.workflowWrites && (
+          <StagedPreviewPreferences
+            mode={stagedPreviewMode}
+            onChange={changeStagedPreviewMode}
+          />
+        )}
       </div>
     </div>
   );

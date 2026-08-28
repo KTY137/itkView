@@ -1,3 +1,5 @@
+import { product } from "./product";
+
 /**
  * Typed fetch layer for the itkFlow backend API.
  *
@@ -903,7 +905,7 @@ export class ApiError extends Error {
 // cookie (`credentials: "include"`), and every state-changing call carries the
 // CSRF token in the `X-CSRF-Token` header. The token is populated from
 // `MeOut.csrf_token` after login/session-probe (`setCsrfToken`) and, as a
-// belt-and-suspenders fallback, read from the readable `itkflow_csrf` cookie.
+// belt-and-suspenders fallback, read from the product-specific readable CSRF cookie.
 //
 // Two cross-cutting signals are dispatched to the auth layer so a dead session
 // or a role violation is handled once, centrally: a non-auth `401` drops the
@@ -944,7 +946,7 @@ function readCookie(name: string): string | null {
 }
 
 function currentCsrfToken(): string | null {
-  return csrfToken ?? readCookie("itkflow_csrf");
+  return csrfToken ?? readCookie(product.csrfCookie);
 }
 
 /** Shared fetch: cookies always, CSRF header on writes, and central dispatch of

@@ -534,7 +534,7 @@ export type AdminSettingsScreenProps = {
     instituteCode: string,
     update: AdminSettingsUpdate,
   ) => Promise<Institute | void>;
-  onTestChannel: (instituteCode: string, channelName: string) => Promise<void>;
+  onTestChannel?: (instituteCode: string, channelName: string) => Promise<void>;
   /**
    * Test types the local mirror already knows, offered as suggestions for a
    * stage requirement. Injectable so tests stay offline; production uses the
@@ -2015,7 +2015,9 @@ export default function AdminSettingsScreen({
   }
 
   async function testChannel(row: ChannelDraft) {
-    if (selectedInstitute === null || row.originalName === null) return;
+    if (selectedInstitute === null || row.originalName === null || onTestChannel === undefined) {
+      return;
+    }
     setTestingKey(row.key);
     setError(null);
     setNotice(null);
@@ -2722,7 +2724,7 @@ export default function AdminSettingsScreen({
                       </>
                     )}
                     <div className="admin-settings-row-actions">
-                      {row.originalName !== null && (
+                      {row.originalName !== null && onTestChannel !== undefined && (
                         <button
                           type="button"
                           className="btn"

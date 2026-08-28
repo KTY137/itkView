@@ -1,4 +1,4 @@
-# PyInstaller spec for the itkFlow desktop sidecar.
+# PyInstaller spec shared by the itkFlow and itkView desktop sidecars.
 #
 # Produces one self-contained server executable that Tauri spawns. The built
 # frontend travels inside the bundle (`frontend/`) so the backend can serve UI
@@ -7,6 +7,8 @@
 # Build via desktop/build-sidecar.py, which also builds the frontend first and
 # renames the result to the target triple Tauri's sidecar mechanism expects.
 
+import os
+import re
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
@@ -14,11 +16,17 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 SPEC_DIR = Path(SPECPATH).resolve()
 REPO_ROOT = SPEC_DIR.parent
 BACKEND_DIR = REPO_ROOT / "backend"
-FRONTEND_DIST = REPO_ROOT / "frontend" / "dist"
+FRONTEND_DIST = Path(
+    os.environ.get("ITKFLOW_FRONTEND_DIST", REPO_ROOT / "frontend" / "dist")
+).resolve()
+SIDECAR_NAME = os.environ.get("ITKFLOW_DESKTOP_SIDECAR_NAME", "itkflow-server")
+
+if re.fullmatch(r"[a-z0-9-]+", SIDECAR_NAME) is None:
+    raise SystemExit(f"Invalid desktop sidecar name: {SIDECAR_NAME!r}")
 
 if not (FRONTEND_DIST / "index.html").is_file():
     raise SystemExit(
-        f"Frontend build missing at {FRONTEND_DIST}. Run 'npm run build' in frontend/ first."
+        f"Frontend build missing at {FRONTEND_DIST}. Build the selected desktop variant first."
     )
 
 datas = [(str(FRONTEND_DIST), "frontend")]
@@ -64,7 +72,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="itkflow-server",
+    name=SIDECAR_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

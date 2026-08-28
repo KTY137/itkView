@@ -1,7 +1,8 @@
-# itkFlow full stack. Copy .env.example to .env first.
+# Shared itkFlow/itkView full stack. Copy .env.example to .env first.
 # Production PDB *reads* are enabled by default (docs/09): nothing contacts the
-# PDB until a signed-in person connects their own access codes, and writes stay
-# confined to DUMMY-batch components. Set ITKFLOW_PDB_INSTANCE=offline in .env
+# PDB until a signed-in person connects their own access codes. itkFlow writes
+# stay confined to DUMMY-batch components; itkView disables writes completely.
+# Set ITKFLOW_PDB_INSTANCE=offline in .env
 # for a deployment that must reach no PDB at all.
 
 services:
@@ -27,6 +28,7 @@ services:
       # Scheduled-sync windows use this container-local wall clock. Set TZ in
       # deploy/.env to the institute's deployment timezone (docs/09).
       TZ: ${TZ:-Etc/UTC}
+      ITKFLOW_PRODUCT_VARIANT: ${ITKFLOW_PRODUCT_VARIANT:-flow}
       ITKFLOW_DATABASE_URL: postgresql+psycopg://itkflow:${POSTGRES_PASSWORD}@postgres:5432/itkflow
       ITKFLOW_PDB_INSTANCE: ${ITKFLOW_PDB_INSTANCE:-production}
       ITKFLOW_ALLOW_PRODUCTION: ${ITKFLOW_ALLOW_PRODUCTION:-true}
@@ -41,16 +43,27 @@ services:
     ports:
       - "8000:8000"
 
-  # Async outbox worker: the only process that writes reviewed actions to the
-  # PDB. Shares the database and encryption key with the backend. Every action
-  # is submitted as the personal PDB identity bound when it was approved.
+  # Async outbox worker for itkFlow: the only process that writes reviewed
+  # actions to the PDB. In itkView the container exits cleanly once and is not
+  # restarted; the backend entry point independently enforces the same guard.
   worker:
     build:
       context: ../backend
       dockerfile: ../deploy/backend.Dockerfile
-    command: ["python", "-m", "app.run_worker"]
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        if [ "${ITKFLOW_PRODUCT_VARIANT:-flow}" = "view" ]; then
+          echo "itkView: outbox worker disabled (read-only product).";
+          exit 0;
+        fi;
+        exec python -m app.run_worker
     environment:
       TZ: ${TZ:-Etc/UTC}
+      # The worker receives the same product guard as the API. In the view
+      # variant it must never turn a locally crafted action into a PDB write.
+      ITKFLOW_PRODUCT_VARIANT: ${ITKFLOW_PRODUCT_VARIANT:-flow}
       ITKFLOW_DATABASE_URL: postgresql+psycopg://itkflow:${POSTGRES_PASSWORD}@postgres:5432/itkflow
       ITKFLOW_PDB_INSTANCE: ${ITKFLOW_PDB_INSTANCE:-production}
       ITKFLOW_ALLOW_PRODUCTION: ${ITKFLOW_ALLOW_PRODUCTION:-true}
@@ -68,6 +81,8 @@ services:
     build:
       context: ..
       dockerfile: deploy/frontend.Dockerfile
+      args:
+        ITKFLOW_PRODUCT_VARIANT: ${ITKFLOW_PRODUCT_VARIANT:-flow}
     depends_on:
       - backend
     ports:

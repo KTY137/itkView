@@ -6,9 +6,19 @@ Multi-institute by design — the ITk Production Database (PDB) remains the
 single source of truth; itkFlow orchestrates local data entry, validation,
 test ingestion and reviewed PDB writes.
 
+The same source tree also builds **itkView**, a separately installed,
+fail-closed read-only product. itkView keeps PDB mirror sync, images, plots,
+statistics, search and diagnostics, but has no Triage/ingest, Staged/Outbox,
+assembly, registration, test-entry, stage-move or other production-write UI.
+The server, worker and final PDB submission sink enforce that boundary even
+for administrators and direct API calls. The two desktop products use separate
+cookies and `%LOCALAPPDATA%` directories; see
+[`docs/adr/007-itkview-read-only-product.md`](docs/adr/007-itkview-read-only-product.md).
+
 **Safety first:** the default configuration cannot reach the production PDB.
-Production reads require a deliberate double opt-in, and writes remain limited
-to itkFlow-registered DUMMY test components. See `CLAUDE.md` for the hard rules.
+Production reads require a deliberate double opt-in. itkFlow writes remain
+limited to itkFlow-registered DUMMY test components; itkView disables them
+entirely. See `CLAUDE.md` for the hard rules.
 
 For current implementation priorities, agents and humans should start with
 `docs/04-roadmap.md`; `docs/02-revamp-plan.md` remains the product vision.
@@ -158,14 +168,17 @@ Windows the MSVC build tools (Tauri's supported toolchain there).
 ```bash
 cd desktop
 npm install                          # Tauri CLI
-python build-sidecar.py              # builds the frontend, then the backend sidecar
-npm run build                        # produces the installer
+python build-sidecar.py              # builds the itkFlow frontend and sidecar
+npm run build                        # produces the itkFlow installer
+npm run build:view                   # produces the separate itkView installer
 ```
 
 `build-sidecar.py` bundles the backend with PyInstaller and names the result
 for the Rust host target triple, which is what Tauri's sidecar mechanism
-expects. Pass `--skip-frontend` to reuse an existing `frontend/dist`. For a run
-without packaging an installer, `npm run dev` starts the same shell.
+expects. Pass `--variant view` to select itkView and `--skip-frontend` to reuse
+that variant's existing output under `desktop/build/<variant>/frontend`. For a
+run without packaging an installer, `npm run dev` starts the default itkFlow
+shell.
 
 On a GNU toolchain (`rustup show` reports `x86_64-pc-windows-gnu`), build with
 the target spelled out:
@@ -178,8 +191,10 @@ Without it the bundler looks for the sidecar under the MSVC triple and stops
 with `resource path binaries\itkflow-server-x86_64-pc-windows-msvc.exe doesn't
 exist`, because the sidecar is named for the host triple. MSVC needs no flag.
 
-The installer lands in
-`desktop/src-tauri/target/<triple>/release/bundle/nsis/itkFlow_<version>_x64-setup.exe`.
+Installers land in the variant-isolated build tree:
+
+- `desktop/build/flow/tauri-target/<triple>/release/bundle/nsis/itkFlow_<version>_x64-setup.exe`
+- `desktop/build/view/tauri-target/<triple>/release/bundle/nsis/itkView_<version>_x64-setup.exe`
 
 The app keeps its database, credential key and logs in the per-user
 application data directory — on Windows `%LOCALAPPDATA%\itkflow`, deliberately
@@ -187,10 +202,16 @@ the same place `start-itkflow.ps1` uses, so a PDB connection made in the dev
 launcher keeps working in the packaged app. **Back up `pdb-credential.key`**:
 losing it makes saved PDB connections unreadable.
 
+itkView deliberately uses `%LOCALAPPDATA%\itkview` instead, including its own
+database, credential key, attachments and logs. It therefore needs its own
+first-run account and initial mirror sync and cannot drain an existing itkFlow
+Outbox.
+
 The desktop build selects the production PDB read target by default, but sends
-no PDB traffic until a user connects personal access codes. Writes remain
-restricted to itkFlow-registered DUMMY-batch test components. Design notes and
-the trade-offs are in `docs/adr/005-desktop-packaging.md`.
+no PDB traffic until a user connects personal access codes. itkFlow writes
+remain restricted to itkFlow-registered DUMMY-batch test components; itkView
+has no PDB-write capability. Design notes and the trade-offs are in
+`docs/adr/005-desktop-packaging.md`.
 
 ## Troubleshooting
 

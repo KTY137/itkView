@@ -47,6 +47,7 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 | [`docs/adr/004-personal-pdb-credentials.md`](adr/004-personal-pdb-credentials.md) | Persoenliche PDB-Credentials, Verschluesselung, Identitaetsbindung |
 | [`docs/adr/005-desktop-packaging.md`](adr/005-desktop-packaging.md) | Desktop-Paketierung: Tauri-Shell, PyInstaller-Sidecar, SPA-Hosting |
 | [`docs/adr/006-staged-first-ui-auto-mirror.md`](adr/006-staged-first-ui-auto-mirror.md) | Staged-first-Komponentenarbeit, Ghost-Projektion und automatischer Evidence-/Attachment-Mirror |
+| [`docs/adr/007-itkview-read-only-product.md`](adr/007-itkview-read-only-product.md) | itkView-Produktgrenze, erlaubte Read-Syncs, Write-/Worker-Sperre und Seit-an-Seit-Isolation |
 
 ## Reverse-Index: Code -> zustaendiges Doc
 
@@ -76,6 +77,7 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 | `backend/app/reminders.py`, `notifications.py`, `models.Reminder`, `/api/reminders`, `/api/notifications` | [`11`](11-logistics-operations.md), [`adr/002`](adr/002-async-outbox-worker.md) |
 | `backend/app/institute_settings.py`, Admin-Settings-UI und operative Institutsprofilwerte | [`11`](11-logistics-operations.md), [`05`](05-ui-design-reference.md), [`04`](04-roadmap.md) |
 | `frontend/src/stagedPreview.ts`, `stagedActions.ts`, Detail-/Staged-/Ingest-UI | [`05`](05-ui-design-reference.md), [`adr/006`](adr/006-staged-first-ui-auto-mirror.md) |
+| Produktvariante/Capabilities in Backend, Frontend und Desktop-Build | [`adr/007`](adr/007-itkview-read-only-product.md), [`09`](09-pdb-production-strategy.md), [`05`](05-ui-design-reference.md), [`adr/005`](adr/005-desktop-packaging.md) |
 | `frontend/src/ModuleWorksheet.tsx`, `testStaging.ts`, Worksheet-Payload in `preview.py` | [`05`](05-ui-design-reference.md), [`spec H`](superpowers/specs/2026-08-25-staged-first-module-page-design.md), [`adr/006`](adr/006-staged-first-ui-auto-mirror.md) |
 | `frontend/src/fieldLayout.ts`, `dataEntryProfile.ts`, `ToolFieldSelect.tsx` (Feldreihenfolge, Baender, Tool-Dropdowns) | [`05`](05-ui-design-reference.md), [`07`](07-jig-tool-quickselect.md) |
 | `frontend/src/**` (UI) | [`05`](05-ui-design-reference.md) |

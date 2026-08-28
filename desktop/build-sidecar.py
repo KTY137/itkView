@@ -1,4 +1,4 @@
-"""Build the itkFlow desktop app: frontend -> PyInstaller -> Tauri bundle.
+"""Build an itkFlow desktop variant: frontend -> PyInstaller -> Tauri bundle.
 
 Tauri's `externalBin` looks for a file named `<name>-<target-triple>` next to
 the configured path, so the sidecar step ends in a rename, not a copy into
@@ -7,7 +7,7 @@ itself: the explicit target keeps the bundler's triple aligned with the
 sidecar's file name (without it, an MSVC-defaulting bundler looks for a
 sidecar the GNU host never produced — ADR 005).
 
-    python desktop/build-sidecar.py [--skip-frontend] [--bundle]
+    python desktop/build-sidecar.py [--variant flow|view] [--skip-frontend] [--bundle]
 
 `npm run build` in desktop/ runs the whole chain.
 """
@@ -15,10 +15,13 @@ sidecar the GNU host never produced — ADR 005).
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 DESKTOP_DIR = Path(__file__).resolve().parent
@@ -29,12 +32,45 @@ if not BACKEND_PYTHON.is_file():  # POSIX layout
     BACKEND_PYTHON = REPO_ROOT / "backend" / ".venv" / "bin" / "python"
 BINARIES_DIR = DESKTOP_DIR / "src-tauri" / "binaries"
 BUILD_DIR = DESKTOP_DIR / "build"
+TAURI_CONFIG = DESKTOP_DIR / "src-tauri" / "tauri.conf.json"
 
 
-def run(command: list[str], cwd: Path) -> None:
+@dataclass(frozen=True)
+class DesktopVariant:
+    key: str
+    product_name: str
+    data_slug: str
+    data_dir_env: str
+    sidecar_name: str
+    tagline: str
+    tauri_overlay: Path | None = None
+
+
+VARIANTS = {
+    "flow": DesktopVariant(
+        key="flow",
+        product_name="itkFlow",
+        data_slug="itkflow",
+        data_dir_env="ITKFLOW_DATA_DIR",
+        sidecar_name="itkflow-server",
+        tagline="ITk strip module production cockpit",
+    ),
+    "view": DesktopVariant(
+        key="view",
+        product_name="itkView",
+        data_slug="itkview",
+        data_dir_env="ITKVIEW_DATA_DIR",
+        sidecar_name="itkview-server",
+        tagline="Read-only ITk strip module production viewer",
+        tauri_overlay=DESKTOP_DIR / "src-tauri" / "tauri.view.conf.json",
+    ),
+}
+
+
+def run(command: list[str], cwd: Path, *, env: dict[str, str] | None = None) -> None:
     printable = " ".join(command)
     print(f"\n$ {printable}\n  (in {cwd})", flush=True)
-    result = subprocess.run(command, cwd=cwd)
+    result = subprocess.run(command, cwd=cwd, env=env)
     if result.returncode != 0:
         raise SystemExit(f"failed with exit code {result.returncode}: {printable}")
 
@@ -57,22 +93,119 @@ def npm_command() -> str:
     return npm
 
 
-def build_frontend() -> None:
-    run([npm_command(), "run", "build"], cwd=FRONTEND_DIR)
+def variant_build_dir(variant: DesktopVariant) -> Path:
+    return BUILD_DIR / variant.key
 
 
-def bundle_app(triple: str) -> None:
-    run(
-        [npm_command(), "exec", "--", "tauri", "build", "--target", triple],
-        cwd=DESKTOP_DIR,
+def frontend_dist_dir(variant: DesktopVariant) -> Path:
+    return variant_build_dir(variant) / "frontend"
+
+
+def build_environment(variant: DesktopVariant) -> dict[str, str]:
+    """Return the deterministic product contract shared by all build stages."""
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "ITKFLOW_PRODUCT_VARIANT": variant.key,
+            "VITE_ITKFLOW_PRODUCT_VARIANT": variant.key,
+            "VITE_ITKFLOW_PRODUCT_NAME": variant.product_name,
+            "ITKFLOW_DESKTOP_PRODUCT_NAME": variant.product_name,
+            "ITKFLOW_DESKTOP_DATA_SLUG": variant.data_slug,
+            "ITKFLOW_DESKTOP_DATA_DIR_ENV": variant.data_dir_env,
+            "ITKFLOW_DESKTOP_SIDECAR_NAME": variant.sidecar_name,
+            "ITKFLOW_FRONTEND_DIST": str(frontend_dist_dir(variant)),
+            # Separate Cargo output prevents a stale other-variant bundle from
+            # being mistaken for the artifact produced by this invocation.
+            "CARGO_TARGET_DIR": str(variant_build_dir(variant) / "tauri-target"),
+        }
     )
-    bundle_dir = DESKTOP_DIR / "src-tauri" / "target" / triple / "release" / "bundle"
-    installers = sorted(bundle_dir.rglob("*.exe")) if bundle_dir.is_dir() else []
-    for installer in installers:
-        print(f"installer ready: {installer.relative_to(REPO_ROOT)}")
+    return environment
 
 
-def build_sidecar() -> Path:
+def build_frontend(variant: DesktopVariant, environment: dict[str, str]) -> None:
+    output = frontend_dist_dir(variant)
+    run(
+        [
+            npm_command(),
+            "run",
+            "build",
+            "--",
+            "--outDir",
+            str(output),
+            "--emptyOutDir",
+        ],
+        cwd=FRONTEND_DIR,
+        env=environment,
+    )
+
+
+def prepare_splash(variant: DesktopVariant) -> None:
+    """Generate the branded startup page consumed by the view overlay."""
+    if variant.key == "flow":
+        return
+    source = (DESKTOP_DIR / "splash" / "index.html").read_text(encoding="utf-8")
+    branded = source.replace(
+        "<title>itkFlow</title>", f"<title>{variant.product_name}</title>"
+    )
+    branded = branded.replace("<h1>itkFlow</h1>", f"<h1>{variant.product_name}</h1>")
+    branded = branded.replace(
+        "ITk strip module production cockpit",
+        variant.tagline,
+    )
+    if branded == source:
+        raise SystemExit("could not apply desktop splash branding")
+    target = variant_build_dir(variant) / "splash" / "index.html"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(branded, encoding="utf-8")
+
+
+def bundle_version() -> str:
+    payload = json.loads(TAURI_CONFIG.read_text(encoding="utf-8"))
+    version = payload.get("version")
+    if not isinstance(version, str) or not version:
+        raise SystemExit(f"missing version in {TAURI_CONFIG}")
+    return version
+
+
+def installer_arch(triple: str) -> str:
+    architecture = triple.split("-", 1)[0]
+    names = {"x86_64": "x64", "aarch64": "arm64", "i686": "x86"}
+    try:
+        return names[architecture]
+    except KeyError:
+        raise SystemExit(
+            f"unsupported installer architecture in target triple: {triple}"
+        ) from None
+
+
+def expected_installer(variant: DesktopVariant, triple: str) -> Path:
+    target_dir = variant_build_dir(variant) / "tauri-target"
+    filename = (
+        f"{variant.product_name}_{bundle_version()}_{installer_arch(triple)}-setup.exe"
+    )
+    return target_dir / triple / "release" / "bundle" / "nsis" / filename
+
+
+def bundle_app(
+    variant: DesktopVariant, triple: str, environment: dict[str, str]
+) -> Path:
+    command = [npm_command(), "exec", "--", "tauri", "build", "--target", triple]
+    if variant.tauri_overlay is not None:
+        if not variant.tauri_overlay.is_file():
+            raise SystemExit(
+                f"Tauri variant overlay not found: {variant.tauri_overlay}"
+            )
+        command += ["--config", str(variant.tauri_overlay)]
+    run(command, cwd=DESKTOP_DIR, env=environment)
+
+    installer = expected_installer(variant, triple)
+    if not installer.is_file():
+        raise SystemExit(f"Tauri did not produce the expected installer: {installer}")
+    print(f"installer ready: {installer.relative_to(REPO_ROOT)}")
+    return installer
+
+
+def build_sidecar(variant: DesktopVariant, environment: dict[str, str]) -> Path:
     if not BACKEND_PYTHON.is_file():
         raise SystemExit(
             f"backend environment not found at {BACKEND_PYTHON}. "
@@ -85,15 +218,16 @@ def build_sidecar() -> Path:
             "PyInstaller",
             "itkflow-server.spec",
             "--distpath",
-            str(BUILD_DIR / "dist"),
+            str(variant_build_dir(variant) / "dist"),
             "--workpath",
-            str(BUILD_DIR / "work"),
+            str(variant_build_dir(variant) / "work"),
             "--noconfirm",
         ],
         cwd=DESKTOP_DIR,
+        env=environment,
     )
     suffix = ".exe" if sys.platform == "win32" else ""
-    built = BUILD_DIR / "dist" / f"itkflow-server{suffix}"
+    built = variant_build_dir(variant) / "dist" / f"{variant.sidecar_name}{suffix}"
     if not built.is_file():
         raise SystemExit(f"PyInstaller did not produce {built}.")
     return built
@@ -102,9 +236,15 @@ def build_sidecar() -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="build-sidecar")
     parser.add_argument(
+        "--variant",
+        choices=sorted(VARIANTS),
+        default="flow",
+        help="Desktop product to build (default: flow).",
+    )
+    parser.add_argument(
         "--skip-frontend",
         action="store_true",
-        help="Reuse the existing frontend/dist instead of rebuilding it.",
+        help="Reuse the selected variant's existing frontend output.",
     )
     parser.add_argument(
         "--bundle",
@@ -112,23 +252,29 @@ def main(argv: list[str] | None = None) -> int:
         help="After the sidecar, run 'tauri build --target <host triple>' too.",
     )
     args = parser.parse_args(argv)
+    variant = VARIANTS[args.variant]
+    environment = build_environment(variant)
 
     if not args.skip_frontend:
-        build_frontend()
-    elif not (FRONTEND_DIR / "dist" / "index.html").is_file():
-        raise SystemExit("--skip-frontend given but frontend/dist/index.html is missing.")
+        build_frontend(variant, environment)
+    elif not (frontend_dist_dir(variant) / "index.html").is_file():
+        raise SystemExit(
+            "--skip-frontend given but the selected variant's frontend build is missing: "
+            f"{frontend_dist_dir(variant)}"
+        )
+    prepare_splash(variant)
 
-    built = build_sidecar()
+    built = build_sidecar(variant, environment)
 
     triple = target_triple()
     BINARIES_DIR.mkdir(parents=True, exist_ok=True)
-    target = BINARIES_DIR / f"itkflow-server-{triple}{built.suffix}"
+    target = BINARIES_DIR / f"{variant.sidecar_name}-{triple}{built.suffix}"
     shutil.copy2(built, target)
     size_mb = target.stat().st_size / (1024 * 1024)
     print(f"\nsidecar ready: {target.relative_to(REPO_ROOT)} ({size_mb:.0f} MB)")
 
     if args.bundle:
-        bundle_app(triple)
+        bundle_app(variant, triple, environment)
     return 0
 
 

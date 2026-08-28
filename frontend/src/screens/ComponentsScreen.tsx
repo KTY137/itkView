@@ -46,6 +46,7 @@ import type {
 } from "../componentSync";
 import { filterDemoComponents, getDemoComponent } from "../demoData";
 import { formatTimestamp, t } from "../i18n";
+import { product } from "../product";
 import {
   ProductionStatusMarker,
   hasProductionStatusAttention,
@@ -155,7 +156,7 @@ export default function ComponentsScreen({
   componentSync: ComponentSyncController;
   evidenceSync: EvidenceSyncController;
 }) {
-  const { canWrite, isAdmin, user } = useAuth();
+  const { canWrite, canSync, isAdmin, user } = useAuth();
   const [q, setQ] = useState("");
   const [stage, setStage] = useState("");
   const [rows, setRows] = useState<ComponentOut[]>([]);
@@ -195,8 +196,8 @@ export default function ComponentsScreen({
   );
 
   const debouncedQ = useDebounced(q, 250);
-  const canWriteSelectedInstitute =
-    canWrite &&
+  const canSyncSelectedInstitute =
+    canSync &&
     selectedInstitute !== "" &&
     (user?.institute_code === null || user?.institute_code === selectedInstitute);
   const writableInstitutes =
@@ -499,7 +500,7 @@ export default function ComponentsScreen({
                 </option>
               ))}
             </select>
-            {canWriteSelectedInstitute && (
+            {canSyncSelectedInstitute && (
               <>
                 <button
                   type="button"
@@ -573,7 +574,7 @@ export default function ComponentsScreen({
           <SyncProgressPanel
             controller={componentSync}
             canRetry={
-              canWrite &&
+              canSync &&
               (user?.institute_code === null ||
                 user?.institute_code === componentSync.job?.institute_code)
             }
@@ -581,7 +582,7 @@ export default function ComponentsScreen({
           <SyncProgressPanel
             controller={evidenceSync}
             canRetry={
-              canWrite &&
+              canSync &&
               (user?.institute_code === null ||
                 user?.institute_code === evidenceSync.job?.institute_code)
             }
@@ -819,7 +820,7 @@ export function ComponentDetailPanel({
    * in Staged" to the same routing the rest of the app already uses). */
   onNavigate?: (screen: ScreenId) => void;
 }) {
-  const { canWrite, user, showToast } = useAuth();
+  const { canWrite, canSync, user, showToast } = useAuth();
   const [detail, setDetail] = useState<ComponentDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -880,6 +881,10 @@ export function ComponentDetailPanel({
   currentTestSchemaComponentType.current = testSchemaComponentType;
   const canWriteComponent =
     canWrite &&
+    detail !== null &&
+    (user?.institute_code === null || user?.institute_code === detail.institute_code);
+  const canSyncComponent =
+    canSync &&
     detail !== null &&
     (user?.institute_code === null || user?.institute_code === detail.institute_code);
 
@@ -970,7 +975,9 @@ export function ComponentDetailPanel({
     setPreviewError(null);
     Promise.all([
       getComponentPreview(sn, ctrl.signal),
-      getComponentStaged(sn, ctrl.signal),
+      product.workflowWrites
+        ? getComponentStaged(sn, ctrl.signal)
+        : Promise.resolve([] as OutboxAction[]),
     ])
       .then(([previewData, staged]) => {
         setPreview(previewData);
@@ -1112,7 +1119,7 @@ export function ComponentDetailPanel({
     const ctrl = new AbortController();
     setTestSchemas([]);
     setTestSchemasError(null);
-    if (testSchemaComponentType === null || demo) {
+    if (testSchemaComponentType === null || demo || !product.workflowWrites) {
       setTestSchemasLoading(false);
       return () => ctrl.abort();
     }
@@ -1208,7 +1215,7 @@ export function ComponentDetailPanel({
       .catch(() => showToast(t.components.snCopyFailed));
   };
 
-  const stagedCount = preview?.staged_actions.length ?? 0;
+  const stagedCount = product.workflowWrites ? (preview?.staged_actions.length ?? 0) : 0;
   const hasStagedPreview = preview !== null && stagedCount > 0;
   const showingProjection =
     hasStagedPreview &&
@@ -1223,6 +1230,16 @@ export function ComponentDetailPanel({
   // detail's own `code`/`testType` is allowed to be null (the mirror
   // tolerates it), which used to leave the worksheet permanently guessing.
   const worksheetSchemas = testSchemasLoading ? null : testSchemas;
+  const visibleWorksheet =
+    preview?.worksheet === undefined || preview.worksheet === null || product.workflowWrites
+      ? preview?.worksheet
+      : {
+          ...preview.worksheet,
+          groups: preview.worksheet.groups.map((group) => ({
+            ...group,
+            rows: group.rows.map((row) => ({ ...row, staged: [] })),
+          })),
+        };
 
   function refreshPreview() {
     setPreviewReloadKey((key) => key + 1);
@@ -1286,21 +1303,25 @@ export function ComponentDetailPanel({
       componentType={detail.component_type}
       componentTypeCode={detail.type_code}
       instituteCode={detail.institute_code}
-      worksheet={preview.worksheet}
+      worksheet={visibleWorksheet as NonNullable<ComponentPreview["worksheet"]>}
       schemas={worksheetSchemas}
       canWrite={canWriteComponent && !demo}
       refreshKey={reloadKey}
       editIntent={worksheetEditIntent}
       onUseFileUpload={handleUseFileUpload}
       onStaged={handleWorksheetStaged}
-      onViewStaged={onNavigate === undefined ? undefined : () => onNavigate("staged")}
+      onViewStaged={
+        product.workflowWrites && onNavigate !== undefined
+          ? () => onNavigate("staged")
+          : undefined
+      }
     />
   ) : null;
 
   return (
     <div className="screen">
       {toolbar}
-      {previewMode === "tabs" && hasStagedPreview && (
+      {product.workflowWrites && previewMode === "tabs" && hasStagedPreview && (
         <div className="preview-tabs" role="group" aria-label={t.components.previewTabsLabel}>
           <button
             type="button"
@@ -1441,7 +1462,7 @@ export function ComponentDetailPanel({
           </div>
         </div>
         <div className="det-col">
-          {canWriteComponent && (
+          {canSyncComponent && (
             <>
               <div className="toolbar">
                 <button
@@ -1504,7 +1525,9 @@ export function ComponentDetailPanel({
              * cannot mount, so the pre-worksheet sections stay exactly as
              * they were, full run list included. */
             <>
-              <StagedChangesSection sn={detail.sn} refreshKey={previewReloadKey} />
+              {product.workflowWrites && (
+                <StagedChangesSection sn={detail.sn} refreshKey={previewReloadKey} />
+              )}
               {suggestion !== null ? (
                 <StageSuggestionSection
                   suggestion={suggestion}
@@ -1550,7 +1573,7 @@ export function ComponentDetailPanel({
              * preference all share this branch; "off" additionally keeps the
              * compact staged-changes list visible (docs/05). */
             <>
-              {previewMode === "off" && (
+              {product.workflowWrites && previewMode === "off" && (
                 <StagedChangesSection sn={detail.sn} refreshKey={previewReloadKey} />
               )}
               {suggestion !== null ? (

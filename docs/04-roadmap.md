@@ -31,6 +31,23 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-28)
 
+- **itkView ist als separate fail-closed Read-only-Produktvariante im Aufbau
+  (2026-08-28):** Dieselbe Codebasis baut wahlweise das unveraenderte itkFlow
+  oder ein eigenstaendig gebrandetes itkView. Im Viewer verschwinden
+  `Staged`/Outbox, `Triage`, Assembly, Registrierung, Test-Dateiupload, manuelle
+  Testerfassung, Stage-Moves und die zugehoerigen Edit-/Push-Einstiege;
+  Mirror-Sync, Bilder, Plots, Statistics, Suche und Production-Hold-Anzeigen
+  bleiben. Die Grenze ist nicht nur UI: der Server klassifiziert unsichere
+  Mutationen fail-closed, erlaubt nur die benoetigten Auth-/Admin-/Credential-
+  und Read-Sync-POSTs und sperrt PDB-Submitter, direkte Registrierung,
+  In-Process- sowie Standalone-Outbox-Worker. Desktop-App-ID, Sidecar,
+  Datenbank/Attachments/Logs, Credential-Key und hostweit geltende Cookies
+  sind zwischen beiden Produkten getrennt. Vertrag und Begruendung:
+  [`ADR 007`](adr/007-itkview-read-only-product.md). **Abnahme offen:** beide
+  Frontends und Backend-Suites, beide Desktop-Testvarianten, paketierter
+  itkView-Smoke sowie Seit-an-Seit-Isolation; vor dieser Abnahme kein Tag oder
+  Release.
+
 - **Modul-Uebersichten markieren konfigurierte Gate-Abweichungen
   fail-closed (2026-08-28):** `GET /api/components` und die Detailantwort
   tragen eine serverseitig gebatchte `production_status`-Projektion. Ein rotes

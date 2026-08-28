@@ -16,6 +16,7 @@ from app.db import Base, ensure_phase0_sqlite_schema, make_engine, make_session_
 from app.notifications import make_notifier
 from app.outbox_processor import OutboxProcessor
 from app.pdb_sync import fetch_for_institute
+from app.product_policy import ProductVariantPolicyMiddleware
 from app.reminders import ReminderScheduler
 from app.static_spa import mount_spa
 from app.sync_jobs import SyncJobManager, recover_interrupted_sync_jobs
@@ -31,6 +32,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ensure_phase0_sqlite_schema(engine)
 
     app = FastAPI(title=settings.app_name, version=__version__)
+    app.add_middleware(
+        ProductVariantPolicyMiddleware,
+        product_variant=settings.product_variant,
+    )
     app.state.settings = settings
     app.state.session_factory = make_session_factory(engine)
     # A process restart cannot resume the exact authoritative PDB snapshot. Any

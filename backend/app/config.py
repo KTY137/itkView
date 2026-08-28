@@ -26,6 +26,7 @@ class ProductionAccessError(RuntimeError):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ITKFLOW_", env_file=".env", extra="ignore")
 
+    product_variant: Literal["flow", "view"] = "flow"
     app_name: str = "itkFlow"
     database_url: str = "sqlite:///./itkflow.db"
 
@@ -69,12 +70,13 @@ class Settings(BaseSettings):
     pdb_credential_encryption_key: SecretStr | None = None
 
     # --- PDB write scope ----------------------------------------------------
+    # "disabled": no PDB mutation path is available (forced by itkView).
     # "dummy_only": writes (test-run uploads, stage moves) are refused unless
     # the target is a component itkFlow itself registered into a DUMMY batch
     # (mirror flag `is_dummy=True`). "unrestricted" is accepted as a value but
     # deliberately not implemented — real production writes need their own,
     # conscious release step.
-    pdb_write_scope: Literal["dummy_only", "unrestricted"] = "dummy_only"
+    pdb_write_scope: Literal["disabled", "dummy_only", "unrestricted"] = "dummy_only"
     # Opt-in read by the pdb_write end-to-end test only; nothing writes without it.
     allow_pdb_writes: bool = False
     # Component types itkFlow may register as DUMMY test components. Sensors
@@ -176,7 +178,20 @@ class Settings(BaseSettings):
                 "ITKFLOW_ALLOW_PRODUCTION=true if this deployment is deliberately "
                 "meant to reach production."
             )
+        if self.product_variant == "view":
+            if self.app_name == "itkFlow":
+                self.app_name = "itkView"
+            self.outbox_processor = "off"
+            self.reminder_scheduler = "off"
+            self.allow_pdb_writes = False
+            self.pdb_write_scope = "disabled"
         return self
+
+    @property
+    def pdb_writes_enabled(self) -> bool:
+        """Whether this product may ever open a PDB mutation sink."""
+
+        return self.product_variant == "flow"
 
 
 @lru_cache
