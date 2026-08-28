@@ -970,6 +970,53 @@ def _child_group(preview, sn):
     raise AssertionError(f"no child evidence group for {sn!r}")
 
 
+def test_a_stitched_modules_worksheet_reaches_through_its_half_modules(
+    session_factory, client, tudo
+):
+    """R3-R5 modules are stitched, so their parts hang one hop further down.
+
+    The full module's direct child is a half module, and the sensors and
+    powerboards carrying the runs are that half module's children. One hop
+    showed the half modules but hid everything below them: on the owner's
+    mirror 23 stitched modules kept 114 evidence-bearing parts out of sight.
+    The extra hop follows the stitch only — never a sensor's own children —
+    which keeps this the same assembly relation the gallery shows.
+    """
+    with session_factory() as session:
+        component = _component(session, stage="GLUED")
+        half = _child(
+            session,
+            component,
+            sn="20USEM50000901",
+            component_type="MODULE",
+            type_code="R5M0",
+        )
+        _child(
+            session,
+            half,
+            sn=SENSOR_SN,
+            component_type="SENSOR",
+            local_name="TUDO-S-0042",
+        )
+        _evidence(
+            session,
+            sn=SENSOR_SN,
+            test_type="ATLAS18_IV_TEST_V1",
+            passed=True,
+            external_ref="RUN-STITCHED-SENSOR-IV",
+            measured_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+            results={"TEMPERATURE": 21.5},
+        )
+        preview = build_component_preview(session, component, client.app.state.settings)
+
+    group = _child_group(preview, SENSOR_SN)
+    assert group["component_type"] == "SENSOR"
+    assert [row["test_type"] for row in group["rows"]] == ["ATLAS18_IV_TEST_V1"]
+    # The half module itself stays a group of its own: whose measurement it is
+    # remains part of what the page says.
+    assert _child_group(preview, "20USEM50000901")["component_type"] == "MODULE"
+
+
 def test_children_evidence_appears_in_its_own_group_never_merged_into_the_rows(
     session_factory, client, tudo
 ):

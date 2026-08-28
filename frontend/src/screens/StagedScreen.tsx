@@ -55,7 +55,7 @@ import {
   pushToPdb,
 } from "../stagedActions";
 import { formatScalar } from "../TestResults";
-import { stageChipClass, stageLabel } from "../ui";
+import { describeComponent, stageChipClass, stageLabel } from "../ui";
 
 type BusyAction = { id: number; kind: "push" | "discard" };
 
@@ -632,9 +632,27 @@ function ComponentActionGroup({
       <header className="staged-component-head">
         {thumbnail !== undefined && group.sn !== null ? (
           <img
-            className="staged-component-thumb"
-            src={componentAttachmentUrl(group.sn, thumbnail.code, thumbnail.source)}
-            alt={t.staged.thumbnailAlt(group.localName)}
+            /* `thumbnail.sn` is the component whose mirror holds the bytes:
+               a tile borrowed from an assembled part is filed under that part,
+               and asking for it under this group's serial would 404. The alt
+               text names the part for the same reason the list marks it. */
+            className={
+              thumbnail.part === null
+                ? "staged-component-thumb"
+                : "staged-component-thumb is-borrowed"
+            }
+            src={componentAttachmentUrl(thumbnail.sn, thumbnail.code, thumbnail.source)}
+            alt={
+              thumbnail.part === null
+                ? t.staged.thumbnailAlt(group.localName)
+                : t.images.borrowedFrom(
+                    describeComponent({
+                      component_type: thumbnail.part.component_type,
+                      type_code: thumbnail.part.type_code,
+                    }),
+                    thumbnail.part.local_name ?? thumbnail.part.sn,
+                  )
+            }
           />
         ) : (
           <span className="staged-component-thumb placeholder" aria-hidden="true">

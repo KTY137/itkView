@@ -207,11 +207,20 @@ itkFlow-Frontend kann deshalb keine verbotene Mutation ausfuehren.
    werden nie maskiert zurueckgelesen oder im Browser gespeichert. Muster:
    Connect & test, Test, Replace sowie Disconnect mit Inline-Bestaetigung. Ein
    eigene Preferences-Panels bieten `Theme: System | Light | Dark`, eine von
-   vier Akzentpaletten, `Sync mode: Standard | Lightweight` und im itkFlow-Build
-   zusaetzlich `Staged preview: Tabs | Inline | Off`. Appearance und Sync-Mode
+   vier Akzentpaletten, `Sync mode: Standard | Lightweight`, im itkView-Build
+   zusaetzlich `Data detail: Full | Gate figures only` und im itkFlow-Build
+   `Staged preview: Tabs | Inline | Off`. Appearance, Sync-Mode und Data detail
    bleiben browserlokal. Lightweight begrenzt manuelle Evidence-Sweeps auf
    Module und ueberspringt neue Attachment-Downloads; bestehende Spiegelzeilen
    und Dateien bleiben unangetastet.
+   `Gate figures only` reduziert die Komponentenseite auf das, woran eine
+   Stage-Entscheidung haengt: je Stage der Pflichttest, sein Ausgang
+   (`passed`/`failed`/`missing`) und sein Datum. Messwerte-Spalte, Lauflisten,
+   Plots, die Gruppe nicht geforderter Tests und die Kind-Evidenz entfallen;
+   Bilder bleiben. Nichts wird geloescht oder aus dem Spiegel entfernt, die
+   volle Ansicht ist einen Klick entfernt. Die Reduktion haengt technisch am
+   **read-only** Worksheet, nicht am Produkt: wer eine Zeile bearbeiten darf,
+   sieht immer, was er bearbeitet.
    Ein getrenntes Panel `Public share passwords` akzeptiert nur
    passwortfaehige oeffentliche HTTPS-Links und ein write-only Share-Passwort.
    `Save password` validiert nur die sichere Public-Link-Form und speichert das

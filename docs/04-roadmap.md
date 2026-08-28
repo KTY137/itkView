@@ -31,6 +31,54 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-28)
 
+- **itkView 0.2.0: geliehene Bild-Kacheln und eine Gate-Ansicht
+  (2026-08-28):** Die Listen-Spalte blieb auf fast jeder Modulzeile leer, weil
+  ein Foto praktisch nie am Modul haengt. Eine Zeile ohne eigenes Bild leiht
+  jetzt eines von einem verbauten Teil — und **markiert** es (gestrichelte
+  Kante, Eck-Glyphe, Teil in `title`/`alt` benannt); das eigene Bild gewinnt
+  immer. Die Bytes werden unter der Seriennummer des Teils geholt, dort liegen
+  sie. Der Locator traegt dafuer `sn` und `part`. Neu ausserdem
+  `Account -> Data detail: Full | Gate figures only`: eine browserlokale,
+  viewer-seitige Lesart der Komponentenseite, die nur zeigt, woran eine
+  Stage-Entscheidung haengt (Pflichttest je Stage, Ausgang, Datum) und
+  Messwerte, Lauflisten, Plots, nicht geforderte Tests sowie Kind-Evidenz
+  weglaesst. Bilder bleiben. Die Reduktion haengt am **read-only** Worksheet,
+  nicht am Produkt, damit sie niemandem Werte verbergen kann, der sie
+  bearbeitet. `v0.1.1` wurde nie getaggt; seine Aenderungen sind hier
+  enthalten. Vertraege: [`docs/05`](05-ui-design-reference.md),
+  [`docs/12`](12-attachments-and-images.md),
+  [`Release`](releases/v0.2.0.md).
+
+- **Gestitchte Module zeigen ihre Bilder, und ein Zeitgleichstand sperrt
+  keine Stage mehr (2026-08-28):** Die Bildgalerie einer Komponente nahm bisher
+  genau einen Hop. Fuer ein ungestitchtes Modul stimmt das, fuer R3-R5 nicht:
+  dort ist das direkte Kind ein **Halbmodul** (`component_type == "MODULE"`),
+  und Sensoren, Powerboard und Hybrid-Assemblies mit den Fotos haengen an
+  diesem Halbmodul. Auf dem Owner-Spiegel blieben dadurch **22 Modulseiten
+  leer**, obwohl 70 bebilderte Teile eine Ebene tiefer lagen (Pfad ausnahmslos
+  `MODULE > MODULE > SENSOR|PWB|HYBRID_ASSEMBLY`). `child_image_attachments`
+  nimmt jetzt einen zweiten Hop, aber **ausschliesslich durch ein Kind, das
+  selbst ein Modul ist** — nie durch die Kinder eines Sensors oder Powerboards;
+  der Query-Satz bleibt konstant. Modulseiten mit mindestens einem Bild steigen
+  damit von 176 auf 198 (von 265). Dieselbe Auswahl
+  (`attachment_store.assembled_parts`) benutzt jetzt auch die Evidenz-Gruppe des
+  Worksheets — sonst zeigte eine gestitchte Modulseite die Fotos eines Sensors,
+  seine Messungen aber nicht; dort waren 114 Evidenz-Teile auf 23 Modulen
+  verdeckt. Zweitens gewann bei exakt gleichem
+  Fallback-Zeitstempel die veraltete Spiegelzeile gegen die frisch bestaetigte
+  eigene Messung, weil `_evidence_rank` den Gleichstand ueber `TestRunEvidence.id`
+  gegen `OutboxAction.id` entschied — zwei fremde Sequenzen, und die
+  Evidence-Tabelle ist tausende Laeufe tief, waehrend lokale Aktionen bei eins
+  beginnen. Der Gleichstand gehoert der Bestaetigung, die nach der Zeile
+  geschrieben wurde, die sie ersetzt; `tie_breaker` ordnet nur noch innerhalb
+  einer Quelle. Ohne den Fix blieb ein Stage-Gate nach einer korrigierten
+  Messung bis zum naechsten Sync geschlossen. Ausserdem trug der Release-Commit
+  `d73c56d` den neuen Guard „Component-Sync wartet auf aktiven Evidence-Sync"
+  ein, ohne den aelteren Restart-Test nachzuziehen; dessen Setup nimmt jetzt die
+  einzige noch erreichbare Reihenfolge (Component-Lease zuerst, Evidence-Lease
+  danach) und prueft dieselbe Durability-Eigenschaft weiter.
+  Vertrag: [`docs/12`](12-attachments-and-images.md).
+
 - **Appearance und manuelle Sync-Schnitte sind fuer itkView konfigurierbar
   (2026-08-28):** Account bietet eine browserlokale Theme-Wahl
   (`System`/`Light`/`Dark`) und vier barrierearme Akzentpaletten. Der Wert wird

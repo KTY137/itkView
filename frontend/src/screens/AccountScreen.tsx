@@ -30,6 +30,11 @@ import {
   writeSyncModePreference,
 } from "../syncPreferences";
 import type { SyncMode } from "../syncPreferences";
+import {
+  readDataViewPreference,
+  writeDataViewPreference,
+} from "../dataViewPreference";
+import type { DataView } from "../dataViewPreference";
 import ShareCredentialsPanel from "../ShareCredentialsPanel";
 
 type BusyAction = "connect" | "test" | "disconnect" | null;
@@ -102,6 +107,7 @@ export default function AccountScreen() {
     readAppearancePreference(),
   );
   const [syncMode, setSyncMode] = useState<SyncMode>(() => readSyncModePreference());
+  const [dataView, setDataView] = useState<DataView>(() => readDataViewPreference());
 
   function changeStagedPreviewMode(mode: StagedPreviewMode) {
     setStagedPreviewMode(mode);
@@ -111,6 +117,11 @@ export default function AccountScreen() {
   function changeAppearance(next: AppearancePreference) {
     setAppearance(next);
     writeAppearancePreference(next);
+  }
+
+  function changeDataView(view: DataView) {
+    setDataView(view);
+    writeDataViewPreference(view);
   }
 
   function changeSyncMode(mode: SyncMode) {
@@ -146,6 +157,9 @@ export default function AccountScreen() {
         <p className="state-note">{t.account.requiresSignIn}</p>
         <AppearancePreferences preference={appearance} onChange={changeAppearance} />
         <SyncPreferences mode={syncMode} onChange={changeSyncMode} />
+        {!product.workflowWrites && (
+          <DataViewPreferences view={dataView} onChange={changeDataView} />
+        )}
         {product.workflowWrites && (
           <StagedPreviewPreferences
             mode={stagedPreviewMode}
@@ -502,6 +516,9 @@ export default function AccountScreen() {
         <ShareCredentialsPanel />
         <AppearancePreferences preference={appearance} onChange={changeAppearance} />
         <SyncPreferences mode={syncMode} onChange={changeSyncMode} />
+        {!product.workflowWrites && (
+          <DataViewPreferences view={dataView} onChange={changeDataView} />
+        )}
         {product.workflowWrites && (
           <StagedPreviewPreferences
             mode={stagedPreviewMode}
@@ -603,6 +620,54 @@ function SyncPreferences({
               value={option.mode}
               checked={mode === option.mode}
               onChange={() => onChange(option.mode)}
+            />
+            <span>
+              <strong>{option.label}</strong>
+              <small>{option.hint}</small>
+            </span>
+          </label>
+        ))}
+      </fieldset>
+    </section>
+  );
+}
+
+/** Viewer-only: how much of a component's test data the page renders.
+ *
+ * Sits beside the appearance and sync-scope choices because it is the same
+ * kind of decision — browser-local, nothing sent, nothing changed for anyone
+ * else. itkFlow never offers it: authoring needs the values themselves.
+ */
+function DataViewPreferences({
+  view,
+  onChange,
+}: {
+  view: DataView;
+  onChange: (view: DataView) => void;
+}) {
+  const options: Array<{ view: DataView; label: string; hint: string }> = [
+    { view: "full", label: t.account.dataViewFull, hint: t.account.dataViewFullHint },
+    { view: "gate", label: t.account.dataViewGate, hint: t.account.dataViewGateHint },
+  ];
+  return (
+    <section
+      className="panel account-panel account-preferences"
+      aria-labelledby="data-view-preferences-title"
+    >
+      <h2 className="section-title" id="data-view-preferences-title">
+        {t.account.dataViewTitle}
+      </h2>
+      <p className="account-panel-copy">{t.account.dataViewDescription}</p>
+      <fieldset className="preference-options preference-options-two">
+        <legend>{t.account.dataViewScope}</legend>
+        {options.map((option) => (
+          <label className="preference-option" key={option.view}>
+            <input
+              type="radio"
+              name="data-view"
+              value={option.view}
+              checked={view === option.view}
+              onChange={() => onChange(option.view)}
             />
             <span>
               <strong>{option.label}</strong>

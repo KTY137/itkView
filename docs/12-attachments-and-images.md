@@ -739,14 +739,42 @@ Stand `frontend/src/screens/ComponentsScreen.tsx`, `frontend/src/TestResults.tsx
   `{component_sn, attachments, children}` — `attachments` ist weiter der
   **gesamte** lokale Attachment-Index der Komponente selbst, unabhängig vom
   Testlauf; `children` gruppiert zusätzlich die **Bild**-Attachments jedes
-  **direkten** Kindbauteils (z. B. Sensor/Hybrid eines Moduls), je Kind mit
+  verbauten Teils (z. B. Sensor/Hybrid eines Moduls), je Teil mit
   `sn`, `component_type`, `type_code` und `local_name`
   (`attachment_store.child_image_attachments`, ein konstanter Query-Satz für
-  die ganze Familie statt N+1, ein Hop, nur Zeilen mit `relative_path` und
+  die ganze Familie statt N+1, nur Zeilen mit `relative_path` und
   `is_image`). Motivation
   laut Docstring: auf dem Owner-Spiegel liegen nur 3 von 432 Bildern auf einem
   Modul selbst, 241 auf direkten Sensor-Kindern — nach Seriennummer allein
   gefiltert waren diese für eine Modulseite unerreichbar.
+- **Zwei Hops, aber nur durch den Stitch (2026-08-28):** Ein Hop reicht für ein
+  ungestitchtes Modul. R3–R5-Module sind jedoch gestitcht: das direkte Kind des
+  Vollmoduls ist ein **Halbmodul** (`component_type == "MODULE"`), und Sensoren,
+  Powerboard und Hybrid-Assemblies mit den Fotos hängen an diesem Halbmodul.
+  Bei einem Hop blieben auf dem Owner-Spiegel **22 Modulseiten leer**, obwohl
+  ihre Bilder eine Ebene tiefer existierten (Pfad ausnahmslos
+  `MODULE > MODULE > SENSOR|PWB|HYBRID_ASSEMBLY`, 67 Bild-Referenzen). Der Walk
+  nimmt deshalb einen zweiten Hop — **ausschliesslich durch ein Kind, das
+  selbst ein Modul ist**, nie durch die Kinder eines Sensors oder Powerboards.
+  Damit steigt die Zahl der Modulseiten mit mindestens einem Bild von 176 auf
+  198 (von 265), und der Query-Satz bleibt konstant (eine zusätzliche
+  Kind-Abfrage für die ganze Familie). Dieselbe Auswahl benutzt die
+  Evidenz-Gruppe des Worksheets (`preview._child_evidence_groups`), sonst
+  zeigte eine gestitchte Modulseite die **Fotos** eines Sensors, seine
+  **Messungen** aber nicht; dort waren 114 Evidenz-Teile auf 23 Modulen
+  verdeckt. Gemeinsame Regel: `attachment_store.assembled_parts`.
+- **Listen-Kachel leiht und markiert (2026-08-28):** `GET
+  /api/components/thumbnails` blieb auf fast jeder Modulzeile leer — 3 von 432
+  Bildern liegen auf einem Modul. Eine Komponente ohne eigenes Bild leiht jetzt
+  eines von einem verbauten Teil (`assembled_parts`, also inklusive Stitch).
+  Der Locator traegt dafuer zwei zusaetzliche Felder: `sn` ist die Komponente,
+  unter deren Seriennummer die Bytes liegen (die Binary-Route mit der
+  gelisteten Komponente aufzurufen ergaebe 404), `part` nennt Seriennummer,
+  Typ und lokalen Namen des Teils und ist genau dann gesetzt, wenn geliehen
+  wurde. Der Client **muss** eine geliehene Kachel markieren: das Foto eines
+  Sensors ist kein Bild des Moduls. Das eigene Bild gewinnt; `limit` bindet
+  weiter Komponenten, und der Leih-Durchgang fuellt nur Zeilen der bereits
+  begrenzten Menge, in einer festen Zahl von Statements.
 - Eigene Galerie, Kind-Galerie und Binary-Route lösen die Sichtbarkeit über
   `test_run_attachment_reference.component_sn` auf. Direkt erzeugte alte
   Blob-Zeilen ohne Referenz bleiben additiv über ihr repräsentatives

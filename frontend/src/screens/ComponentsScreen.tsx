@@ -754,16 +754,7 @@ export default function ComponentsScreen({
                 >
                   <td className="col-thumb">
                     {thumbnails[c.sn] !== undefined && (
-                      <img
-                        className="row-thumb"
-                        src={componentAttachmentUrl(
-                          c.sn,
-                          thumbnails[c.sn].code,
-                          thumbnails[c.sn].source,
-                        )}
-                        alt=""
-                        loading="lazy"
-                      />
+                      <ThumbnailTile thumbnail={thumbnails[c.sn]} />
                     )}
                   </td>
                   <td>
@@ -1861,6 +1852,47 @@ function storedImages(attachments: readonly TestRunAttachment[]): TestRunAttachm
     const contentType = (attachment.content_type ?? "").split(";")[0].trim().toLowerCase();
     return attachment.stored && (attachment.is_image || contentType.startsWith("image/"));
   });
+}
+
+/** One list tile: the row's own picture, or a part's, marked as such.
+ *
+ * Almost no photograph is taken of a module — the pictures are of the sensors,
+ * powerboards and hybrids built into it. Leaving the column blank hid them; so
+ * the row borrows one. It must never read as a picture of the module itself,
+ * so a borrowed tile carries a visible corner mark and names the part it came
+ * from in its title and alt text. The bytes are fetched under the part's own
+ * serial, which is where the mirror filed them.
+ */
+function ThumbnailTile({ thumbnail }: { thumbnail: ComponentThumbnail }) {
+  const part = thumbnail.part;
+  const label =
+    part === null
+      ? ""
+      : t.images.borrowedFrom(
+          describeComponent({
+            component_type: part.component_type,
+            type_code: part.type_code,
+          }),
+          part.local_name ?? part.sn,
+        );
+  const image = (
+    <img
+      className={part === null ? "row-thumb" : "row-thumb is-borrowed"}
+      src={componentAttachmentUrl(thumbnail.sn, thumbnail.code, thumbnail.source)}
+      alt={label}
+      title={label || undefined}
+      loading="lazy"
+    />
+  );
+  if (part === null) return image;
+  return (
+    <span className="row-thumb-wrap">
+      {image}
+      <span className="row-thumb-mark" aria-hidden="true">
+        ⧉
+      </span>
+    </span>
+  );
 }
 
 /** A grid of locally mirrored images, all belonging to the serial `sn`. */

@@ -727,6 +727,10 @@ const en = {
     childrenIntro:
       "Photographed on the parts built into this component, not on it. Shown with the serial they belong to.",
     ownEmpty: "No images mirrored for this component itself.",
+    // A list tile is borrowed from a part when the row has no picture of its
+    // own. It must say so: a sensor's photograph is not a picture of the
+    // module, and an unmarked tile would claim exactly that.
+    borrowedFrom: (part: string, name: string) => `Picture of ${part} ${name}`,
     offlineHint: "Locally mirrored images are unavailable while the backend is offline.",
     untitled: "image",
     close: "Close",
@@ -1684,6 +1688,16 @@ const en = {
     syncLightweight: "Lightweight",
     syncLightweightHint:
       "Sync module test evidence only and keep existing files without downloading new attachments.",
+    dataViewTitle: "Data detail",
+    dataViewDescription:
+      "Choose how much of a component's test data this browser renders. Nothing is deleted or hidden from the mirror — the full view is always one click away.",
+    dataViewScope: "Detail level",
+    dataViewFull: "Full",
+    dataViewFullHint:
+      "Show every mirrored measurement, run list and plot on a component page.",
+    dataViewGate: "Gate figures only",
+    dataViewGateHint:
+      "Show only what a stage decision is made on: the required test per stage, whether it passed, failed or is missing, and its date.",
     preferencesTitle: "Preferences",
     previewTitle: "Staged preview",
     previewDescription:

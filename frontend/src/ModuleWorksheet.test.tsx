@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   ComponentPreviewWorksheet,
@@ -25,6 +25,7 @@ import {
 } from "./api";
 import { t } from "./i18n";
 import ModuleWorksheet from "./ModuleWorksheet";
+import { DATA_VIEW_STORAGE_KEY } from "./dataViewPreference";
 
 vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
@@ -314,6 +315,43 @@ describe("ModuleWorksheet", () => {
     vi.mocked(postIngestOutboxProposal).mockResolvedValue(action);
     vi.mocked(getInstitutes).mockResolvedValue([]);
     vi.mocked(getTools).mockResolvedValue([]);
+  });
+
+  describe("gate-figures-only view", () => {
+    afterEach(() => {
+      window.localStorage.removeItem(DATA_VIEW_STORAGE_KEY);
+    });
+
+    it("reduces the worksheet to the figures a stage decision is made on", () => {
+      // Someone checking where production stands reads a wall of arrays to
+      // find three verdicts. Gate view is that reading, made directly: the
+      // required test per stage, its verdict and its date — nothing else.
+      window.localStorage.setItem(DATA_VIEW_STORAGE_KEY, "gate");
+
+      renderWorksheet({ canWrite: false });
+
+      // The verdict and its date stay; they are the decision.
+      expect(screen.getByText("GLUE_WEIGHT")).toBeInTheDocument();
+      expect(screen.getAllByText(t.worksheet.statusPassed).length).toBeGreaterThan(0);
+      expect(screen.getByText("MODULE_IV")).toBeInTheDocument();
+      expect(screen.getByText(t.worksheet.statusMissing)).toBeInTheDocument();
+
+      // The readings behind it do not.
+      expect(screen.queryAllByText(t.worksheet.colValues)).toHaveLength(0);
+      expect(screen.queryByText("Glue weight H1")).not.toBeInTheDocument();
+      expect(screen.queryByText(t.worksheet.runsAndPlots)).not.toBeInTheDocument();
+      // A test no stage requires is evidence, but not a gate figure.
+      expect(screen.queryByText("EXTRA_CHECK")).not.toBeInTheDocument();
+    });
+
+    it("leaves the full view untouched", () => {
+      window.localStorage.setItem(DATA_VIEW_STORAGE_KEY, "full");
+
+      renderWorksheet({ canWrite: false });
+
+      expect(screen.queryAllByText(t.worksheet.colValues).length).toBeGreaterThan(0);
+      expect(screen.getByText("EXTRA_CHECK")).toBeInTheDocument();
+    });
   });
 
   it("compacts the values cell: three scalars inline, the rest as +n, arrays as a point-count chip", () => {

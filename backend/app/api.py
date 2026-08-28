@@ -101,6 +101,7 @@ from app.schemas import (
     AssemblyPreviewOut,
     AssemblyStageOut,
     AttachmentLocatorOut,
+    ThumbnailPartOut,
     AttachmentSyncOut,
     AuditOut,
     ChildAttachmentsOut,
@@ -2210,7 +2211,7 @@ def component_thumbnails(
 
     settings = request.app.state.settings
     thumbnails: dict[str, AttachmentLocatorOut] = {}
-    for component_sn, row in thumbnail_attachments(
+    for component_sn, row, part in thumbnail_attachments(
         db, institute_code=institute_code, limit=limit
     ):
         if resolve_path(settings, row) is None:
@@ -2218,6 +2219,19 @@ def component_thumbnails(
         thumbnails[component_sn] = AttachmentLocatorOut(
             source=row.source,
             code=row.pdb_code,
+            # The bytes live under the part's serial when the tile is borrowed;
+            # calling the binary route with the listed component would 404.
+            sn=part.sn if part is not None else component_sn,
+            part=(
+                ThumbnailPartOut(
+                    sn=part.sn,
+                    component_type=part.component_type,
+                    type_code=part.type_code,
+                    local_name=part.local_name,
+                )
+                if part is not None
+                else None
+            ),
         )
     return thumbnails
 
@@ -3673,14 +3687,17 @@ def component_attachments(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ) -> ComponentAttachmentsOut:
-    """This component's mirrored attachment index, plus its children's images.
+    """This component's mirrored attachment index, plus its parts' images.
 
     The operator works on a module; the photographs hang on the parts bonded
     into it. On the owner's mirror 3 of 432 mirrored images sit on a module and
     241 on sensors that are a module's direct child — filtered by serial number
-    alone, a module page can never show them.
+    alone, a module page can never show them. For a stitched R3-R5 module the
+    parts hang one hop further down, below its half modules, so the walk takes
+    a second hop through a child that is itself a module (see
+    `attachment_store.child_image_attachments`).
 
-    They arrive in their own per-child group, tagged with the child's serial
+    They arrive in their own per-part group, tagged with that part's serial
     and component type, never merged into `attachments`: a photograph of a
     sensor is a statement about that sensor. This follows the worksheet's child
     evidence groups (`preview._child_evidence_groups`), including their cost

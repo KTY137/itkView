@@ -220,11 +220,28 @@ class TestRunAttachmentOut(BaseModel):
     is_image: bool
 
 
+class ThumbnailPartOut(BaseModel):
+    """The assembled part a borrowed list tile was taken from."""
+
+    sn: str
+    component_type: str
+    type_code: str
+    local_name: str | None
+
+
 class AttachmentLocatorOut(BaseModel):
-    """Public identity of one physical attachment blob."""
+    """Public identity of one physical attachment blob, and whose it is.
+
+    `sn` is the component whose mirror holds the bytes — the serial the binary
+    route must be called with, which is not the listed component when the tile
+    was borrowed. `part` is set exactly then, so a caller can mark the tile
+    instead of passing a sensor's photograph off as the module's.
+    """
 
     source: str
     code: str
+    sn: str
+    part: ThumbnailPartOut | None = None
 
 
 class ChildAttachmentsOut(BaseModel):

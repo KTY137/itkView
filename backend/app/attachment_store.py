@@ -37,7 +37,7 @@ import re
 import tarfile
 import tempfile
 import zlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from io import BytesIO
@@ -530,10 +530,58 @@ def is_displayable_image_sql(dialect_name: str):
     return normalized.in_(sorted(_DISPLAYABLE_IMAGE_CONTENT_TYPES))
 
 
+def _assembled_parts_for_parents(
+    session: Session, parent_ids: Sequence[int]
+) -> dict[int, list[Component]]:
+    """The single definition of "the parts a component is assembled from".
+
+    Direct children, plus one more hop through a child that is itself a module.
+    That second hop is the stitch of an R3-R5 module: the full module's direct
+    child is a half module, and the sensors, powerboard and hybrid assemblies
+    hang off the half module rather than off the full module. Without it a
+    stitched module shows its half modules and nothing they are made of — on
+    the owner's mirror that hid 70 image-bearing and 114 evidence-bearing
+    parts.
+
+    The walk never follows a sensor's or powerboard's own children, so this
+    stays the assembly relation the page displays rather than a tree walk.
+    Two queries for any number of parents, never one per component: the
+    gallery, the worksheet and the list column must agree on which parts belong
+    to a component, and they can only agree by asking here.
+    """
+    parents = list(dict.fromkeys(parent_ids))
+    if not parents:
+        return {}
+    parts: dict[int, list[Component]] = {parent_id: [] for parent_id in parents}
+    stitched: dict[int, int] = {}
+    for child in session.scalars(
+        select(Component).where(Component.parent_id.in_(parents)).order_by(Component.sn)
+    ):
+        parts[child.parent_id].append(child)
+        if (child.component_type or "").upper() == "MODULE":
+            stitched[child.id] = child.parent_id
+    if stitched:
+        for grandchild in session.scalars(
+            select(Component)
+            .where(Component.parent_id.in_(stitched))
+            .order_by(Component.sn)
+        ):
+            parts[stitched[grandchild.parent_id]].append(grandchild)
+        for group in parts.values():
+            group.sort(key=lambda component: component.sn)
+    return parts
+
+
+def assembled_parts(session: Session, parent_id: int) -> list[Component]:
+    """The parts of one component; see :func:`_assembled_parts_for_parents`."""
+
+    return _assembled_parts_for_parents(session, [parent_id]).get(parent_id, [])
+
+
 def child_image_attachments(
     session: Session, parent_sn: str
 ) -> list[tuple[Component, list[AttachmentView]]]:
-    """Stored images of a component's *direct* children, grouped per child.
+    """Stored images of the parts assembled into a component, grouped per part.
 
     An operator works on a module while the photographs hang on the parts
     bonded into it: in the owner's mirror 3 of 432 mirrored images sit on a
@@ -541,24 +589,23 @@ def child_image_attachments(
     are unreachable from any module page as long as the index is filtered by
     serial number alone.
 
+    One hop covers an unstitched module, but R3-R5 modules are stitched: the
+    full module's direct child is a half module, and the sensors, powerboard
+    and hybrid assemblies carrying the photographs are that half module's
+    children. Stopping at one hop left 22 of the owner's module pages empty
+    while their pictures existed one level below. So the walk takes a second
+    hop, and only through a child that is itself a module — the stitch — never
+    through a sensor's or powerboard's own children. That keeps the gallery to
+    the assembly relation the page displays instead of walking the tree.
+
     Only images, and only rows that claim a file: this feeds a gallery, and
     pulling a sensor's several hundred instrument `.txt` rows into a module
-    page would cost far more than it shows. Grandchildren are deliberately not
-    walked — one hop is the assembly relation the page already displays.
+    page would cost far more than it shows.
 
     A constant query set for the whole family, never one per child.
     """
-    parent = aliased(Component)
-    children = list(
-        session.scalars(
-            select(Component)
-            .where(
-                Component.parent_id
-                == select(parent.id).where(parent.sn == parent_sn).scalar_subquery()
-            )
-            .order_by(Component.sn)
-        )
-    )
+    parent_id = session.scalar(select(Component.id).where(Component.sn == parent_sn))
+    children = assembled_parts(session, parent_id) if parent_id is not None else []
     by_component = attachment_references_for_components(
         session,
         [child.sn for child in children],
@@ -652,11 +699,12 @@ def attachment_for_component(
     return _reference_view(attachment) if attachment is not None else None
 
 
-def thumbnail_attachments(
+def _own_thumbnail_attachments(
     session: Session,
     *,
     institute_code: str | None = None,
-    limit: int = 2000,
+    limit: int | None = None,
+    component_sns: Sequence[str] | None = None,
 ) -> list[tuple[str, TestRunAttachment]]:
     """One browser-displayable stored blob per component, with legacy fallback.
 
@@ -666,8 +714,10 @@ def thumbnail_attachments(
     associations cannot make the endpoint materialise an unbounded candidate
     set before applying its public limit. Filtering unsupported formats before
     ``MIN(id)`` lets a later JPEG/PNG win over an older TIFF.
+
+    ``component_sns`` restricts the candidates to a known set, which is how the
+    part pass below asks the same question about an already bounded family.
     """
-    capped_limit = max(1, min(limit, 5000))
     dialect_name = session.get_bind().dialect.name
     reference_statement = (
         select(
@@ -683,6 +733,10 @@ def thumbnail_attachments(
             is_displayable_image_sql(dialect_name),
         )
     )
+    if component_sns is not None:
+        reference_statement = reference_statement.where(
+            TestRunAttachmentReference.component_sn.in_(component_sns)
+        )
     if institute_code:
         reference_statement = reference_statement.join(
             Component, Component.sn == TestRunAttachmentReference.component_sn
@@ -700,6 +754,10 @@ def thumbnail_attachments(
         is_displayable_image_sql(dialect_name),
         ~matching_reference,
     )
+    if component_sns is not None:
+        legacy_statement = legacy_statement.where(
+            TestRunAttachment.component_sn.in_(component_sns)
+        )
     if institute_code:
         legacy_statement = legacy_statement.join(
             Component, Component.sn == TestRunAttachment.component_sn
@@ -712,9 +770,10 @@ def thumbnail_attachments(
         )
         .group_by(candidates.c.component_sn)
         .order_by(candidates.c.component_sn)
-        .limit(capped_limit)
-        .subquery()
     )
+    if limit is not None:
+        chosen = chosen.limit(limit)
+    chosen = chosen.subquery()
     return list(
         session.execute(
             select(chosen.c.component_sn, TestRunAttachment)
@@ -722,6 +781,80 @@ def thumbnail_attachments(
             .order_by(chosen.c.component_sn)
         )
     )
+
+
+def thumbnail_attachments(
+    session: Session,
+    *,
+    institute_code: str | None = None,
+    limit: int = 2000,
+) -> list[tuple[str, TestRunAttachment, Component | None]]:
+    """One list tile per component: its own picture, else one of its parts'.
+
+    Almost no photograph is taken of a module — 3 of 432 on the owner's mirror,
+    the rest of the sensors, powerboards and hybrids built into it. Filtered by
+    serial number alone the list column is therefore blank on nearly every
+    module row while the pictures exist one hop away.
+
+    So a component without a picture of its own borrows one from the parts it
+    is assembled from (`assembled_parts`, which follows the R3-R5 stitch). The
+    third element names that part, and is `None` when the tile is the
+    component's own. It is not decoration: whose part is in the picture is part
+    of what the picture says, so the caller must mark a borrowed tile rather
+    than pass a sensor's photograph off as the module's.
+
+    Own pictures win, and the borrow never enlarges the answer: `limit` bounds
+    components in the own pass, and the part pass only fills rows already in
+    that bounded set. Cost stays a fixed number of statements — two component
+    queries for the whole family and one candidate query for all parts at once,
+    never one per row.
+    """
+    capped_limit = max(1, min(limit, 5000))
+    own = _own_thumbnail_attachments(
+        session, institute_code=institute_code, limit=capped_limit
+    )
+    tiles: list[tuple[str, TestRunAttachment, Component | None]] = [
+        (component_sn, attachment, None) for component_sn, attachment in own
+    ]
+    covered = {component_sn for component_sn, _ in own}
+
+    listed = select(Component.id, Component.sn)
+    if institute_code:
+        listed = listed.where(Component.institute_code == institute_code)
+    blank = [
+        (component_id, component_sn)
+        for component_id, component_sn in session.execute(
+            listed.order_by(Component.sn).limit(capped_limit)
+        )
+        if component_sn not in covered
+    ]
+    if not blank:
+        return sorted(tiles, key=lambda tile: tile[0])[:capped_limit]
+
+    parts_by_parent = _assembled_parts_for_parents(
+        session, [component_id for component_id, _ in blank]
+    )
+    part_sns = {part.sn for parts in parts_by_parent.values() for part in parts}
+    if not part_sns:
+        return sorted(tiles, key=lambda tile: tile[0])[:capped_limit]
+
+    by_part = {
+        part_sn: attachment
+        for part_sn, attachment in _own_thumbnail_attachments(
+            session, component_sns=sorted(part_sns)
+        )
+    }
+    for component_id, component_sn in blank:
+        for part in parts_by_parent.get(component_id, ()):
+            attachment = by_part.get(part.sn)
+            if attachment is not None:
+                tiles.append((component_sn, attachment, part))
+                break
+    # Both passes are bounded by the same component limit, but they select
+    # different components — the own pass takes the first N *with a picture*,
+    # the borrow pass fills blanks among the first N overall. Cap the union so
+    # the endpoint cannot return more components than it was asked for.
+    return sorted(tiles, key=lambda tile: tile[0])[:capped_limit]
 
 
 def attachment_read_model(

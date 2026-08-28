@@ -1911,6 +1911,16 @@ def test_component_followup_survives_restart_without_stealing_a_fresh_lease(
     old_sn = "20USEM00000741"
     new_sn = "20USEM00000742"
 
+    # Order matters and models the only way this state is reachable now: a
+    # component start refuses to take its lease while a fresh evidence lease
+    # exists (`test_component_start_waits_for_active_evidence_sync`), but the
+    # evidence lease deliberately does not look at the component scope. So the
+    # component job claims first, and the older evidence snapshot then starts
+    # alongside it — exactly the overlap a restart has to survive.
+    component_job_id = _queue_component_job(
+        session_factory, requested_by="operator@example.org"
+    )
+
     old_evidence_id = _queue_evidence_job(
         session_factory, requested_by="operator@example.org"
     )
@@ -1922,10 +1932,6 @@ def test_component_followup_survives_restart_without_stealing_a_fresh_lease(
         old_evidence.started_at = old_snapshot_started
         old_evidence.updated_at = utcnow()
         session.commit()
-
-    component_job_id = _queue_component_job(
-        session_factory, requested_by="operator@example.org"
-    )
 
     class _SimulatedProcessExit(BaseException):
         pass

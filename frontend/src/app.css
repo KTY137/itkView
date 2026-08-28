@@ -2746,6 +2746,37 @@ code {
   display: block;
 }
 
+/* A tile borrowed from an assembled part is marked, never passed off as a
+   picture of the row itself: dashed edge plus a corner glyph, so it reads as
+   borrowed in both themes and without relying on colour alone. */
+.row-thumb-wrap {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+}
+
+.staged-component-thumb.is-borrowed {
+  border-style: dashed;
+}
+
+.row-thumb.is-borrowed {
+  border-style: dashed;
+  opacity: 0.9;
+}
+
+.row-thumb-mark {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  font-size: 9px;
+  line-height: 1;
+  padding: 1px 2px;
+  border-radius: 3px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
 /* Phase-4 site operations: compact cockpit forms and inline detail panels. */
 .phase4-form {
   display: flex;

@@ -42,6 +42,11 @@ import type {
   WorksheetStagedRef,
 } from "./api";
 import { useDataEntryProfile } from "./dataEntryProfile";
+import {
+  readDataViewPreference,
+  subscribeDataViewPreference,
+} from "./dataViewPreference";
+import type { DataView } from "./dataViewPreference";
 import { planFieldLayout } from "./fieldLayout";
 import { DerivedDetail, DerivedVerdicts } from "./GlueDerivation";
 import type { DerivedSource } from "./GlueDerivation";
@@ -86,6 +91,9 @@ export type ModuleWorksheetProps = {
 };
 
 const TABLE_COLUMNS = 5;
+// Gate view drops the values column and the run/plot affordance, so a row is
+// test, verdict and date.
+const GATE_TABLE_COLUMNS = 3;
 // The wire exposes the PDB lifecycle state verbatim. Only this exact terminal
 // state withdraws a run; `requestedToDelete` still counts as live evidence.
 const WITHDRAWN_TEST_RUN_STATE = "deleted";
@@ -613,11 +621,31 @@ export default function ModuleWorksheet({
   onViewStaged,
   onUseFileUpload,
 }: ModuleWorksheetProps) {
+  const [dataView, setDataView] = useState<DataView>(() => readDataViewPreference());
+  useEffect(() => subscribeDataViewPreference(setDataView), []);
+  // Authoring needs the values themselves. Tie the reduction to the read-only
+  // worksheet rather than to the product: whoever can edit a row always sees
+  // what they are editing, however the preference was stored.
+  const gateOnly = dataView === "gate" && !canWrite;
+  const tableColumns = gateOnly ? GATE_TABLE_COLUMNS : TABLE_COLUMNS;
+
   const visibleGroups = useMemo(
-    () => worksheet.groups.filter((group) => group.rows.length > 0),
-    [worksheet],
+    () =>
+      worksheet.groups.filter(
+        (group) =>
+          group.rows.length > 0 &&
+          // The additional group holds tests no stage requires: real evidence,
+          // but not a figure any stage decision is made on.
+          !(gateOnly && group.stage === null),
+      ),
+    [worksheet, gateOnly],
   );
-  const childGroups = useMemo(() => worksheet.children ?? [], [worksheet]);
+  // Child evidence never satisfies this component's requirements — the page
+  // says so itself — so it is not a gate figure either.
+  const childGroups = useMemo(
+    () => (gateOnly ? [] : (worksheet.children ?? [])),
+    [worksheet, gateOnly],
+  );
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [runsRequested, setRunsRequested] = useState(false);
@@ -982,12 +1010,14 @@ export default function ModuleWorksheet({
               <thead>
                 <tr>
                   <th scope="col">{t.worksheet.colTest}</th>
-                  <th scope="col">{t.worksheet.colValues}</th>
+                  {!gateOnly && <th scope="col">{t.worksheet.colValues}</th>}
                   <th scope="col">{t.worksheet.colStatus}</th>
                   <th scope="col">{t.worksheet.colDate}</th>
-                  <th scope="col">
-                    <span className="sr-only">{t.worksheet.colActions}</span>
-                  </th>
+                  {!gateOnly && (
+                    <th scope="col">
+                      <span className="sr-only">{t.worksheet.colActions}</span>
+                    </th>
+                  )}
                 </tr>
               </thead>
               <tbody>
@@ -1020,15 +1050,17 @@ export default function ModuleWorksheet({
                         }}
                       >
                         <td className="mono">{row.test_type}</td>
-                        <td>
-                          {/* The judgement first, the readings that produced
-                              it below: the operator reads the sheet for the
-                              verdict, not for the scale values. Rows the
-                              profile configures no derivation for are
-                              untouched. */}
-                          {rowDerived !== null && <DerivedVerdicts derived={rowDerived} />}
-                          <ValuesCell latest={row.latest} />
-                        </td>
+                        {!gateOnly && (
+                          <td>
+                            {/* The judgement first, the readings that produced
+                                it below: the operator reads the sheet for the
+                                verdict, not for the scale values. Rows the
+                                profile configures no derivation for are
+                                untouched. */}
+                            {rowDerived !== null && <DerivedVerdicts derived={rowDerived} />}
+                            <ValuesCell latest={row.latest} />
+                          </td>
+                        )}
                         <td>
                           <span className={STATUS_CHIP_CLASS[row.status]}>
                             {statusLabel(row.status)}
@@ -1037,6 +1069,7 @@ export default function ModuleWorksheet({
                         <td className={row.latest?.measured_at ? undefined : "muted"}>
                           {formatMeasuredAt(row.latest?.measured_at ?? null)}
                         </td>
+                        {!gateOnly && (
                         <td>
                           <span className="ws-actions">
                             {row.run_count > 0 && (
@@ -1073,10 +1106,11 @@ export default function ModuleWorksheet({
                             )}
                           </span>
                         </td>
+                        )}
                       </tr>
                       {staged.map((ref) => (
                         <tr className="ws-ghost-row" key={ref.outbox_action_id}>
-                          <td colSpan={TABLE_COLUMNS}>
+                          <td colSpan={tableColumns}>
                             <div className="ghost-row">
                               <span className="ghost-summary">
                                 {t.worksheet.stagedUpload(ref.outbox_action_id)}
@@ -1101,7 +1135,7 @@ export default function ModuleWorksheet({
                       ))}
                       {isEditing && (
                         <tr className="ws-edit-row">
-                          <td colSpan={TABLE_COLUMNS}>
+                          <td colSpan={tableColumns}>
                             <div
                               className="ws-edit-strip"
                               ref={(el) => {
@@ -1281,9 +1315,9 @@ export default function ModuleWorksheet({
                           </td>
                         </tr>
                       )}
-                      {isExpanded && (
+                      {isExpanded && !gateOnly && (
                         <tr className="ws-detail-row" id={detailId}>
-                          <td colSpan={TABLE_COLUMNS}>
+                          <td colSpan={tableColumns}>
                             <RunDetailContent
                               sn={componentSn}
                               testType={row.test_type}

@@ -76,7 +76,9 @@ def satisfied_test_results_for_components(
             )
         )
     )
-    mirror_winner_rank: dict[tuple[str, str], tuple[bool, datetime, datetime, int]] = {}
+    mirror_winner_rank: dict[
+        tuple[str, str], tuple[bool, datetime, datetime, int, int]
+    ] = {}
     mirrored_refs: set[tuple[str, str]] = set()
     for row in evidence_rows:
         if row.external_ref:
@@ -91,6 +93,7 @@ def satisfied_test_results_for_components(
             mirror_winner_rank[(row.component_sn, row.test_type)] = _evidence_rank(
                 measured_at=row.measured_at,
                 fallback_at=row.synced_at,
+                source_precedence=_MIRROR_PRECEDENCE,
                 tie_breaker=row.id,
             )
     component_institutes = dict(
@@ -146,6 +149,7 @@ def satisfied_test_results_for_components(
         action_rank = _evidence_rank(
             measured_at=measured_at,
             fallback_at=action.updated_at,
+            source_precedence=_CONFIRMATION_PRECEDENCE,
             tie_breaker=action.id,
         )
         current_rank = winner_rank.get(result_key)
@@ -177,9 +181,24 @@ def _payload_measured_at(value: object) -> datetime | None:
         return None
 
 
+# Source precedence for an exact timestamp tie. `tie_breaker` below orders
+# rows inside one source only: an evidence id and an outbox-action id come from
+# unrelated sequences, so comparing them across sources decides nothing. A
+# confirmation is written after the mirror row it supersedes, and the mirror
+# table is thousands of runs deep while local actions start at one — leaving
+# the tie to the ids handed essentially every tie to the stale mirrored verdict
+# and kept the gate shut until the next sync.
+_MIRROR_PRECEDENCE = 0
+_CONFIRMATION_PRECEDENCE = 1
+
+
 def _evidence_rank(
-    *, measured_at: datetime | None, fallback_at: datetime, tie_breaker: int
-) -> tuple[bool, datetime, datetime, int]:
+    *,
+    measured_at: datetime | None,
+    fallback_at: datetime,
+    source_precedence: int,
+    tie_breaker: int,
+) -> tuple[bool, datetime, datetime, int, int]:
     """Shared newest-run order for mirror rows and provisional confirmations."""
 
     epoch = datetime.min
@@ -187,6 +206,7 @@ def _evidence_rank(
         measured_at is not None,
         _utc_naive(measured_at) if measured_at is not None else epoch,
         _utc_naive(fallback_at),
+        source_precedence,
         tie_breaker,
     )
 

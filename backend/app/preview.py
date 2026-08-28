@@ -14,11 +14,15 @@ collapsed "All mirrored runs" section is opened. Raw measured values (an IV
 sweep is tens of kilobytes on its own) must therefore never be added back to
 the preview response.
 
-The worksheet also carries the evidence of the component's direct children, in
-one group per child (``worksheet.children``). On real data that is where nearly
-all of a module's history lives — 720 of 14 759 mirrored runs hang on MODULE
-components, the rest on sensors, hybrids, powerboards and, for R5 ring modules,
-on the two half-modules that carry their metrology, glue weight and PS IV.
+The worksheet also carries the evidence of the parts the component is assembled
+from, in one group per part (``worksheet.children``). On real data that is where
+nearly all of a module's history lives — 720 of 14 759 mirrored runs hang on
+MODULE components, the rest on sensors, hybrids, powerboards and, for R5 ring
+modules, on the two half-modules that carry their metrology, glue weight and PS
+IV. A stitched module's sensors hang off those half-modules rather than off the
+module itself, so the part list takes one hop through a child that is itself a
+module (``attachment_store.assembled_parts``); one hop alone hid 114
+evidence-bearing parts on the owner's mirror.
 Child evidence is shown, never merged into the component's own rows: a
 requirement check is a statement about *this* component, and whether a child's
 passing test may satisfy its parent's requirement is a separate domain decision
@@ -35,7 +39,7 @@ from sqlalchemy import String, cast, select
 from sqlalchemy.orm import Session
 
 from app.assembly import ASSEMBLY_ACTION_KIND, evaluate_assembly
-from app.attachment_store import attachment_counts_by_run
+from app.attachment_store import assembled_parts, attachment_counts_by_run
 from app.domain.stages import StageModel, stage_model_from_settings
 from app.glue_service import (
     GlueDerivationModel,
@@ -544,7 +548,12 @@ class _RunMeta:
 def _child_evidence_groups(
     session: Session, children: Sequence[Component]
 ) -> list[dict[str, Any]]:
-    """One evidence group per direct child, in the same compact row shape.
+    """One evidence group per assembled part, in the same compact row shape.
+
+    The caller selects the parts (`attachment_store.assembled_parts`): direct
+    children, plus one hop through a child that is itself a module, because an
+    R3-R5 module is stitched and its sensors and powerboards hang off its half
+    modules.
 
     Cost is independent of how many children there are: one query for the
     children's run metadata, one for the payloads of the selected newest runs
@@ -753,14 +762,9 @@ def build_component_preview(
         attachment_counts=attachment_counts,
         glue_model=glue_model,
     )
-    children = list(
-        session.scalars(
-            select(Component)
-            .where(Component.parent_id == component.id)
-            .order_by(Component.sn)
-        )
+    worksheet["children"] = _child_evidence_groups(
+        session, assembled_parts(session, component.id)
     )
-    worksheet["children"] = _child_evidence_groups(session, children)
 
     return {
         "current": {

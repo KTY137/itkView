@@ -338,7 +338,12 @@ beforeEach(() => {
 describe("staged measurement values", () => {
   it("uses the source-qualified thumbnail locator for each component group", async () => {
     vi.mocked(getComponentThumbnails).mockResolvedValue({
-      [DUMMY_SN]: { source: "share_link", code: "shared-code" },
+      [DUMMY_SN]: {
+        source: "share_link",
+        code: "shared-code",
+        sn: DUMMY_SN,
+        part: null,
+      },
     });
 
     await renderScreen();

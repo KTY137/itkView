@@ -70,7 +70,12 @@ it("uses the source-qualified thumbnail locator in the component list", async ()
   vi.mocked(getComponents).mockResolvedValue([COMPONENT]);
   vi.mocked(getInstitutes).mockResolvedValue([INSTITUTE]);
   vi.mocked(getComponentThumbnails).mockResolvedValue({
-    [COMPONENT.sn]: { source: "share_link", code: "shared-code" },
+    [COMPONENT.sn]: {
+      source: "share_link",
+      code: "shared-code",
+      sn: COMPONENT.sn,
+      part: null,
+    },
   });
 
   const { container } = render(
@@ -85,6 +90,46 @@ it("uses the source-qualified thumbnail locator in the component list", async ()
       "src",
       `/api/components/${COMPONENT.sn}/attachments/shared-code?source=share_link`,
     );
+  });
+});
+
+it("marks a tile borrowed from an assembled part and names whose it is", async () => {
+  // A module almost never has a picture of its own — the photographs are of
+  // the parts built into it. The row borrows one, but an unmarked tile would
+  // claim a sensor's photograph is a picture of the module.
+  vi.mocked(getComponents).mockResolvedValue([COMPONENT]);
+  vi.mocked(getInstitutes).mockResolvedValue([INSTITUTE]);
+  vi.mocked(getComponentThumbnails).mockResolvedValue({
+    [COMPONENT.sn]: {
+      source: "pdb",
+      code: "sensorphoto",
+      sn: "20USES50000515",
+      part: {
+        sn: "20USES50000515",
+        component_type: "SENSOR",
+        type_code: "ATLAS18R5",
+        local_name: "TUDO-S-0042",
+      },
+    },
+  });
+
+  const { container } = render(
+    <ComponentsScreen
+      componentSync={syncController("components")}
+      evidenceSync={syncController("evidence")}
+    />,
+  );
+
+  await waitFor(() => {
+    const tile = container.querySelector(".row-thumb");
+    // The bytes live under the part's serial, not the listed component's.
+    expect(tile).toHaveAttribute(
+      "src",
+      "/api/components/20USES50000515/attachments/sensorphoto?source=pdb",
+    );
+    expect(tile).toHaveClass("is-borrowed");
+    expect(tile?.getAttribute("alt")).toContain("TUDO-S-0042");
+    expect(container.querySelector(".row-thumb-mark")).not.toBeNull();
   });
 });
 

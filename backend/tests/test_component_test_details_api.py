@@ -287,7 +287,7 @@ def test_source_qualified_identity_keeps_equal_codes_addressable(
     # The thumbnail locator names the exact blob selected by MIN(id), so its
     # binary request cannot fall through to the other source.
     thumbnail = as_operator.get("/api/components/thumbnails").json()[SN]
-    assert thumbnail == {"source": "pdb", "code": code}
+    assert thumbnail == {"source": "pdb", "code": code, "sn": SN, "part": None}
     exact_thumbnail = as_operator.get(
         f"/api/components/{SN}/attachments/{thumbnail['code']}"
         f"?source={thumbnail['source']}"
@@ -308,7 +308,9 @@ def test_thumbnails_index_one_image_per_component(as_operator, attachments_dir, 
     response = as_operator.get("/api/components/thumbnails")
 
     assert response.status_code == 200
-    assert response.json() == {SN: {"source": "pdb", "code": "att-1"}}
+    assert response.json() == {
+        SN: {"source": "pdb", "code": "att-1", "sn": SN, "part": None}
+    }
 
 
 def test_thumbnails_skip_files_that_are_not_on_disk(
@@ -491,7 +493,12 @@ def test_one_blob_stays_visible_on_every_component_and_run_that_references_it(
 
     thumbnails = as_operator.get("/api/components/thumbnails").json()
     assert {sn: thumbnails[sn] for sn in component_sns} == {
-        sn: {"source": "share_link", "code": shared_code}
+        sn: {
+            "source": "share_link",
+            "code": shared_code,
+            "sn": sn,
+            "part": None,
+        }
         for sn in component_sns
     }
     family = as_operator.get(f"/api/components/{parent_sn}/attachments").json()

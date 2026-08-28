@@ -1,7 +1,10 @@
 """Tests for the stage-move suggestion engine (pure domain + API)."""
 
+from datetime import datetime
+
 from authutil import create_institute_profile
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.stages import (
@@ -10,7 +13,7 @@ from app.domain.stages import (
     evaluate_stage,
     stage_model_from_settings,
 )
-from app.models import OutboxAction
+from app.models import OutboxAction, TestRunEvidence
 from app.outbox import OutboxStatus
 from app.seed_demo import DEMO_FIXTURE_PATH
 from app.sync import load_fixture_records, sync_components
@@ -223,6 +226,52 @@ def test_confirmed_upload_overrides_stale_mirrored_evidence(
     assert body["move_suggested"] is True
     checks = {c["test_type"]: c["status"] for c in body["checks"]}
     assert checks["MODULE_BOW"] == "passed"
+
+
+def test_confirmed_upload_wins_a_timestamp_tie_with_the_mirror(
+    client: TestClient, session_factory, tudo
+):
+    """A same-tick confirmation must not lose to the row it supersedes.
+
+    Both undated sources fall back to their write time, and a coarse clock can
+    stamp the mirror row and the confirmation identically. The two ids that
+    used to break that tie come from unrelated sequences — the evidence table
+    is thousands of mirrored runs deep while local actions start at one — so
+    the stale mirrored verdict won essentially every tie and kept the gate shut
+    until the next sync. The confirmation is written after the row it replaces,
+    so an exact tie belongs to it.
+    """
+    with session_factory() as session:
+        sync_components(session, load_fixture_records(DEMO_FIXTURE_PATH))
+        session.commit()
+    sn = "20USE5M0000703"
+    for test_type in ("VISUAL_INSPECTION", "MODULE_IV_PS_V1", "GLUE_WEIGHT", "MODULE_METROLOGY"):
+        mirror_test_evidence(session_factory, sn=sn, test_type=test_type, passed=True)
+    mirror_test_evidence(session_factory, sn=sn, test_type="MODULE_BOW", passed=False)
+    confirm_upload(session_factory, tudo["id"], sn=sn, test_type="MODULE_BOW", passed=True)
+
+    same_tick = datetime(2026, 8, 28, 12, 0, 0)
+    with session_factory() as session:
+        evidence = session.scalar(
+            select(TestRunEvidence).where(
+                TestRunEvidence.component_sn == sn,
+                TestRunEvidence.test_type == "MODULE_BOW",
+            )
+        )
+        action = session.scalar(select(OutboxAction))
+        evidence.synced_at = same_tick
+        action.updated_at = same_tick
+        # The mirror row's id outranks the action's, which is the ordering the
+        # old cross-table tie-breaker rewarded.
+        assert evidence.id > action.id
+        session.commit()
+
+    body = client.get(f"/api/components/{sn}/stage-suggestion").json()
+
+    checks = {c["test_type"]: c["status"] for c in body["checks"]}
+    assert checks["MODULE_BOW"] == "passed"
+    assert body["move_suggested"] is True
+    assert body["blocking"] == []
 
 
 def test_stage_suggestion_endpoint_blocks_on_failed_upload(

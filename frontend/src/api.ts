@@ -1075,9 +1075,24 @@ export type TestRunDetail = {
   attachments: TestRunAttachment[];
 };
 
+/** The assembled part a borrowed list tile was taken from. */
+export type ThumbnailPart = {
+  sn: string;
+  component_type: string;
+  type_code: string;
+  local_name: string | null;
+};
+
 export type ComponentThumbnail = {
   source: string;
   code: string;
+  /** Component whose mirror holds the bytes — the serial the binary route
+   * needs. Not the listed component when the tile was borrowed. */
+  sn: string;
+  /** Set exactly when the tile is a part's picture, never the row's own. The
+   * caller must mark it: whose part is in the picture is part of what the
+   * picture says. */
+  part: ThumbnailPart | null;
 };
 
 /** Serial number -> source-qualified attachment, one stored image per component.

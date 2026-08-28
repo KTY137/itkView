@@ -169,8 +169,112 @@ def test_a_component_with_only_instrument_data_yields_no_thumbnail(
     thumbnails = as_operator.get("/api/components/thumbnails?limit=1").json()
 
     assert thumbnails == {
-        "20USES40009002": {"source": "pdb", "code": "photo-9002"}
+        "20USES40009002": {
+            "source": "pdb",
+            "code": "photo-9002",
+            "sn": "20USES40009002",
+            "part": None,
+        }
     }
+
+
+def test_a_module_row_borrows_the_picture_of_a_part_and_says_whose_it_is(
+    as_operator, attachments_dir
+):
+    """Almost no photograph is taken of a module: 3 of 432 on the owner's
+    mirror, the rest of its parts. A list column filtered by serial alone is
+    therefore empty on nearly every module row while the pictures exist.
+
+    The row borrows a part's picture rather than staying blank, but never
+    silently: `sn` names the component whose mirror holds the bytes, and `part`
+    names whose part is in the picture, so the tile can be marked. Without that
+    marking a sensor's photograph would read as a photograph of the module.
+    """
+    factory = as_operator.app.state.session_factory
+    with factory() as session:
+        module = _component(session, MODULE_SN)
+        sensor = _component(
+            session,
+            f"{MODULE_SN}C0",
+            component_type="SENSOR",
+            type_code="ATLAS18R5",
+            parent=module,
+        )
+        sensor.local_name = "TUDO-S-0042"
+        _image(session, attachments_dir, sensor.sn, "sensorphoto")
+        session.commit()
+
+    thumbnails = as_operator.get("/api/components/thumbnails").json()
+
+    assert thumbnails[MODULE_SN] == {
+        "source": "pdb",
+        "code": "sensorphoto",
+        "sn": f"{MODULE_SN}C0",
+        "part": {
+            "sn": f"{MODULE_SN}C0",
+            "component_type": "SENSOR",
+            "type_code": "ATLAS18R5",
+            "local_name": "TUDO-S-0042",
+        },
+    }
+    # The part keeps its own unmarked tile: the picture is its own there.
+    assert thumbnails[f"{MODULE_SN}C0"]["part"] is None
+
+
+def test_a_components_own_picture_outranks_a_parts_picture(
+    as_operator, attachments_dir
+):
+    factory = as_operator.app.state.session_factory
+    with factory() as session:
+        module = _component(session, MODULE_SN)
+        sensor = _component(
+            session,
+            f"{MODULE_SN}C0",
+            component_type="SENSOR",
+            type_code="ATLAS18R5",
+            parent=module,
+        )
+        _image(session, attachments_dir, sensor.sn, "sensorphoto")
+        _image(session, attachments_dir, module.sn, "ownphoto")
+        session.commit()
+
+    thumbnails = as_operator.get("/api/components/thumbnails").json()
+
+    assert thumbnails[MODULE_SN]["code"] == "ownphoto"
+    assert thumbnails[MODULE_SN]["sn"] == MODULE_SN
+    assert thumbnails[MODULE_SN]["part"] is None
+
+
+def test_a_stitched_module_row_borrows_through_its_half_module(
+    as_operator, attachments_dir
+):
+    """Same stitch as the gallery: for R3-R5 the parts hang under a half
+    module, so a one-hop borrow would leave the full module's row blank."""
+    factory = as_operator.app.state.session_factory
+    with factory() as session:
+        stitched = _component(session, MODULE_SN, type_code="R5")
+        half = _component(
+            session,
+            f"{MODULE_SN}H0",
+            component_type="MODULE",
+            type_code="R5M0",
+            parent=stitched,
+        )
+        sensor = _component(
+            session,
+            f"{MODULE_SN}S0",
+            component_type="SENSOR",
+            type_code="ATLAS18R5",
+            parent=half,
+        )
+        _image(session, attachments_dir, sensor.sn, "deepphoto")
+        session.commit()
+
+    thumbnails = as_operator.get("/api/components/thumbnails").json()
+
+    assert thumbnails[MODULE_SN]["code"] == "deepphoto"
+    assert thumbnails[MODULE_SN]["part"]["sn"] == f"{MODULE_SN}S0"
+    assert thumbnails[f"{MODULE_SN}H0"]["part"]["sn"] == f"{MODULE_SN}S0"
 
 
 def test_thumbnails_still_skip_an_image_whose_file_is_gone(as_operator, attachments_dir):
@@ -273,10 +377,17 @@ def test_thumbnails_choose_browser_displayable_images_for_legacy_and_association
     ).json()
 
     assert thumbnails == {
-        legacy_mixed: {"source": "pdb", "code": "legacy-newer-jpeg"},
+        legacy_mixed: {
+            "source": "pdb",
+            "code": "legacy-newer-jpeg",
+            "sn": legacy_mixed,
+            "part": None,
+        },
         referenced_mixed: {
             "source": "pdb",
             "code": "reference-newer-jpeg",
+            "sn": referenced_mixed,
+            "part": None,
         },
     }
 
@@ -324,10 +435,14 @@ def test_thumbnail_mime_normalization_matches_the_browser(
     assert thumbnails[legacy_sn] == {
         "source": "pdb",
         "code": "legacy-spaced-jpeg",
+        "sn": legacy_sn,
+        "part": None,
     }
     assert thumbnails[referenced_sn] == {
         "source": "pdb",
         "code": "reference-spaced-jpeg",
+        "sn": referenced_sn,
+        "part": None,
     }
 
 
@@ -381,6 +496,60 @@ def test_a_module_gallery_carries_its_childrens_images_tagged_by_child(
         for group in body["children"]
         for attachment in group["attachments"]
     )
+
+
+def test_a_stitched_module_gallery_reaches_through_its_half_modules(
+    as_operator, attachments_dir
+):
+    """R3-R5 modules are stitched, so their parts hang one hop further down.
+
+    A full stitched module's direct child is a half module, and the sensors,
+    powerboard and hybrid assemblies carrying the photographs are that half
+    module's children. Stopping at one hop is right for an unstitched module
+    but leaves every stitched module page empty while its pictures exist: on
+    the owner's mirror that silenced 22 modules whose only images sit at
+    `MODULE > MODULE > SENSOR|PWB|HYBRID_ASSEMBLY`. The extra hop is taken
+    only through a child that is itself a module, so no unrelated
+    grandchildren are pulled into the gallery.
+    """
+    factory = as_operator.app.state.session_factory
+    with factory() as session:
+        stitched = _component(session, MODULE_SN, type_code="R5")
+        half = _component(
+            session,
+            f"{MODULE_SN}H0",
+            component_type="MODULE",
+            type_code="R5M0",
+            parent=stitched,
+        )
+        sensor = _component(
+            session,
+            f"{MODULE_SN}S0",
+            component_type="SENSOR",
+            type_code="ATLAS18R5",
+            parent=half,
+        )
+        # A sensor hanging off the half module's own child must not be pulled
+        # in: the extra hop follows the stitch, it does not walk the tree.
+        deeper = _component(
+            session,
+            f"{MODULE_SN}S1",
+            component_type="SENSOR",
+            type_code="ATLAS18R5",
+            parent=sensor,
+        )
+        _image(session, attachments_dir, half.sn, "halfphoto")
+        _image(session, attachments_dir, sensor.sn, "sensorphoto")
+        _image(session, attachments_dir, deeper.sn, "toodeep")
+        session.commit()
+
+    body = as_operator.get(f"/api/components/{MODULE_SN}/attachments").json()
+
+    groups = {group["sn"]: group for group in body["children"]}
+    assert [a["code"] for a in groups[f"{MODULE_SN}H0"]["attachments"]] == ["halfphoto"]
+    assert [a["code"] for a in groups[f"{MODULE_SN}S0"]["attachments"]] == ["sensorphoto"]
+    assert groups[f"{MODULE_SN}S0"]["component_type"] == "SENSOR"
+    assert f"{MODULE_SN}S1" not in groups
 
 
 def test_child_gallery_normalizes_image_mime_case_and_parameters(
