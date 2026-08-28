@@ -31,8 +31,8 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-28)
 
-- **itkView wird als eigenes fail-closed Read-only-Release `v0.1.0`
-  vorbereitet (2026-08-28):** Der gemeinsam gepruefte Kern baut wahlweise
+- **itkView ist als eigenes fail-closed Read-only-Release `v0.1.0`
+  abgenommen (2026-08-28):** Der gemeinsam gepruefte Kern baut wahlweise
   itkView oder fuer explizite Regressionen itkFlow; das dedizierte
   itkView-Repository startet, testet und paketiert ohne Variantenschalter
   immer das eigenstaendig gebrandete itkView. Im Viewer verschwinden
@@ -52,8 +52,13 @@ vom Design-Ziel abdriftet.
   **Abnahme:** Backend offline `1282 passed` plus `41` fokussierte finale
   Varianten-/Desktop-Tests, Frontend `316 passed`, View-Default- und expliziter
   Flow-Regressionsbuild, sechs Desktop-Variantenvertraege sowie Compose-
-  Aufloesung sind gruen. Offen sind nur noch der paketierte Sidecar-Smoke, die
-  Installer-Pruefung, Tag und GitHub-Release.
+  Aufloesung sind gruen. Der paketierte Sidecar meldet `itkView 0.1.0`,
+  `write_features_enabled=false` und `pdb_write_scope=disabled`; SPA und
+  Control-Plane sind erreichbar, Outbox sowie unbekannte Mutationen antworten
+  mit `403 itkview_read_only`, und nur `itkview.db` entsteht im isolierten
+  Smoke-Verzeichnis. Der unsignierte NSIS-Installer
+  `itkView_0.1.0_x64-setup.exe` ist damit fuer Tag und GitHub-Release im
+  ausschliesslich dafuer vorgesehenen Repository `KTY137/itkView` freigegeben.
 
 - **Modul-Uebersichten markieren konfigurierte Gate-Abweichungen
   fail-closed (2026-08-28):** `GET /api/components` und die Detailantwort
