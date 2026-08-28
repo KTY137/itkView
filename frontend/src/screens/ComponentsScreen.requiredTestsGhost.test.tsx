@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RequirementCheck, StageSuggestion } from "../api";
+import { t } from "../i18n";
 import { StageSuggestionSection } from "./ComponentsScreen";
 
 // Spec §H3 (2026-08-26): the projected-checks table (ProjectedChecksSection)
@@ -124,5 +125,26 @@ describe("StageSuggestionSection edit ghosts (current required-tests table)", ()
       />,
     );
     expect(screen.queryByRole("button", { name: /^Record .* result$/ })).not.toBeInTheDocument();
+  });
+
+  it("shows blockers instead of a harmless final-stage message at FINISHED", () => {
+    render(
+      <StageSuggestionSection
+        suggestion={{
+          sn: "20USEM00000001",
+          current_stage: "FINISHED",
+          next_stage: null,
+          move_suggested: false,
+          suggested_stage: null,
+          checks: [failedCheck],
+          blocking: [failedCheck],
+        }}
+        instituteCode="TUDO"
+        onStagedChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(t.components.stageBlocked)).toBeVisible();
+    expect(screen.queryByText(t.components.stageNoNext)).not.toBeInTheDocument();
   });
 });

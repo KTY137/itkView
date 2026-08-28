@@ -214,6 +214,27 @@ const en = {
     sortSerial: "Sort: serial",
     sortStage: "Sort: stage",
     sortType: "Sort: type",
+    sortProduction: "Sort: production holds first",
+    productionFilterLabel: "Production status filter",
+    productionAll: "All production states",
+    productionAttention: "Holds & unassessed",
+    productionHoldsOnly: "Only production holds",
+    productionHold: "Production hold",
+    productionUnknown: "Production status unassessed",
+    productionUnknownShort: "Unassessed",
+    productionProvisional: "provisional workflow",
+    productionConfiguredHint:
+      "Based on the configured workflow; this is not a physical-defect verdict.",
+    productionReasonFailed: (testType: string, stage: string) =>
+      `${testType} failed at the configured ${stage} gate`,
+    productionReasonMissing: (testType: string, stage: string) =>
+      `${testType} is missing at the configured ${stage} gate`,
+    productionReasonUnknownStage: (stage: string) =>
+      `${stage} is outside the configured production flow`,
+    productionReasonMissingProfile: "No institute workflow profile is available",
+    productionReasonStale: "The PDB mirror row is stale",
+    productionReasonTrashed: "The component is trashed",
+    productionMoreReasons: (count: number) => `and ${count} more`,
     staleFilterLabel: "Stale filter",
     staleAll: "Incl. stale",
     staleHide: "Hide stale",
@@ -1314,6 +1335,13 @@ const en = {
       "Saving changes what every module's requirement checks evaluate against, including stage-move gating. A misspelled test type stays 'missing' forever.",
     stagesDirtyWarning:
       "Unsaved stage-model change. Saving re-evaluates the required tests of every mirrored component.",
+    stagePolicyApprovedLabel:
+      "Approve this stage workflow for production decisions",
+    stagePolicyApprovedHint:
+      "Confirm that this institute's exact stage order and required tests have been reviewed. Any workflow change clears this approval automatically and requires a deliberate new approval.",
+    stagePolicyUnapprovedLabel: "Not approved",
+    stagePolicyUnapprovedWarning:
+      "Production status remains provisional. Do not treat it as shipping clearance until an admin has reviewed and approved this workflow.",
     addStage: "Add stage",
     stageRowLabel: (index: number) => `Production stage ${index}`,
     stageNameLabel: "Stage code",

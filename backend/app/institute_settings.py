@@ -18,6 +18,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from app.domain.stages import has_explicit_stage_policy
 from app.notifications import REDACTED_URL, is_https_notification_url
 
 _CHANNEL_KINDS = frozenset({"mattermost", "telegram", "webhook", "email"})
@@ -1347,6 +1348,25 @@ def normalize_institute_settings_update(
         normalised["stage_requirements"] = _stage_requirements(
             settings_patch["stage_requirements"]
         )
+    if "stage_policy_approved" in settings_patch:
+        approved = settings_patch["stage_policy_approved"]
+        if not isinstance(approved, bool):
+            raise InstituteSettingsValidationError(
+                "stage_policy_approved must be true or false."
+            )
+        normalised["stage_policy_approved"] = approved
+    elif {"stage_order", "stage_requirements"} & settings_patch.keys():
+        # Approval belongs to the exact workflow that was reviewed. API clients
+        # other than the bundled UI must not be able to edit that workflow and
+        # accidentally retain an earlier approval by omitting this field.
+        normalised["stage_policy_approved"] = False
     _validate_glue_process_contract(existing, normalised, settings_patch)
     _reconcile_stage_model(normalised)
+    if normalised.get("stage_policy_approved") is True:
+        resulting_settings = {**existing, **normalised}
+        if not has_explicit_stage_policy(resulting_settings):
+            raise InstituteSettingsValidationError(
+                "stage_policy_approved may be true only when stage_order and "
+                "stage_requirements fully define the effective stage policy."
+            )
     return normalised

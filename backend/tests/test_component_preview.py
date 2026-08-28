@@ -571,6 +571,10 @@ def test_satisfied_test_results_orders_measured_at_nulls_first(session_factory):
             self.captured_statements.append(statement)
             return self._real.scalars(statement)
 
+        def execute(self, statement):
+            self.captured_statements.append(statement)
+            return self._real.execute(statement)
+
         def __getattr__(self, name):
             return getattr(self._real, name)
 
@@ -578,5 +582,9 @@ def test_satisfied_test_results_orders_measured_at_nulls_first(session_factory):
         capturing = _CapturingSession(session)
         satisfied_test_results(capturing, SN)
 
-    evidence_statement = capturing.captured_statements[0]
+    evidence_statement = next(
+        statement
+        for statement in capturing.captured_statements
+        if "test_run_evidence.measured_at" in str(statement)
+    )
     assert "test_run_evidence.measured_at NULLS FIRST" in str(evidence_statement)

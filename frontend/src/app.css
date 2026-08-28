@@ -16,6 +16,7 @@
   --warn: #b58900;
   --warn-text: #7a5c00;
   --crit: #d03b3b;
+  --crit-text: #941f1f;
   --serious: #ec835a;
   --series: #2a78d6;
   /* Ordered stage ramp: a cool→green "ripening" sequence for the assembly
@@ -48,6 +49,7 @@
     --good-text: #2fbd2f;
     --warn: #d0a437;
     --warn-text: #e0bb55;
+    --crit-text: #ff9292;
     --series: #3987e5;
     --stage-hv: #6ba3e2;
     --stage-glue: #46a7cf;
@@ -633,6 +635,69 @@ code {
   border-color: var(--muted);
   border-style: dashed;
 }
+.production-status-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  min-height: 22px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font: 750 10.5px/1 var(--sans);
+  white-space: nowrap;
+}
+.production-status-marker > :first-child {
+  font: 900 13px/1 var(--sans);
+}
+.production-status-marker.hold {
+  color: var(--crit-text);
+  background: color-mix(in srgb, var(--crit) 9%, var(--surface));
+}
+.production-status-marker.unknown {
+  color: var(--warn-text);
+  background: color-mix(in srgb, var(--warn) 10%, var(--surface));
+}
+.production-status-marker.icon {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+}
+.production-status-marker.full {
+  font-size: 11px;
+  padding-inline: 9px;
+}
+.production-status-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid currentColor;
+  border-radius: 9px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.production-status-banner > :first-child {
+  flex: 0 0 auto;
+  font: 900 16px/1 var(--sans);
+}
+.production-status-banner > :last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.production-status-banner.hold {
+  color: var(--crit-text);
+  background: color-mix(in srgb, var(--crit) 8%, var(--surface));
+}
+.production-status-banner.unknown {
+  color: var(--warn-text);
+  background: color-mix(in srgb, var(--warn) 9%, var(--surface));
+}
+.data-table tbody tr.has-production-hold td:first-child {
+  box-shadow: inset 3px 0 0 var(--crit);
+}
 /* Stale rows (component gone from the PDB) read as faded, but their chips
    keep full colour so the "stale" flag stays legible. */
 .row-click.is-stale td {
@@ -1191,6 +1256,9 @@ code {
 }
 .card:hover {
   border-color: var(--accent);
+}
+.card.has-production-hold {
+  background: color-mix(in srgb, var(--crit) 5%, var(--surface));
 }
 .card .nm {
   display: flex;

@@ -46,6 +46,11 @@ import type {
 } from "../componentSync";
 import { filterDemoComponents, getDemoComponent } from "../demoData";
 import { formatTimestamp, t } from "../i18n";
+import {
+  ProductionStatusMarker,
+  hasProductionStatusAttention,
+  productionStatusExplanation,
+} from "../ProductionStatusMarker";
 import { SyncProgressPanel } from "../SyncProgress";
 import {
   canDiscard,
@@ -97,6 +102,16 @@ function sortRows(rows: ComponentOut[], sortBy: string): ComponentOut[] {
     case "type":
       sorted.sort((a, b) => a.component_type.localeCompare(b.component_type) || bySn(a, b));
       break;
+    case "production": {
+      const rank = (component: ComponentOut) =>
+        component.production_status === "hold"
+          ? 0
+          : component.production_status === "unknown" && hasProductionStatusAttention(component)
+            ? 1
+            : 2;
+      sorted.sort((a, b) => rank(a) - rank(b) || bySn(a, b));
+      break;
+    }
     default:
       break;
   }
@@ -151,6 +166,7 @@ export default function ComponentsScreen({
   const [componentType, setComponentType] = useState("");
   const [typeOptions, setTypeOptions] = useState<string[]>([]);
   const [sortBy, setSortBy] = useState("default");
+  const [productionFilter, setProductionFilter] = useState("all");
   const [staleFilter, setStaleFilter] = useState("all");
   const [selectedSn, setSelectedSn] = useState<string | null>(null);
   const [detailReturnTo, setDetailReturnTo] = useState<ScreenId | null>(null);
@@ -441,6 +457,13 @@ export default function ComponentsScreen({
       .filter((r) => componentType === "" || r.component_type === componentType)
       .filter((r) =>
         staleFilter === "all" ? true : staleFilter === "only" ? r.stale : !r.stale,
+      )
+      .filter((r) =>
+        productionFilter === "all"
+          ? true
+          : productionFilter === "hold"
+            ? r.production_status === "hold"
+            : r.production_status === "hold" || r.production_status === "unknown",
       ),
     sortBy,
   );
@@ -655,6 +678,17 @@ export default function ComponentsScreen({
           <option value="serial">{t.components.sortSerial}</option>
           <option value="stage">{t.components.sortStage}</option>
           <option value="type">{t.components.sortType}</option>
+          <option value="production">{t.components.sortProduction}</option>
+        </select>
+        <select
+          className="select-input"
+          value={productionFilter}
+          onChange={(e) => setProductionFilter(e.target.value)}
+          aria-label={t.components.productionFilterLabel}
+        >
+          <option value="all">{t.components.productionAll}</option>
+          <option value="attention">{t.components.productionAttention}</option>
+          <option value="hold">{t.components.productionHoldsOnly}</option>
         </select>
         <select
           className="select-input"
@@ -700,7 +734,10 @@ export default function ComponentsScreen({
                 <tr
                   key={c.sn}
                   className={
-                    "row-click" + (c.trashed ? " trashed" : "") + (c.stale ? " is-stale" : "")
+                    "row-click" +
+                    (c.trashed ? " trashed" : "") +
+                    (c.stale ? " is-stale" : "") +
+                    (c.production_status === "hold" ? " has-production-hold" : "")
                   }
                   onClick={() => openFromList(c.sn)}
                 >
@@ -736,6 +773,7 @@ export default function ComponentsScreen({
                         </span>
                       )}
                       {c.trashed && <span className="chip red">{t.components.trashed}</span>}
+                      <ProductionStatusMarker component={c} mode="compact" />
                     </div>
                   </td>
                   <td className="mono">{c.sn}</td>
@@ -1319,7 +1357,21 @@ export function ComponentDetailPanel({
         )}
         {detail.is_dummy && <span className="chip muted">{t.components.dummy}</span>}
         {detail.trashed && <span className="chip red">{t.components.trashed}</span>}
+        <ProductionStatusMarker component={detail} mode="full" />
       </div>
+      {hasProductionStatusAttention(detail) && (
+        <div
+          className={
+            detail.production_status === "hold"
+              ? "production-status-banner hold"
+              : "production-status-banner unknown"
+          }
+          role={detail.production_status === "hold" ? "alert" : "status"}
+        >
+          <span aria-hidden="true">!</span>
+          <span>{productionStatusExplanation(detail)}</span>
+        </div>
+      )}
       {previewMode !== "off" && previewLoading && (
         <p className="state-note preview-state-note">{t.components.previewLoading}</p>
       )}
@@ -1372,6 +1424,7 @@ export function ComponentDetailPanel({
                   </button>
                   <span className="mono muted">{child.sn}</span>
                   {child.is_dummy && <span className="chip muted">{t.components.dummy}</span>}
+                  <ProductionStatusMarker component={child} mode="compact" />
                   {child.trashed ? (
                     <span className="chip red">{t.components.trashed}</span>
                   ) : (
@@ -2026,9 +2079,9 @@ export function StageSuggestionSection({
           <span>
             {suggestion.move_suggested && suggestion.suggested_stage !== null
               ? t.components.stageSuggestion(stageLabel(suggestion.suggested_stage))
-              : suggestion.next_stage === null
-                ? t.components.stageNoNext
-                : t.components.stageBlocked}
+              : suggestion.blocking.length > 0
+                ? t.components.stageBlocked
+                : t.components.stageNoNext}
           </span>
           {canWriteInstitute &&
             suggestion.move_suggested &&

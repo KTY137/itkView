@@ -71,12 +71,16 @@ def _evidence(
 
 
 def _upload_action(session, institute_id, *, test_type, status="draft", sn=SN, **extra):
+    external_ref = extra.pop("external_ref", None)
+    if status == "confirmed" and external_ref is None:
+        external_ref = f"CONFIRMED-{sn}-{test_type}"
     action = OutboxAction(
         institute_id=institute_id,
         kind="upload_test_run",
         payload={"component_sn": sn, "test_type": test_type, **extra},
         status=status,
         created_by="operator@example.org",
+        external_ref=external_ref,
     )
     session.add(action)
     session.flush()

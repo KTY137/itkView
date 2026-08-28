@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import make_engine, make_session_factory
-from app.models import Component, InstituteProfile
+from app.models import Component, InstituteProfile, OutboxAction
 from app.pdb_sync import (
     FetchResult,
     PdbSyncUnavailable,
@@ -325,7 +325,7 @@ def test_dashboard_summary_empty(client: TestClient):
 
 
 def test_dashboard_summary_counts_components_and_outbox(
-    client: TestClient, tudo: dict, demo_mirror, as_operator
+    client: TestClient, session_factory, tudo: dict, demo_mirror, as_operator
 ):
     client.post(
         "/api/outbox",
@@ -351,10 +351,14 @@ def test_dashboard_summary_counts_components_and_outbox(
         f"/api/outbox/{failed['id']}/transition",
         json={"to": "submitted", "actor": "aa"},
     )
-    client.post(
-        f"/api/outbox/{failed['id']}/transition",
-        json={"to": "failed", "actor": "aa", "error": "PDB timeout"},
-    )
+    # Resolution is worker-owned; seed the worker result directly for this
+    # dashboard read-model test.
+    with session_factory() as session:
+        failed_action = session.get(OutboxAction, failed["id"])
+        assert failed_action is not None
+        failed_action.status = "failed"
+        failed_action.error = "PDB timeout"
+        session.commit()
 
     body = client.get("/api/dashboard/summary").json()
 

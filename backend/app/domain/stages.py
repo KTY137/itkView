@@ -103,6 +103,36 @@ def stage_model_from_settings(settings: Mapping | None) -> StageModel:
     return StageModel(order=tuple(ordered), required_tests=requirements)
 
 
+def has_explicit_stage_policy(settings: Mapping | None) -> bool:
+    """Whether ``settings`` fully states the effective stage policy.
+
+    A partial override inherits seed stages or requirements.  It can still be
+    useful operationally, but it must never be represented as an approved
+    institute policy.  Keep this predicate shared by persistence validation
+    and the production-status projection so stored and displayed approval
+    cannot disagree.
+    """
+
+    settings = settings or {}
+    raw_order = settings.get("stage_order")
+    raw_requirements = settings.get("stage_requirements")
+    if not (
+        isinstance(raw_order, list)
+        and all(isinstance(stage, str) and stage for stage in raw_order)
+        and isinstance(raw_requirements, dict)
+        and all(
+            isinstance(stage, str)
+            and isinstance(tests, list)
+            and all(isinstance(test, str) and test for test in tests)
+            for stage, tests in raw_requirements.items()
+        )
+    ):
+        return False
+
+    model = stage_model_from_settings(settings)
+    return tuple(raw_order) == model.order and set(model.order).issubset(raw_requirements)
+
+
 @dataclass(frozen=True)
 class RequirementCheck:
     stage: str

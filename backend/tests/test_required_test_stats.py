@@ -102,6 +102,7 @@ def _seed(session_factory: sessionmaker[Session], institute_id: int) -> None:
                     passed=False,
                     external_ref="B-stage-fail",
                     measured_at=BASE,
+                    synced_at=BASE,
                 ),
             ]
         )
@@ -113,6 +114,8 @@ def _seed(session_factory: sessionmaker[Session], institute_id: int) -> None:
                     kind="upload_test_run",
                     status=OutboxStatus.CONFIRMED.value,
                     created_by="worker",
+                    external_ref="confirmed-b-t-a2",
+                    updated_at=BASE + timedelta(minutes=2),
                     payload={"component_sn": "COMP-B", "test_type": "T_A2", "passed": True},
                 ),
                 OutboxAction(
@@ -120,7 +123,14 @@ def _seed(session_factory: sessionmaker[Session], institute_id: int) -> None:
                     kind="upload_test_run",
                     status=OutboxStatus.CONFIRMED.value,
                     created_by="worker",
-                    payload={"component_sn": "COMP-B", "test_type": "T_B", "passed": True},
+                    external_ref="confirmed-b-t-b",
+                    updated_at=BASE + timedelta(minutes=2),
+                    payload={
+                        "component_sn": "COMP-B",
+                        "test_type": "T_B",
+                        "passed": True,
+                        "measured_at": (BASE + timedelta(minutes=2)).isoformat(),
+                    },
                 ),
                 OutboxAction(
                     institute_id=institute_id,

@@ -73,6 +73,11 @@ const labels: AdminSettingsLabels = {
   stagesHint: "Ordered stage flow.",
   stagesImpact: "Saving changes requirement checks.",
   stagesDirtyWarning: "Unsaved stage-model change.",
+  stagePolicyApprovedLabel: "Approve this stage workflow for production decisions",
+  stagePolicyApprovedHint:
+    "Any workflow change clears this approval and requires a deliberate new approval.",
+  stagePolicyUnapprovedLabel: "Not approved",
+  stagePolicyUnapprovedWarning: "Production status remains provisional.",
   addStage: "Add stage",
   stageRowLabel: (index) => `Production stage ${index}`,
   stageNameLabel: "Stage code",
@@ -517,6 +522,21 @@ const SEED_ORDER = [
   "FINISHED",
 ];
 
+function approvedStageSettings(): Record<string, unknown> {
+  return {
+    stage_order: [...SEED_ORDER],
+    stage_requirements: {
+      HV_TAB_ATTACHED: [],
+      GLUED: ["MODULE_METROLOGY"],
+      STITCH_BONDING: [],
+      BONDED: [],
+      TESTED: [],
+      FINISHED: [],
+    },
+    stage_policy_approved: true,
+  };
+}
+
 function stageInstitute(settings: Record<string, unknown>): Institute {
   return { ...alpha, settings: { ...alpha.settings, ...settings } };
 }
@@ -544,6 +564,89 @@ function stageGroup(index: number): HTMLElement {
 }
 
 describe("AdminSettingsScreen stage model", () => {
+  it("loads explicit approval, clears it on a workflow edit, and saves only after deliberate re-approval", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([stageInstitute(approvedStageSettings())], onSave);
+
+    const approval = await screen.findByRole("checkbox", {
+      name: "Approve this stage workflow for production decisions",
+    });
+    expect(approval).toBeChecked();
+    expect(screen.queryByText("Production status remains provisional.")).not.toBeInTheDocument();
+
+    await user.click(within(stageGroup(1)).getByRole("button", { name: "Move down" }));
+    expect(approval).not.toBeChecked();
+    expect(screen.getByText("Production status remains provisional.")).toBeInTheDocument();
+
+    await user.click(approval);
+    expect(approval).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[1].settings.stage_policy_approved).toBe(true);
+  });
+
+  it("persists a cleared approval when requirements change without re-approval", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([stageInstitute(approvedStageSettings())], onSave);
+
+    const glued = await screen.findByRole("group", { name: "Production stage 2" });
+    await user.click(
+      within(glued).getByRole("button", { name: "Remove required test 1" }),
+    );
+
+    expect(
+      screen.getByRole("checkbox", {
+        name: "Approve this stage workflow for production decisions",
+      }),
+    ).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[1].settings.stage_policy_approved).toBe(false);
+  });
+
+  it("does not present a raw approval as effective for a partial seed-backed profile", async () => {
+    renderStages(
+      [
+        stageInstitute({
+          stage_requirements: { GLUED: ["MODULE_METROLOGY"] },
+          stage_policy_approved: true,
+        }),
+      ],
+      vi.fn().mockResolvedValue(undefined),
+    );
+
+    expect(
+      await screen.findByRole("checkbox", {
+        name: "Approve this stage workflow for production decisions",
+      }),
+    ).not.toBeChecked();
+    expect(screen.getByText("Production status remains provisional.")).toBeInTheDocument();
+  });
+
+  it("loads an absent approval as provisional and writes an explicit false value", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderStages([stageInstitute({})], onSave);
+
+    expect(
+      await screen.findByRole("checkbox", {
+        name: "Approve this stage workflow for production decisions",
+      }),
+    ).not.toBeChecked();
+    expect(screen.getByText("Not approved")).toBeInTheDocument();
+    expect(screen.getByText("Production status remains provisional.")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Institute name"), " updated");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[1].settings.stage_policy_approved).toBe(false);
+  });
+
   it("renders the merged model: seed requirements survive an override that omits the stage", async () => {
     renderStages([stageInstitute({ stage_requirements: { TESTED: ["MODULE_IV_AMAC"] } })], vi.fn().mockResolvedValue(undefined));
 

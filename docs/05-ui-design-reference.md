@@ -61,6 +61,14 @@ im Frontend-i18n-Modul liegt.
    (`HV_TAB_ATTACHED → GLUED → STITCH_BONDING → BONDED → TESTED → FINISHED`),
    Karten = Module mit lokalem Namen, Typ-Badge, SN und Status-Chips. Karte →
    Detailseite. „Geist"-Karte zum Anlegen (Sensor scannen).
+   Eine serverseitig festgestellte Abweichung von einem bereits ueberschrittenen
+   konfigurierten Gate traegt ein sichtbares rotes `!` plus Text/Tooltip
+   `Production hold`; die Karte verwendet dann den kritischen Ton auch in
+   `FINISHED` und wird innerhalb ihrer Stage vor unauffaelligen Karten gezeigt.
+   Current-Stage-Tests sind normales WIP und erzeugen den Marker noch nicht.
+   Treffer auf dem Seed oder einem nicht explizit mit
+   `stage_policy_approved=true` abgenommenen Profil nennen immer
+   `provisional workflow`; der Marker behauptet weder `illegal` noch `defective`.
 2. **Komponenten-Detail:** Stammdaten (Key/Value, Mono), Familienbaum
    (Modul → Sensor/Hybrid/Powerboard), Pflicht-Tests je Stage (Stage-Modell und
    Pflichttest-Vokabular gehoeren [`10-itk-domain-reference.md`](10-itk-domain-reference.md)
@@ -76,6 +84,11 @@ im Frontend-i18n-Modul liegt.
    darstellbare Formate als beschrifteter Platzhalter — nie als kaputtes
    `<img>` und nie als falscher Leerzustand. Eigene und Kind-Anhaenge bleiben
    nach ihrer echten Besitzer-SN getrennt.
+   Derselbe servereigene Status steht als Chip im Detailkopf und als
+   persistenter kritischer Hinweis mit den konkreten Stage-/Testgruenden. Die
+   Komponentenliste zeigt ihn neben dem lokalen Namen und bietet Filter sowie
+   Sortierung fuer Holds/Unassessed. Bei einer terminalen Stage haben echte
+   Blocker Vorrang vor dem neutralen Text `no move to suggest`.
 3. **Staged:** Arbeitsvorrat offener PDB-Absichten, nach Komponente gruppiert.
    Jede Gruppe zeigt Local Name, SN, Thumbnail und aktuelle Stage; jede Action
    zeigt eine lesbare Summary, Status, `Push to PDB` oder `Discard` und ein
@@ -195,7 +208,12 @@ im Frontend-i18n-Modul liegt.
    `Not mirrored` markiert statt abgelehnt. Seed-Stages lassen sich
    umsortieren, aber nicht entfernen (der Merge haengt sie beim Speichern
    immer wieder an; neutralisieren geht nur ueber leere Pflicht-Tests fuer die
-   betroffene Stage). Der Screen dupliziert noch die Seed-Stage-Konstanten,
+   betroffene Stage). Eine separate, erklaerte Checkbox bestaetigt
+   `stage_policy_approved`; jede Aenderung an Reihenfolge, Stage-Code oder
+   Requirements setzt sie sofort wieder auf `false`, damit ein Admin das
+   veraenderte Modell bewusst neu abnehmen muss. Ohne diese Abnahme bleibt die
+   Production-Status-Projektion ausdruecklich provisorisch. Der Screen
+   dupliziert noch die Seed-Stage-Konstanten,
    weil kein Endpunkt das effektive (gemergte) Stage-Modell liefert — ein
    Read-Endpunkt dafuer ist der empfohlene naechste Schritt.
    **Glue judgement (2026-08-27):** Ein eigener strukturierter Abschnitt

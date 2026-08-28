@@ -9,6 +9,19 @@
 
 // ---- Component shapes -------------------------------------------------------
 
+export type ProductionStatusReason = {
+  code:
+    | "required_test_failed"
+    | "required_test_missing"
+    | "unknown_stage"
+    | "missing_profile"
+    | "stale_mirror"
+    | "trashed"
+    | "provisional_profile";
+  stage: string | null;
+  test_type: string | null;
+};
+
 export type ComponentOut = {
   sn: string;
   local_name: string | null;
@@ -22,6 +35,10 @@ export type ComponentOut = {
   trashed: boolean;
   stale: boolean;
   synced_at: string;
+  production_status?: "clear" | "hold" | "unknown" | "not_applicable" | null;
+  production_policy_source?: "profile_override" | "seed_default" | "missing_profile" | null;
+  production_policy_approved?: boolean | null;
+  production_status_reasons?: ProductionStatusReason[];
 };
 
 export type ComponentDetail = ComponentOut & {
@@ -569,6 +586,7 @@ export type OutboxContract = {
   statuses: OutboxStatus[];
   transitions: Record<OutboxStatus, OutboxStatus[]>;
   terminal: OutboxStatus[];
+  worker_owned_targets: OutboxStatus[];
 };
 
 export type OutboxAction = {
@@ -722,6 +740,7 @@ export type OutboxTransitionBody = {
 export const DEFAULT_OUTBOX_CONTRACT: OutboxContract = {
   statuses: [...OUTBOX_STATUSES],
   terminal: ["confirmed", "cancelled"],
+  worker_owned_targets: ["confirmed", "failed"],
   transitions: {
   draft: ["validated", "cancelled"],
   validated: ["approved", "draft", "cancelled"],

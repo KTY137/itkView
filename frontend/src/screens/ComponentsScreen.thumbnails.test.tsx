@@ -1,4 +1,5 @@
-import { render, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 
 import type { ComponentOut, Institute, SyncJobKind } from "../api";
@@ -85,4 +86,80 @@ it("uses the source-qualified thumbnail locator in the component list", async ()
       `/api/components/${COMPONENT.sn}/attachments/shared-code?source=share_link`,
     );
   });
+});
+
+it("shows the configured-gate hold beside a module in the component overview", async () => {
+  vi.mocked(getComponents).mockResolvedValue([
+    {
+      ...COMPONENT,
+      stage: "FINISHED",
+      production_status: "hold",
+      production_policy_source: "profile_override",
+      production_policy_approved: true,
+      production_status_reasons: [
+        {
+          code: "required_test_missing",
+          stage: "GLUED",
+          test_type: "MODULE_METROLOGY",
+        },
+      ],
+    },
+  ]);
+  vi.mocked(getInstitutes).mockResolvedValue([INSTITUTE]);
+  vi.mocked(getComponentThumbnails).mockResolvedValue({});
+
+  render(
+    <ComponentsScreen
+      componentSync={syncController("components")}
+      evidenceSync={syncController("evidence")}
+    />,
+  );
+
+  expect(
+    await screen.findByLabelText(
+      /Production hold: MODULE_METROLOGY is missing at the configured Glued gate/,
+    ),
+  ).toHaveTextContent("!Hold");
+});
+
+it("includes provisional-only unknown modules in the holds and unassessed filter", async () => {
+  const user = userEvent.setup();
+  vi.mocked(getComponents).mockResolvedValue([
+    {
+      ...COMPONENT,
+      sn: "MODULE-UNKNOWN",
+      local_name: "Unknown provisional module",
+      production_status: "unknown",
+      production_policy_source: "seed_default",
+      production_policy_approved: false,
+      production_status_reasons: [
+        { code: "provisional_profile", stage: null, test_type: null },
+      ],
+    },
+    {
+      ...COMPONENT,
+      sn: "MODULE-CLEAR",
+      local_name: "Approved clear module",
+      production_status: "clear",
+      production_policy_source: "profile_override",
+      production_policy_approved: true,
+      production_status_reasons: [],
+    },
+  ]);
+  vi.mocked(getInstitutes).mockResolvedValue([INSTITUTE]);
+  vi.mocked(getComponentThumbnails).mockResolvedValue({});
+
+  render(
+    <ComponentsScreen
+      componentSync={syncController("components")}
+      evidenceSync={syncController("evidence")}
+    />,
+  );
+
+  expect(await screen.findByText("Unknown provisional module")).toBeVisible();
+  expect(screen.getByText("Approved clear module")).toBeVisible();
+  await user.selectOptions(screen.getByLabelText("Production status filter"), "attention");
+
+  expect(screen.getByText("Unknown provisional module")).toBeVisible();
+  expect(screen.queryByText("Approved clear module")).not.toBeInTheDocument();
 });

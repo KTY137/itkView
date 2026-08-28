@@ -2121,7 +2121,11 @@ def list_components(
         stmt = stmt.where(Component.institute_code == institute)
     if stale is not None:
         stmt = stmt.where(Component.stale.is_(stale))
-    return list(db.scalars(stmt))
+    components = list(db.scalars(stmt))
+    from app.production_status import annotate_production_status
+
+    annotate_production_status(db, components)
+    return components
 
 
 # Registered before /api/components/{sn}: FastAPI matches routes in
@@ -2182,6 +2186,9 @@ def get_component(sn: str, db: Session = Depends(get_db)) -> Component:
     )
     if component is None:
         raise HTTPException(status_code=404, detail=f"Component '{sn}' not found.")
+    from app.production_status import annotate_production_status
+
+    annotate_production_status(db, [component, *component.children])
     return component
 
 
@@ -2724,6 +2731,7 @@ def get_outbox_contract() -> OutboxContractOut:
         statuses=[status.value for status in OutboxStatus],
         transitions=transition_contract(),
         terminal=[status.value for status in sorted(TERMINAL, key=lambda item: item.value)],
+        worker_owned_targets=[OutboxStatus.CONFIRMED.value, OutboxStatus.FAILED.value],
     )
 
 
@@ -2873,12 +2881,19 @@ def transition_outbox_action(
             status_code=403,
             detail="You can only modify PDB actions for your own institute.",
         )
-
     current = OutboxStatus(action.status)
     try:
         assert_transition(current, body.to)
     except InvalidTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if body.to in {OutboxStatus.CONFIRMED, OutboxStatus.FAILED}:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Status '{body.to.value}' is worker-owned and cannot be set "
+                "through the operator API."
+            ),
+        )
 
     if body.to is OutboxStatus.APPROVED:
         # Decryption here proves that the bound identity is usable by this
