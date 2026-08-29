@@ -40,9 +40,7 @@ from app.sync_jobs import (
 )
 from app.sync_jobs import run_evidence_sync_job as _run_evidence_sync_job
 
-EvidenceScopePolicy = Literal[
-    "complete_local_production", "profile_type_filter", "lightweight"
-]
+EvidenceScopePolicy = Literal["complete_local_production", "profile_type_filter", "lightweight"]
 
 
 @dataclass(frozen=True)
@@ -248,9 +246,7 @@ def _job_scope(
         if institute is None:
             return None
         raw_mode = (job.result or {}).get(EVIDENCE_SYNC_MODE_KEY)
-        sync_mode: EvidenceSyncMode = (
-            "lightweight" if raw_mode == "lightweight" else "standard"
-        )
+        sync_mode: EvidenceSyncMode = "lightweight" if raw_mode == "lightweight" else "standard"
         return evidence_component_scope(session, institute, sync_mode)
 
 
@@ -347,7 +343,5 @@ class CompleteEvidenceSyncJobManager(SyncJobManager):
             raise
         if isinstance(future, Future):
             future.add_done_callback(
-                lambda _completed, completed_id=job_id: self._after_evidence_future(
-                    completed_id
-                )
+                lambda _completed, completed_id=job_id: self._after_evidence_future(completed_id)
             )
