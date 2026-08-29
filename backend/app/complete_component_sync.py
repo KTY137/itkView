@@ -140,19 +140,37 @@ def fetch_assembled_component_closure(
                 "A component referenced by the assembly graph returned an invalid "
                 "payload; refusing an incomplete component snapshot."
             )
+        if payload.get("state") != "ready":
+            raise PdbSyncUnavailable(
+                "A live assembly link resolved to a component that is not ready; "
+                "refusing an inconsistent component snapshot."
+            )
+        returned_id = payload.get("id")
+        if returned_id is None:
+            # The request itself pins the object identity. Preserve that fact
+            # for build_id_to_sn instead of losing the parent link later.
+            payload = {**payload, "id": object_id}
+        elif not isinstance(returned_id, str) or returned_id != object_id:
+            raise PdbSyncUnavailable(
+                "A component lookup returned a different object identity; refusing "
+                "an inconsistent component snapshot."
+            )
         serial = payload.get("serialNumber")
         if not isinstance(serial, str) or not serial:
             raise PdbSyncUnavailable(
                 "A component referenced by the assembly graph has no serial number; "
                 "refusing an incomplete component snapshot."
             )
+        if serial in known_serials:
+            raise PdbSyncUnavailable(
+                "The assembly graph reuses a serial number under different component "
+                "identities; refusing an ambiguous component snapshot."
+            )
 
-        # Inspect even a duplicate representative: getComponent can carry a
-        # deeper children list than the listing payload for the same serial.
         enqueue_children(payload)
-        if serial not in known_serials:
-            known_serials.add(serial)
-            fetched.append(payload)
+        known_ids.add(object_id)
+        known_serials.add(serial)
+        fetched.append(payload)
 
         if progress is not None and (
             attempted % PDB_PAGE_SIZE == 0 or not pending or attempted == limit
