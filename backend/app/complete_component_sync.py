@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
-# SPDX-FileComment: itkflow-b82e452896d5
+# SPDX-FileComment: itkflow-228b36e1ab82
 """Completeness-first component fetch for the read-only production mirror.
 
 The institute listings contain components owned by or located at the site, but
