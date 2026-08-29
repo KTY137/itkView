@@ -210,10 +210,11 @@ def sync_components(
             if row.sn in seen:
                 continue
             row.stale = True
-            # An external descendant is governed only through this current
-            # assembly edge. Once absent from a complete closure, retaining the
-            # old edge would claim that it is still installed.
-            if row.id not in root_ids:
+            # A missing row cannot retain a current assembly edge. This also
+            # covers a part whose old location made it a direct governed root:
+            # owner/location and assembly membership may change in one PDB
+            # transaction, while the local row still carries both old facts.
+            if row.parent_id is not None:
                 row.parent_id = None
             stale += 1
         session.flush()
