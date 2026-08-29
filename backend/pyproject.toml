@@ -1,6 +1,6 @@
 [project]
 name = "itkflow-backend"
-version = "0.1.1"
+version = "0.2.1"
 description = "itkFlow backend — production cockpit for ATLAS ITk strip module assembly"
 requires-python = ">=3.10"
 dependencies = [
