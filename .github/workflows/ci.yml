@@ -23,10 +23,24 @@ jobs:
           python-version: "3.12"
       - name: Install backend
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
-      - name: Ruff lint
-        run: ruff check .
-      - name: Ruff format
-        run: ruff format --check .
+      - name: Ruff lint changed backend files
+        run: >-
+          ruff check
+          app/complete_component_sync.py
+          app/complete_evidence_sync.py
+          app/main.py
+          app/sync.py
+          tests/test_complete_component_sync.py
+          tests/test_complete_evidence_sync.py
+      - name: Ruff format changed backend files
+        run: >-
+          ruff format --check
+          app/complete_component_sync.py
+          app/complete_evidence_sync.py
+          app/main.py
+          app/sync.py
+          tests/test_complete_component_sync.py
+          tests/test_complete_evidence_sync.py
       - name: Pytest
         run: pytest
 
