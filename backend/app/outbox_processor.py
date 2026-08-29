@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-29c50d0f5385
 """Drain the outbox from inside the API process.
 
 Compose runs `app.run_worker` as its own service. The desktop bundle is a

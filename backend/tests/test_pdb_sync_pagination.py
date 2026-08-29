@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-ae43db4e6572
 import pytest
 
 from app.config import Settings

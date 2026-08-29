@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-359e0d8113e7
 /**
  * End-to-end integration of the module page's test worksheet
  * (spec `2026-08-25-staged-first-module-page-design.md` §H).

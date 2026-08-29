@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-7e90041146d7
 """Stage-move suggestion engine — pure domain logic, institute-agnostic.
 
 A component may advance to the next production stage once every required test

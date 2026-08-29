@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-96a8e346cc49
 import { describe, expect, it } from "vitest";
 
 import { deriveAuthCapabilities } from "./auth";

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-c3b7c3eec2f7
 """Offline tests for encrypted, account-owned PDB credentials."""
 
 from datetime import datetime, timezone

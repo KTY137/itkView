@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-034029f9f471
 import { OUTBOX_STATUSES } from "./api";
 import type {
   AssemblyDraft,

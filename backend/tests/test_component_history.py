@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-93deebc15d01
 """The component history: one chronological record of what happened to a part.
 
 Everything the mirror knows about a component's life is already stored, but it

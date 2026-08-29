@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-74f5f21a4cf2
 export type ProductVariant = "flow" | "view";
 
 export type Product = {

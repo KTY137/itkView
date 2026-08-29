@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-b525ab800493
 import pytest
 from authutil import authenticate, create_institute_profile
 from fastapi.testclient import TestClient

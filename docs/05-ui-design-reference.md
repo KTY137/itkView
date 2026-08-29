@@ -127,6 +127,14 @@ itkFlow-Frontend kann deshalb keine verbotene Mutation ausfuehren.
    erscheinen nur bei tatsaechlich verschickten Bauteilen und nennen immer
    einen aufgeloesten Standort, nie eine PDB-Objekt-ID. Rein lokal, kein
    PDB-Aufruf.
+
+**Urheberzeile (2026-08-29):** Am Fuss der Navigationsleiste steht auf jedem
+Screen eine kleine, gedaempfte Zeile `© <Jahr> <Rechteinhaber> · <Lizenz>`. Der
+Text kommt aus `/health` (`copyright`), nicht aus dem Frontend-Code: wer die
+Oberflaeche kopiert, verliert die Angabe damit nicht durch Bearbeiten einer
+TSX-Datei. Das `title`-Attribut traegt die Herkunfts-ID (`provenance`). Die
+Zeile konkurriert nicht mit dem Arbeitsinhalt und erscheint gar nicht, wenn der
+Server sie nicht liefert.
    Derselbe servereigene Status steht als Chip im Detailkopf und als
    persistenter kritischer Hinweis mit den konkreten Stage-/Testgruenden. Die
    Komponentenliste zeigt ihn neben dem lokalen Namen und bietet Filter sowie

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-1218f3c675d0
 """Production status projection for component overview surfaces.
 
 The current stage is a work area: missing or failed tests assigned to that

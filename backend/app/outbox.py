@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-88802f0fbbc2
 """Outbox status machine — pure logic, no I/O.
 
 draft ──▶ validated ──▶ approved ──▶ submitted ──▶ confirmed

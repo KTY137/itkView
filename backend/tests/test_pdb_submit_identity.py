@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-fb49e8d49403
 """Personal PDB identity isolation at the real outbox submit boundary."""
 
 from types import SimpleNamespace

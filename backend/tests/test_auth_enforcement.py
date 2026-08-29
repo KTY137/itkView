@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-9c5f15f60c5f
 """Server-side attribution, role gating and CSRF on write endpoints (docs/06).
 
 These lock in the three guarantees added on top of the auth foundation:

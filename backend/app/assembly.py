@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-54299b0c9132
 """Canonical, PDB-inert assembly dry-run contract.
 
 The assembly wizard and the outbox worker deliberately share this module.  A

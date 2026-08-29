@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-6da11289da4f
 """Application service tying the pure glue-weight engine to the database.
 
 The engine in `app.domain.glue` stays pure; this module supplies its inputs

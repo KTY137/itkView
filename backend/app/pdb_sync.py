@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-eb04ce7ab84e
 """PDB → mirror fetch path: list an institute's components, map to sync records.
 
 Strictly read-only: the only PDB call here is `listComponents`. Mapping is

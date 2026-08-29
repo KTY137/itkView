@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-7d482b8dc83e
 """Module-metrology ingestion parser (docs/10).
 
 The metrology instrument/zFlow already emits the standard PDB

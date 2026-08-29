@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-d169209d4fc7
 """DUMMY component-registration draft endpoint + worker revalidation (docs/10).
 
 The registration endpoint only ever creates a reviewed outbox draft; the actual

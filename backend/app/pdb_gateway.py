@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-fd9b9520e9ad
 """PDB gateway — the only module allowed to talk to the ITk Production Database.
 
 There is no PDB test server any more; the collaboration-sanctioned way to test

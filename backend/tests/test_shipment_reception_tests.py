@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-1d6cf1b0563a
 """Reception-test projection and completion gate for Phase-4 shipments."""
 
 from authutil import authenticate

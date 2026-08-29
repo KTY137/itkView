@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-31be4146d66c
 """Application service tying the pure stage engine to the database.
 
 The engine in `app.domain.stages` stays pure; this module supplies its inputs

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-6a72c2175bb1
 /**
  * Small stale-while-revalidate cache for the Statistics measurement views.
  *

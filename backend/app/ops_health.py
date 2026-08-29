@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-00bd9068599b
 """Local-only operational health aggregation for the Phase-4 Ops screen.
 
 Opening the operations screen must be safe while the PDB is unavailable.  All

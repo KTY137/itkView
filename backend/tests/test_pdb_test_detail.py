@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-70f19e09abc9
 """Detailed test-run mirroring: measured values, properties, attachments.
 
 These are what the glue-weight, metrology and IV views read; the shallow

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-b321011158e6
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getLatestSyncJob,

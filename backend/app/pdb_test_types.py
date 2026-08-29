@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-862e0fdd9ed6
 """Read-only mirror input for PDB test-type schemas.
 
 The component page uses these definitions to build controlled manual-entry

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-b2f77f04403e
 // Shared itkFlow/itkView desktop shell.
 //
 // The shell starts the packaged backend, waits until it answers HTTP, and

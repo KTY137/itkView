@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-8328682741fd
 """API for mirrored test detail and locally stored attachments.
 
 Covers what the glue-weight, metrology and IV views read, plus the rule that

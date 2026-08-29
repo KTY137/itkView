@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-7de1e64b3810
 """Tests for the shipment mirror and the local receiving check (docs/11)."""
 
 from authutil import authenticate

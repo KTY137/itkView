@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-584f4914c3ca
 /**
  * Shared staging plumbing for test uploads (spec §H2).
  *

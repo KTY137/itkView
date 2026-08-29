@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-2e7ac2dce192
 """The single-process deployments must drain the outbox themselves.
 
 Compose runs a standalone worker; the desktop bundle and the dev launcher do

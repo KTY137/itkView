@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-b14f48010ead
 """Local attachment mirror: path safety, idempotency, partial failure."""
 
 import ast

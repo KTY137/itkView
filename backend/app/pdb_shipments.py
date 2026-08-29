@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-5a1586346ca2
 """Read-only fetch of an institute's shipments from the PDB.
 
 Mirrors what zeuthenflow's shipmentManager read (`listShipmentsByInstitution`

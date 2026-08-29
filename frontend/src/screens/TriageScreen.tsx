@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-8f64a90f1d7a
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, getIngestFiles, getIngestPreview } from "../api";
 import type { IngestFile, IngestPreview } from "../api";

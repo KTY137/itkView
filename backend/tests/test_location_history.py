@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-7b0a00729767
 """Where a component has been, and when it moved.
 
 The PDB records a shipment as an entry in `locations[]`, but names the site

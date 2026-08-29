@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-4680c476ec8e
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta

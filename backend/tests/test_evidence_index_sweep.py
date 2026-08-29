@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-2e5936506c2b
 """The institute evidence sweep as index-then-bulk instead of per component.
 
 Every fake here answers offline. The response shapes are the ones `itkdb`

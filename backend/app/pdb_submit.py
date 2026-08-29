@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-81329e0f628f
 """Real PDB submitter — writes reviewed outbox actions to the PDB.
 
 Dispatches by action kind:

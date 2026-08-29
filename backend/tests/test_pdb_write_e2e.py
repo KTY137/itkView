@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-c1eacfceae5b
 """End-to-end write test against the production PDB — DUMMY scope only.
 
 Registers (or reuses) a DUMMY test module owned by this institute, uploads a

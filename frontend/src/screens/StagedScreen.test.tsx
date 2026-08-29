@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-8f8e11f5c4ee
 /**
  * Staged screen as an approval surface (spec §D + docs/05 "Ehrlichkeit im
  * Staged-Fenster").

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-7ac3029a2fc5
 import { useEffect, useState } from "react";
 import { ApiError, getComponents } from "../api";
 import type { ComponentOut } from "../api";

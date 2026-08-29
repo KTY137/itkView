@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-04958b1d6f0a
 """Read-only access to a component's image attachments in the PDB.
 
 Metrology plots and visual-inspection photos are stored as attachments on a

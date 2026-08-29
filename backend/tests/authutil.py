@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-158f22d4fd63
 """Shared auth helpers for the offline test suite (docs/06).
 
 Writes are now role-gated and CSRF-protected, so tests that exercise a write

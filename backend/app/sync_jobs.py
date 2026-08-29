@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-27fb8bb56b32
 """Persistent background jobs for authoritative component-mirror syncs.
 
 The existing synchronous endpoint remains available for scripts/tests. This

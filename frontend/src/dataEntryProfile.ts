@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-7be19d31a166
 /**
  * What a data-entry panel needs from the server before it can render the
  * sheet's layout: the institute's profile (field order, which fields hold a

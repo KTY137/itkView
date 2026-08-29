@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-9950233ec3a9
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { getMeasurementDimensions, getStatsDimensions, getTestTypeSchemas } from "../api";

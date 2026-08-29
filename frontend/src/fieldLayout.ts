@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-8b6d1cdd3681
 /**
  * Data-entry layout: the order and the grouping an operator recognises.
  *

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-df161b1dcceb
 """Entry point for the packaged desktop build (Tauri sidecar).
 
 The desktop bundle has no reverse proxy and no shell environment to configure,

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-eee38d4fd1c7
 """Authentication primitives — pure, no DB or web framework.
 
 Local accounts for v1 (see docs/06-users-roles-audit.md): password hashing with

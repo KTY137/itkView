@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-c5a978a406cb
 """Render the itkFlow app icon to a PNG, using only the standard library.
 
 Deliberately dependency-free: this runs in the packaging pipeline, and a build

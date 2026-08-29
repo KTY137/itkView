@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-1c60e60d376c
 import { useEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-9bda5fe1350f
 """Seed the configured database with the anonymised demo component fixture.
 
 Run with:

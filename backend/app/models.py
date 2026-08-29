@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-221f8b6e387e
 from datetime import datetime, timezone
 
 from sqlalchemy import (

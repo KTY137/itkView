@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-1093fa3e4623
 """Read-only smoke tests against the production PDB.
 
 There is no PDB test server (docs/09); reads go against production behind the

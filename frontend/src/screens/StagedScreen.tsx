@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-14487028aca7
 /**
  * Staged work queue (spec §D) — the approval half of the worksheet flow: a
  * value is entered in the module's own table, staged as a ghost, and judged

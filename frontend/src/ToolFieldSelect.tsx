@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-3b9104f569a0
 /**
  * A schema field that the institute profile identifies as a jig, pickup tool
  * or panel is chosen from the registry, never typed as unconstrained text.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-ddcdef1ea610
 """Aggregate mirrored test-run measurements for the Statistics page.
 
 Everything is derived from the local evidence mirror (`TestRunEvidence.payload`

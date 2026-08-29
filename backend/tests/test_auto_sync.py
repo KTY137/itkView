@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-d45a44363788
 """Unattended mirror refresh (`app.auto_sync`).
 
 This is the only place in itkFlow where PDB traffic can happen with nobody

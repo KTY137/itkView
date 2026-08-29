@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-a0d00c0b7756
 """Build the local jig/tool registry from mirrored PDB tool components.
 
 The PDB already exposes physical tools as components (for strips these are

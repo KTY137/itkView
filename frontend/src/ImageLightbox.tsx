@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-b38338f522d0
 import { useEffect, useRef } from "react";
 
 import { componentAttachmentUrl, type TestRunAttachment } from "./api";

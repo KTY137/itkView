@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-0a47371e390b
 from sqlalchemy import select
 
 from app.models import TestTypeSchema

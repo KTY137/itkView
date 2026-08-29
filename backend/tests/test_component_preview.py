@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-c61040c3b97a
 """Projection of open outbox work over one mirrored component."""
 
 from authutil import authenticate

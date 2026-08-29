@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-236713d208a0
 """Local component preview built from the mirror and open outbox actions.
 
 The preview is deliberately PDB-inert: it projects staged writes over the

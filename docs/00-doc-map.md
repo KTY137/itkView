@@ -73,6 +73,7 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 | `backend/app/domain/glue.py`, `backend/app/glue_service.py`, `models.GlueBatch`/`GlueUsage`, `/api/glue-batches` | [`11`](11-logistics-operations.md) |
 | `backend/app/assembly.py`, Assembly-Wizard-Dry-Run | [`07`](07-jig-tool-quickselect.md), [`11`](11-logistics-operations.md) |
 | `backend/app/ops_health.py`, `/api/ops/health` | [`04`](04-roadmap.md) |
+| `backend/app/provenance.py`, `/health` (`provenance`, `copyright`), `LICENSE`, SPDX-Header | [`04`](04-roadmap.md), [`05`](05-ui-design-reference.md) |
 | `backend/app/pdb_shipments.py`, `shipment_sync.py`, `shipment_reception.py`, `models.Shipment`, `/api/shipments` | [`11`](11-logistics-operations.md), [`09`](09-pdb-production-strategy.md) |
 | `backend/app/reminders.py`, `notifications.py`, `models.Reminder`, `/api/reminders`, `/api/notifications` | [`11`](11-logistics-operations.md), [`adr/002`](adr/002-async-outbox-worker.md) |
 | `backend/app/institute_settings.py`, Admin-Settings-UI und operative Institutsprofilwerte | [`11`](11-logistics-operations.md), [`05`](05-ui-design-reference.md), [`04`](04-roadmap.md) |

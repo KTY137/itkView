@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-468e6c923647
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
@@ -682,6 +685,9 @@ class HealthOut(BaseModel):
     capabilities: ProductCapabilitiesOut
     pdb_instance: str
     pdb_write_scope: str
+    # Names the origin of a running copy. See app/provenance.py.
+    provenance: str
+    copyright: str
 
 
 class OpsHeartbeatOut(BaseModel):

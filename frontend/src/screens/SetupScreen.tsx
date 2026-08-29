@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-e321f700effe
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { ApiError } from "../api";

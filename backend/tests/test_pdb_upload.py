@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-663dca50f38d
 import pytest
 
 from app.pdb_upload import UploadPayloadError, build_upload_test_run_payload

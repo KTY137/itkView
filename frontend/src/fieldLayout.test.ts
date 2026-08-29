@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-f127e430940b
 /**
  * The order and grouping an operator reads, checked against the definition
  * the PDB really returns (`test/pdbTestTypeSchemas.ts`) and against the

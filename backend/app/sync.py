@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-a85d2622c1d1
 """PDB→local sync for the component mirror — upsert logic, no PDB I/O.
 
 Whoever fetches records (the PDB gateway, or a fixture file for demos and

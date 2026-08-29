@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-d736a1a24c32
 /** How much of a component's test data the viewer renders.
  *
  * `full` is every mirrored value the page has. `gate` reduces a module page to

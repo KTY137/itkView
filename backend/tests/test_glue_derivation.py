@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-25d089cd529f
 """Glue-weight derivation: profile data in, verdict out (spec 2026-08-27 §9).
 
 The numbers in these tests are the numbers from the owner's production sheet

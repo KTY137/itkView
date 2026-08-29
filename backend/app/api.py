@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-2189c201cfc8
 import hashlib
 import hmac
 import json
@@ -72,6 +75,7 @@ from app.notifications import (
     redact_channel_urls,
 )
 from app.ops_health import collect_ops_health
+from app.provenance import PROVENANCE_ID, notice
 from app.outbox import (
     TERMINAL,
     InvalidTransition,
@@ -1103,6 +1107,8 @@ def health(request: Request) -> HealthOut:
         ),
         pdb_instance=settings.pdb_instance,
         pdb_write_scope=settings.pdb_write_scope,
+        provenance=PROVENANCE_ID,
+        copyright=notice(),
     )
 
 

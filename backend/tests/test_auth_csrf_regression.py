@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-281ec0f43184
 """Regression tests for two live CSRF bugs that blocked login (docs/06).
 
 Both only surface with a *pre-existing* session cookie, which the offline suite

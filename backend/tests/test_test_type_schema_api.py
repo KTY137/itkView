@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-1a6c29c71b0d
 from app.pdb_test_types import (
     PdbTestTypesUnavailable,
     TestTypeSchemaRecord,

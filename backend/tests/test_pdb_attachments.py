@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-70bd33036343
 from fastapi.testclient import TestClient
 
 from app.pdb_attachments import fetch_image_binary, list_component_images

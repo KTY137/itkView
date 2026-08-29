@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-05f327d46444
 """Reminder scheduling and firing (Phase 4, replaces emailReminderManager).
 
 A `Reminder` row carries its own `next_due_at`. Whichever process is configured

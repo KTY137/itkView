@@ -2746,6 +2746,17 @@ code {
   display: block;
 }
 
+/* Authorship, stated quietly at the foot of the rail. Small and muted: it
+   belongs on every screen without competing with the work on them. */
+.rail-notice {
+  margin: 0.5rem 0 0;
+  font-size: 0.7rem;
+  line-height: 1.3;
+  color: var(--muted);
+  text-align: center;
+  opacity: 0.75;
+}
+
 /* The component history: one row per dated fact, newest first. A fixed-width
    time column keeps the events aligned so the eye reads the sequence, not the
    formatting. */

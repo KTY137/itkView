@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-3202f6f850c8
 """Admin editing of institute profile config, incl. required_properties (docs/07).
 
 This is what makes the data-driven features (jig requirements, stage

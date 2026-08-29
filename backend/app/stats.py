@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-28deaa6483f1
 """Production statistics derived from the StageEvent history.
 
 Pure query + aggregation over the local `stage_event` mirror — no PDB I/O.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-8cf5dbe7c2d8
 import { describe, expect, it } from "vitest";
 
 import type { MeasurementCurve, MeasurementValue } from "./api";

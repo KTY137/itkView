@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-a68a4c307229
 """First-run setup: create the initial admin from the UI, never the CLI.
 
 The bootstrap endpoint exists so a fresh deployment (desktop bundle or a

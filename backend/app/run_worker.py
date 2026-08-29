@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-93ebfd9a05b5
 """Standalone async outbox worker process.
 
 Runs the submission loop in its own container/process (see the `worker` service

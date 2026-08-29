@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-7f2f4cd24a38
 """Build a desktop product variant: frontend -> PyInstaller -> Tauri bundle.
 
 Tauri's `externalBin` looks for a file named `<name>-<target-triple>` next to

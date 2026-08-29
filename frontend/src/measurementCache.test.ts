@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-24b2c7462b53
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { MeasurementDimensions, MeasurementSeries } from "./api";

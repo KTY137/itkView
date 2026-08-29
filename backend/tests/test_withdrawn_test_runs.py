@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-9b5e66bd81e3
 """Withdrawn PDB test runs must not count as evidence anywhere.
 
 The PDB marks a retracted test run with `state='deleted'` and keeps serving it

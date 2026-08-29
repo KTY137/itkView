@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-45fb139d8c9d
 """Helpers for local test-run evidence mirrored from external sources."""
 
 from dataclasses import dataclass

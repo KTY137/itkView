@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-65c08adfdcf9
 """Serve the built frontend from the backend process (desktop packaging).
 
 The Compose deployment keeps nginx in front of the SPA. The desktop build has

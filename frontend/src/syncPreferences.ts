@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-271543edee86
 export const SYNC_MODE_STORAGE_KEY = "itkview.sync.mode";
 
 export const SYNC_MODES = ["standard", "lightweight"] as const;

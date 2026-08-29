@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-d5156f8bd8fb
 import type { ComponentOut, ProductionStatusReason } from "./api";
 import { t } from "./i18n";
 import { stageLabel } from "./ui";

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-3513d4f39166
 from types import SimpleNamespace
 
 from authutil import authenticate, create_account, login_as

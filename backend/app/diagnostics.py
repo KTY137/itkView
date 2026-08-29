@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-c77158fe0515
 """Bounded, local diagnostics bundle for the packaged desktop application."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-fe4b6f8f798e
 """Encrypted, per-user passwords for public file-share links.
 
 Only password-protected *public* ownCloud/Reva links are supported here. A

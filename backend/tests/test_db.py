@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-fd08042cb5ab
 """Tests for `app/db.py`: SQLite concurrency pragmas and the additive
 Phase-0 migration helper.
 

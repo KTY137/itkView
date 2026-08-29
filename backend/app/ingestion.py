@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-9f1bc47fb682
 """Ingestion parser registry — pure payload parsing, no DB or PDB I/O.
 
 Uploaded instrument JSONs arrive in very different states of readiness. Each

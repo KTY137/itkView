@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-43591de71f1a
 """Schedule evaluation for the unattended mirror refresh.
 
 "How often and when" is institute-specific, so it lives in the institute

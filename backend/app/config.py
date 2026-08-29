@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-a806370a234f
 """Application settings.
 
 Safety design: the code-level default reaches no PDB at all. `pdb_instance`

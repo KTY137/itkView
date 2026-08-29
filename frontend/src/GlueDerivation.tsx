@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-1ed993e93f19
 /**
  * Read-only presentation of a server-computed glue derivation.
  *

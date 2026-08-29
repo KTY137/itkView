@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-f891c14f4adb
 /**
  * Small presentational helpers shared across screens: semantic colour-coding
  * for production stages and human-readable roles for the family tree.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-794223dea172
 /**
  * Rolling readout ("dataEpoch") of the persisted sync-job controllers.
  *

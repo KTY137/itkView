@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-740d574d5a58
 """Encrypted per-user PDB credentials.
 
 Access codes are encrypted with AES-256-GCM before they reach the database.

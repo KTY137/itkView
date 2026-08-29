@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-2b249de08a10
 import { useEffect, useMemo, useState } from "react";
 import {
   ApiError,

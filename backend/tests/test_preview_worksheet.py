@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-1f9e104cf947
 """H1 worksheet block of the component preview (spec 2026-08-25, section H).
 
 Contract under test: one group per stage of the institute's stage model (all

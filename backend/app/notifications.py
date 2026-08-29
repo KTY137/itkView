@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-0a80502e01ec
 """Pluggable notification adapter (Phase 4, replaces the Telegram watchdogs).
 
 Channel *definitions* are institute-profile data, never code (hard rule #4):

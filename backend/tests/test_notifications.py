@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-4d9ef7d0d7c7
 """Tests for the notification adapter (app/notifications.py)."""
 
 import io

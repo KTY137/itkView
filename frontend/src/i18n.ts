@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-4c605b5f6dc5
 import type { OutboxStatus, Role, ToolStatus } from "./api";
 import { product } from "./product";
 

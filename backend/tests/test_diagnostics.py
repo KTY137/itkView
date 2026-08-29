@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-77bd16a6212c
 import json
 from datetime import datetime, timezone
 from io import BytesIO

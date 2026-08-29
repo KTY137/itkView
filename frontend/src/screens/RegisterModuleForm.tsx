@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-34c4d8d19cdd
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { postComponentRegister } from "../api";

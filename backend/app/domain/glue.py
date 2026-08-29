@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-cb69dab11ee4
 """Glue-weight domain logic — pure functions, institute-agnostic.
 
 Targets and tolerances are *profile data*. The constants below preserve the

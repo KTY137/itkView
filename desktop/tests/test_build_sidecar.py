@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-1ca0f9960672
 """Lightweight contract tests for the two desktop packaging variants."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-bc4b81a3237b
 import { useEffect, useState } from "react";
 import { getOpsHealth } from "../api";
 import type { Institute, OpsHealth, OpsHeartbeat, SyncJob } from "../api";

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-854a7cfe389e
 import type { CollectiveCurveFamily } from "./measurements";
 
 export type CollectiveDisplayMode = "representative" | "all";

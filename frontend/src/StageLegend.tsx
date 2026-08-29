@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-7c7c5fd297fd
 import { stageChipClass, stageLabel } from "./ui";
 
 /** The assembly flow in canonical order, then the two off-flow exits. Renders

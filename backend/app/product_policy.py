@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-b098b5bcf513
 """Server-owned product-variant policy for state-changing HTTP routes.
 
 ``itkView`` is a read-only production cockpit, but it still needs a writable

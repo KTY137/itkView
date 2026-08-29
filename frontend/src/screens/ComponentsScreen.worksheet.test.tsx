@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-82906be74ece
 /**
  * Integration of the module worksheet into the component detail view
  * (spec 2026-08-25-staged-first-module-page-design.md §H3).

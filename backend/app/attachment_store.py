@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-ff719e8d4981
 """Local mirror of PDB test-run attachments (images, plots, instrument output).
 
 The bytes live on disk, not in the database: the mirror stays small, and a

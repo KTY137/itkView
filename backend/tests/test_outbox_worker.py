@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-8725841c694a
 """Offline tests for the async outbox worker.
 
 The real PDB submitter is never used here: every test injects a fake, so the

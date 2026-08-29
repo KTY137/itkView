@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-e8ba8b3ed28e
 """Tests for the reminders API, channel listing and the test-notification endpoint."""
 
 from datetime import datetime, timezone

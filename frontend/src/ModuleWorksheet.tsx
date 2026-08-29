@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-aaafd5404e31
 /**
  * Module worksheet (spec §H2) — the spreadsheet-model primary view of a
  * component: one compact table per stage group (row = a test type), values

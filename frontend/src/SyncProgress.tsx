@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-61b1cb0c56be
 import { useEffect, useState } from "react";
 import type { SyncJob, SyncJobPhase } from "./api";
 import { isSyncJobActive, syncJobElapsedSeconds } from "./componentSync";

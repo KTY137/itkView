@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-af9bcb4bffb2
 """Upsert PDB shipment records into the local mirror (Phase 4).
 
 Same division of labour as `app.sync` / `app.tool_sync`: the fetch layer

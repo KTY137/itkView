@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-b2e5463777e1
 """DUMMY write scope for the production PDB (docs/09, ADR 003).
 
 There is no PDB test server. The strips community separates test parts from

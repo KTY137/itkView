@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-996edc7f7203
 export const APPEARANCE_THEME_STORAGE_KEY = "itkview.appearance.theme";
 export const APPEARANCE_ACCENT_STORAGE_KEY = "itkview.appearance.accent";
 

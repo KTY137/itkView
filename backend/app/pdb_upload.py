@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-0c9be471c1d3
 """Build canonical PDB test-run upload payloads from parsed ingest files.
 
 This module is pure conversion logic: no database access, no PDB client. The

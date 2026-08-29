@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-fd38ceaa0840
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient

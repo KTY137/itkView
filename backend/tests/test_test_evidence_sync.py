@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-a3d093cfb7b0
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 

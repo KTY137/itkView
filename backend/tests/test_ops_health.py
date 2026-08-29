@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-6e9234f2eaf8
 """Offline tests for the admin-only Phase-4 operations health slice."""
 
 from datetime import datetime, timedelta, timezone

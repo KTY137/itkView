@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-cf8c8aa94f06
 /**
  * Realistically shaped payloads for the module-worksheet integration suite
  * (`screens/ComponentsScreen.worksheetIntegration.test.tsx`).

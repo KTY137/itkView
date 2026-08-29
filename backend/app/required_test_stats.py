@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-56ca2d3bea39
 """Required-test coverage by configured production stage.
 
 This read model uses only the local component/evidence mirror. Its denominator

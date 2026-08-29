@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-42c0e728b1e8
 """Desktop packaging entry point: state locations, key stability, ports."""
 
 import json

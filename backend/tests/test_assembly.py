@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-5daf297c2cba
 """Offline contract tests for scanner-first assembly staging and submission."""
 
 from datetime import datetime, timedelta, timezone

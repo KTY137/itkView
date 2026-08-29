@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-4141251086f3
 """Which mirrored images an operator can actually see.
 
 Two defects measured against the owner's live mirror sit behind this file:

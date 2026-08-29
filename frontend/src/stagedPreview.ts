@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-887168c8fe6f
 export const STAGED_PREVIEW_STORAGE_KEY = "itkflow.stagedPreview";
 
 export const STAGED_PREVIEW_MODES = ["tabs", "inline", "off"] as const;

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-3736677b19b4
 """Tests for the stage-move suggestion engine (pure domain + API)."""
 
 from datetime import datetime

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-23b6ffed88cc
 """Create or update an admin user (docs/06).
 
 The password is read from --password or the ITKFLOW_ADMIN_PASSWORD environment

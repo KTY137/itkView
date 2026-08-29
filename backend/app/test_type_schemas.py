@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-6113f8ed4911
 """Upsert service for the local read-only test-type schema mirror."""
 
 from __future__ import annotations

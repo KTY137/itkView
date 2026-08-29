@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-aed56720f6d5
 """Offline tests for the DUMMY write scope (docs/09, ADR 003)."""
 
 from app.config import Settings

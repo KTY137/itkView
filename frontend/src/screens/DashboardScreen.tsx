@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-48c97b20807c
 import { useEffect, useState } from "react";
 import { ApiError, getDashboardSummary, getInstitutes } from "../api";
 import type { CountBucket, DashboardSummary } from "../api";

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-3406dedaefbf
 from authutil import authenticate, create_institute_profile
 
 from app.models import Component, IngestFile

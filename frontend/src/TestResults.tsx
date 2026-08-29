@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-1eacb15490a0
 /**
  * Mirrored PDB test runs with their measured values.
  *

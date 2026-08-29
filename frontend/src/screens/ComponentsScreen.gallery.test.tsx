@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-2cc23170af69
 /**
  * The module page's image gallery, rendered against the real detail panel.
  *

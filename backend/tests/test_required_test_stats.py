@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-83df61684513
 from datetime import datetime, timedelta, timezone
 
 from authutil import authenticate, create_institute_profile

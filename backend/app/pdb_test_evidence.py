@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-93a517228dbe
 """Read-only fetch of a component's test-run results from the PDB.
 
 Turns `getComponent`'s test runs into `TestRunEvidenceRecord`s so the stage

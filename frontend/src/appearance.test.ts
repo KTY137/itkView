@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-e74b83c220d1
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {

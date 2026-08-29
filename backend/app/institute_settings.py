@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-f259512a5048
 """Validation for the operational part of an institute profile.
 
 ``InstituteProfile.settings`` intentionally remains extensible JSON.  Only the

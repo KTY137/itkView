@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-cc51f4141904
 """Tests for reminder scheduling and the worker tick (app/reminders.py)."""
 
 import asyncio

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-ddef35a370b7
 /**
  * PDB test-type definitions in the shape the ITk Production Database really
  * returns — copied verbatim (read-only) out of a live itkFlow mirror's

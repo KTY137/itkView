@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-bce2715efeaf
 """Tests for the glue-batch registry: lifecycle, pot-life timer, usage (docs/11)."""
 
 from datetime import datetime, timedelta, timezone

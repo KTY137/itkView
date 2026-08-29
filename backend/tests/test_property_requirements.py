@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-9c8517ed18b1
 """Institute-configured required upload properties, e.g. the used jig (docs/07).
 
 Certain steps (hybrid gluing, metrology) need the jig recorded on the upload or

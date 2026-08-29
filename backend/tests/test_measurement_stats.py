@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-c4af516e1708
 """Measurement statistics: overlaid curves (IV) and scalar distributions.
 
 The Statistics page aggregates mirrored test-run measurements across an

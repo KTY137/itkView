@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-6162ce0c140d
 /** Pure helpers for the measurement charts on the Statistics screen.
  *
  * Kept free of React/DOM so the geometry is unit-testable: curves are scaled

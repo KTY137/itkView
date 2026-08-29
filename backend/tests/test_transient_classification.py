@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-1738714d0363
 """Transient-vs-permanent failure classification across the write and sync paths.
 
 Three layers share the same question — "is retrying useful?" — and each answers

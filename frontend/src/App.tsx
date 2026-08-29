@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+// SPDX-FileComment: itkflow-11ace3c04e09
 import { useEffect, useRef, useState } from "react";
 import { getInstitutes, patchInstitute, postNotificationTest } from "./api";
 import type { Institute } from "./api";
@@ -31,6 +34,11 @@ type Health = {
   version: string;
   pdb_instance: string;
   pdb_write_scope?: string;
+  /** Holder, year and licence, stated by the running build (app/provenance.py). */
+  copyright?: string;
+  /** Names the origin of this copy, so a deployment is attributable without
+   * reading its source. */
+  provenance?: string;
 };
 
 const SCREENS = [
@@ -389,6 +397,13 @@ function AppShell() {
             <div className="rail-logo">
               <img src={logoUrl} alt={brandCode ? `${brandCode} logo` : "Institute logo"} />
             </div>
+          )}
+          {health?.copyright !== undefined && (
+            // Stated by the running build, not hardcoded here, so a copy
+            // cannot shed the notice by editing the interface alone.
+            <p className="rail-notice" title={health.provenance ?? undefined}>
+              {health.copyright}
+            </p>
           )}
         </div>
       </aside>

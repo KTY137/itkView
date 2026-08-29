@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-5d85668cae7a
 """Keep the local mirror fresh without anyone pressing a button.
 
 A sweep used to be worth avoiding: one request per in-scope component meant

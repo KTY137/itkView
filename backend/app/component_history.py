@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-3bb3d192daa3
 """One chronological record of what happened to a component.
 
 Everything here is already mirrored; what was missing is the shared time axis.

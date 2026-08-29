@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-e3002f92d1f6
 """The packaged desktop build serves the SPA from the backend origin."""
 
 import pytest

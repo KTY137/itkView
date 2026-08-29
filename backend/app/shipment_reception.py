@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-be497bf75aa5
 """Server-side reception-test projection for mirrored shipments.
 
 Reception requirements are institute profile data.  This module projects the

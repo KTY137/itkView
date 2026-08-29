@@ -31,6 +31,22 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-28)
 
+- **Urheberschaft ist im Code verankert (2026-08-29):** Das Repo hatte weder
+  `LICENSE` noch eine einzige Copyright-Angabe. Jetzt drei Ebenen: MIT-Lizenz
+  im Wurzelverzeichnis, ein SPDX-Header in **214 Quelldateien**
+  (`backend/app`, `backend/tests`, `frontend/src`, `desktop`) und ein
+  Laufzeit-Marker. Jeder Header traegt zusaetzlich eine deterministisch aus dem
+  Dateipfad abgeleitete `SPDX-FileComment`-ID, damit auch eine **einzelne**
+  herausgeloeste Datei zuordenbar bleibt. `/health` nennt `provenance` und
+  `copyright`; die Oberflaeche zeigt die Zeile am Fuss der Navigationsleiste,
+  **serverseitig geliefert**, damit eine Kopie sie nicht durch Bearbeiten des
+  Frontends abstreift. Bewusst **keine** Zero-Width-Zeichen oder getarnten
+  Konstanten: Formatierer entfernen sie stillschweigend, sie brechen Parser,
+  und ein Marker, den ein Mitarbeiter nicht sehen kann, wird versehentlich
+  geloescht. Offen und ausserhalb meiner Zustaendigkeit: `origin` zeigt auf
+  `gitlab.cern.ch/atlas-itk` — ob ein persoenliches Copyright dort mit
+  Anstellungs- oder Kollaborationsvorgaben kollidiert, muss der Owner klaeren.
+
 - **itkView 0.2.1 geschnitten (2026-08-28):** Enthaelt den
   institutsuebergreifenden Teile-Sync, die Korrektur der beiden
   `parents[]`-Formen und die History der Bauteilseite (Stages, Laeufe,

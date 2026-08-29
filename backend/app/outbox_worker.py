@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-c467e538ba88
 """Async outbox worker — the only path that turns a reviewed action into a
 real PDB write.
 

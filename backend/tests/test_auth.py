@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-88c1a2f3108e
 """Tests for local-account auth, sessions and role enforcement (docs/06)."""
 
 import pytest

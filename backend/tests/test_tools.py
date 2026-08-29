@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-49fc19f89a22
 """Tests for the jig/tool registry and type-filtered quick-select (docs/07)."""
 
 import pytest
