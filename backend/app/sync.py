@@ -123,9 +123,7 @@ def sync_components(
     }
     existing_by_sn: dict[str, Component] = {}
     for sn_chunk in _chunks(sorted(lookup_sns), 500):
-        for component in session.scalars(
-            select(Component).where(Component.sn.in_(sn_chunk))
-        ):
+        for component in session.scalars(select(Component).where(Component.sn.in_(sn_chunk))):
             existing_by_sn[component.sn] = component
 
     # Pass 1: upsert mirror fields by serial number.
@@ -134,9 +132,7 @@ def sync_components(
         if component is None:
             component = Component(
                 synced_at=now,
-                **record.model_dump(
-                    exclude={"parent_sn", "stage_events", "location_events"}
-                ),
+                **record.model_dump(exclude={"parent_sn", "stage_events", "location_events"}),
             )
             session.add(component)
             created.add(record.sn)
