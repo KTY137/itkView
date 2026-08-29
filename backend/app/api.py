@@ -101,6 +101,7 @@ from app.schemas import (
     AssemblyPreviewOut,
     AssemblyStageOut,
     AttachmentLocatorOut,
+    ComponentHistoryOut,
     ThumbnailPartOut,
     AttachmentSyncOut,
     AuditOut,
@@ -3808,6 +3809,36 @@ def component_attachment_binary(
         path,
         media_type=row.content_type or "application/octet-stream",
         filename=row.filename or row.pdb_code,
+    )
+
+
+@router.get(
+    "/api/components/{sn}/history",
+    response_model=ComponentHistoryOut,
+    tags=["components"],
+)
+def component_history_view(
+    sn: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> ComponentHistoryOut:
+    """This component's stage transitions and mirrored runs on one time axis.
+
+    Both facts were already stored and both were already shown — the stage log
+    on the statistics screen, the runs behind the worksheet — but never
+    together, so the order of events had to be reconstructed by hand. Purely
+    local: no PDB call, and no verdict. A withdrawn run appears here marked as
+    retracted even though the stage gate rightly ignores it; an omission would
+    be its own claim.
+    """
+    from app.component_history import component_history, history_read_model
+
+    component = db.scalar(select(Component).where(Component.sn == sn))
+    if component is None:
+        raise HTTPException(status_code=404, detail=f"Component '{sn}' not found.")
+    return ComponentHistoryOut(
+        component_sn=sn,
+        events=history_read_model(component_history(db, sn)),
     )
 
 

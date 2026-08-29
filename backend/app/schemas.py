@@ -220,6 +220,35 @@ class TestRunAttachmentOut(BaseModel):
     is_image: bool
 
 
+class ComponentHistoryEventOut(BaseModel):
+    """One dated fact from a component's record.
+
+    `kind` says which fact it is; the fields that do not apply stay null rather
+    than being folded into a formatted string, so a caller can group, filter or
+    translate without parsing prose.
+    """
+
+    kind: Literal["stage", "test", "location"]
+    # Null for a legacy run whose instrument time was never mirrored. The row
+    # is still shown, marked undated, because dropping it would hide real work.
+    at: datetime | None
+    stage: str | None = None
+    # The site a relocation moved the component to. Named, never a raw PDB
+    # object id: an unresolvable entry is dropped by the sync instead.
+    location: str | None = None
+    rework: bool | None = None
+    test_type: str | None = None
+    passed: bool | None = None
+    # A run the PDB has retracted. Not evidence for a gate, but still history.
+    withdrawn: bool | None = None
+    external_ref: str | None = None
+
+
+class ComponentHistoryOut(BaseModel):
+    component_sn: str
+    events: list[ComponentHistoryEventOut]
+
+
 class ThumbnailPartOut(BaseModel):
     """The assembled part a borrowed list tile was taken from."""
 

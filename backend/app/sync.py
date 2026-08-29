@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, insert, or_, select
 from sqlalchemy.orm import Session
 
-from app.models import Component, StageEvent, utcnow
+from app.models import Component, LocationEvent, StageEvent, utcnow
 
 # Mirror fields copied verbatim from a record to the row. Changing any of
 # them counts the row as "updated"; `synced_at` alone does not.
@@ -41,6 +41,14 @@ class StageEventRecord(BaseModel):
     rework: bool = False
 
 
+class LocationEventRecord(BaseModel):
+    """One dated relocation from a component's PDB `locations[]` log."""
+
+    location: str = Field(min_length=1, max_length=32)
+    entered_at: datetime
+    stage: str | None = Field(default=None, max_length=48)
+
+
 class SyncRecord(BaseModel):
     """One component as reported by the PDB (parents referenced by SN)."""
 
@@ -55,6 +63,7 @@ class SyncRecord(BaseModel):
     is_dummy: bool = False
     trashed: bool = False
     stage_events: list[StageEventRecord] = Field(default_factory=list)
+    location_events: list[LocationEventRecord] = Field(default_factory=list)
 
 
 @dataclass
@@ -120,7 +129,7 @@ def sync_components(
         component = by_sn.get(record.sn) or existing_by_sn.get(record.sn)
         if component is None:
             component = Component(
-                synced_at=now, **record.model_dump(exclude={"parent_sn", "stage_events"})
+                synced_at=now, **record.model_dump(exclude={"parent_sn", "stage_events", "location_events"})
             )
             session.add(component)
             created.add(record.sn)
@@ -155,6 +164,7 @@ def sync_components(
     session.flush()
 
     _sync_stage_events(session, records, by_sn)
+    _sync_location_events(session, records)
 
     # Prune pass: flag governed rows this full sync did not return as stale.
     # Keyed on the seen serial numbers (not timestamps) so it is independent of
@@ -230,6 +240,40 @@ def _sync_stage_events(
         # path is equivalent here and turns thousands of individual INSERTs
         # into one executemany operation.
         session.execute(insert(StageEvent), rows)
+    session.flush()
+
+
+def _sync_location_events(session: Session, records: Sequence[SyncRecord]) -> None:
+    """Rebuild the relocation history for every component that reports one.
+
+    Delete-and-reinsert per component, like the stage log and for the same
+    reason: the two scoped listings return a component twice when it is both
+    owned by and located at the institute, and an insert-only pass would
+    double every move. Components without moves are untouched, so a fixture or
+    demo sync never clears a real history.
+    """
+    events_by_sn = {r.sn: r.location_events for r in records if r.location_events}
+    if not events_by_sn:
+        return
+    for sn_chunk in _chunks(sorted(events_by_sn), 500):
+        session.execute(delete(LocationEvent).where(LocationEvent.component_sn.in_(sn_chunk)))
+    session.flush()
+    rows: list[dict] = []
+    for sn, events in events_by_sn.items():
+        deduped: dict[tuple[str, datetime], LocationEventRecord] = {}
+        for ev in events:
+            deduped[(ev.location, ev.entered_at)] = ev  # collapse identical entries
+        for ev in deduped.values():
+            rows.append(
+                {
+                    "component_sn": sn,
+                    "location": ev.location,
+                    "entered_at": ev.entered_at,
+                    "stage": ev.stage,
+                }
+            )
+    if rows:
+        session.execute(insert(LocationEvent), rows)
     session.flush()
 
 

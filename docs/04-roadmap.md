@@ -31,6 +31,47 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-28)
 
+- **Ortswechsel stehen in der History (2026-08-28):** Die PDB fuehrt Umzuege in
+  `locations[]`, nennt den Standort dort aber nur als interne
+  Institutions-Objekt-ID. `listInstitutions` loest alle 156 Sites in einem
+  einzigen Request auf, deshalb ist der Log bezahlbar; ein nicht aufloesbarer
+  Eintrag wird verworfen statt roh gezeigt. Die neue Tabelle `location_event`
+  wird wie der Stage-Log je Komponente geloescht und neu geschrieben, damit die
+  zwei Listings (besitzt/liegt) keine Dubletten erzeugen. Die Zeitachse der
+  Detailseite zeigt sie als dritte Ereignisart neben Stage-Uebergaengen und
+  Testlaeufen. Vertraege: [`docs/09`](09-pdb-production-strategy.md),
+  [`docs/05`](05-ui-design-reference.md).
+
+- **Verbaute Teile werden institutsuebergreifend gespiegelt (2026-08-28):**
+  Der Komponenten-Sync fragte nur „gehoert dem Institut" und „liegt beim
+  Institut". Die Teile eines Moduls gehoeren oft keinem von beiden — ein
+  TUDO-Halbmodul mit Hybrid von UT und Sensor von CERN an einem dritten
+  Standort. Ergebnis: keine lokale Zeile, keine Assembly-Verknuepfung, leere
+  Modulseite ohne Bilder. Ein dritter Durchgang holt die in `children[]`
+  genannten, im Batch fehlenden Teile einzeln nach (ein Request je **fehlendem**
+  Teil, begrenzt durch `sync_assembled_part_limit`); ein verweigertes Teil
+  faellt aus dem Lauf statt den Job zu kippen. Dabei zeigte der Lauf gegen die
+  echte PDB einen zweiten Fehler, den kein Fixture-Test fand: `parents[]
+  .component` ist bei `listComponents` eine Objekt-ID, bei `getComponent` ein
+  verschachteltes Objekt mit Seriennummer, dessen `state` `null` ist — die 64
+  Teile kamen an und hingen an nichts. Beide Formen werden jetzt gelesen.
+  **Gemessen: 64 Bauteile, 64 Links, 24 Modulseiten bekommen ueberhaupt erst
+  Teile; Links im Gesamtlauf 1853 -> 1917.**
+  Vertrag: [`docs/09`](09-pdb-production-strategy.md).
+
+- **Die Bauteilseite hat eine History (2026-08-28):** `GET
+  /api/components/{sn}/history` legt Stage-Uebergaenge und gespiegelte
+  Testlaeufe auf **eine** Zeitachse, neuestes zuerst; das Panel steht unter dem
+  Worksheet. Die Daten lagen laengst im Spiegel — 8 662 Stage-Ereignisse ueber
+  3 046 Bauteile —, aber der Stage-Log speiste ausschliesslich Statistics und
+  die Laeufe hingen hinter dem Worksheet. Das Lesemodell urteilt nicht: ein von
+  der PDB zurueckgezogener Lauf wird **markiert gezeigt**, nicht entfernt (das
+  Stage-Gate ignoriert ihn weiterhin), und ein Lauf ohne Messzeit steht als
+  ausdruecklich undatiert am Ende statt an einem erfundenen Datum. Zeitstempel
+  werden auf eine UTC-naive Lesart normalisiert, damit die Mischreihenfolge
+  nicht von SQLite gegen PostgreSQL abhaengt. Rein lokal, kein PDB-Aufruf.
+  Vertrag: [`docs/05`](05-ui-design-reference.md).
+
 - **itkView 0.2.0: geliehene Bild-Kacheln und eine Gate-Ansicht
   (2026-08-28):** Die Listen-Spalte blieb auf fast jeder Modulzeile leer, weil
   ein Foto praktisch nie am Modul haengt. Eine Zeile ohne eigenes Bild leiht

@@ -4,12 +4,13 @@ import type { NavIntent, ScreenId } from "../App";
 import AddTestResult from "../AddTestResult";
 import type { RecordTestIntent } from "../AddTestResult";
 import ImageLightbox from "../ImageLightbox";
-import ModuleWorksheet from "../ModuleWorksheet";
+import ModuleWorksheet, { formatMeasuredAt } from "../ModuleWorksheet";
 import {
   ApiError,
   componentAttachmentUrl,
   getComponent,
   getComponentAttachments,
+  getComponentHistory,
   getComponentPreview,
   getComponents,
   getComponentStaged,
@@ -30,6 +31,7 @@ import type {
   ComponentPreview,
   ComponentPreviewAction,
   ComponentPreviewTest,
+  ComponentHistoryEvent,
   ComponentThumbnail,
   Institute,
   OutboxAction,
@@ -1599,6 +1601,7 @@ export function ComponentDetailPanel({
               )}
             </>
           )}
+          <HistorySection sn={detail.sn} refreshKey={reloadKey} />
           <ImagesSection sn={detail.sn} refreshKey={reloadKey} />
         </div>
       </div>
@@ -1852,6 +1855,106 @@ function storedImages(attachments: readonly TestRunAttachment[]): TestRunAttachm
     const contentType = (attachment.content_type ?? "").split(";")[0].trim().toLowerCase();
     return attachment.stored && (attachment.is_image || contentType.startsWith("image/"));
   });
+}
+
+/** The component's record on one time axis: stages and runs, newest first.
+ *
+ * Both facts were already on the page — the worksheet holds the runs, the
+ * stage chip holds the current stage — but never in order, so "what happened
+ * to this module, and when" had to be reconstructed by hand. A retracted run
+ * appears here marked, not omitted: a gap in a record is itself a claim.
+ */
+function HistorySection({ sn, refreshKey }: { sn: string; refreshKey: number }) {
+  const [events, setEvents] = useState<ComponentHistoryEvent[] | null>(null);
+  const [offline, setOffline] = useState(false);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setEvents(null);
+    setOffline(false);
+    getComponentHistory(sn, ctrl.signal)
+      // A panel that cannot read its own payload shows nothing and says so.
+      // Trusting the shape here would let one malformed response throw during
+      // render and take the whole module page down with it.
+      .then((history) =>
+        setEvents(Array.isArray(history?.events) ? history.events : []),
+      )
+      .catch((err: unknown) => {
+        if (ctrl.signal.aborted) return;
+        if (err instanceof ApiError && err.isNetwork) setOffline(true);
+        else setEvents([]);
+      });
+    return () => ctrl.abort();
+  }, [refreshKey, sn]);
+
+  return (
+    <>
+      <h3 className="section-title">{t.images.historyTitle}</h3>
+      <div className="panel">
+        {offline ? (
+          <p className="state-note">{t.images.historyOffline}</p>
+        ) : events === null ? (
+          <p className="state-note">{t.common.loading}</p>
+        ) : events.length === 0 ? (
+          <p className="state-note">{t.images.historyEmpty}</p>
+        ) : (
+          <ol className="history-list">
+            {events.map((event, index) => (
+              <li
+                className={event.kind === "stage" ? "history-item is-stage" : "history-item"}
+                key={`${event.kind}-${event.external_ref ?? event.location ?? event.stage ?? ""}-${event.at ?? ""}-${index}`}
+              >
+                <span className="history-when">
+                  {event.at === null ? (
+                    <span className="muted">{t.images.historyUndated}</span>
+                  ) : (
+                    formatMeasuredAt(event.at)
+                  )}
+                </span>
+                <span className="history-what">
+                  {event.kind === "location" ? (
+                    <>
+                      <span className="chip neutral">
+                        {t.images.historyMovedTo(event.location ?? "")}
+                      </span>
+                      {event.stage !== null && (
+                        <span className="muted">{stageLabel(event.stage)}</span>
+                      )}
+                    </>
+                  ) : event.kind === "stage" ? (
+                    <>
+                      <span className={stageChipClass(event.stage ?? "")}>
+                        {stageLabel(event.stage ?? "")}
+                      </span>
+                      {event.rework === true && (
+                        <span className="chip warn">{t.images.historyRework}</span>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <span className="mono">{event.test_type}</span>
+                      <span
+                        className={
+                          event.passed ? "chip ok" : "chip danger"
+                        }
+                      >
+                        {event.passed
+                          ? t.worksheet.statusPassed
+                          : t.worksheet.statusFailed}
+                      </span>
+                      {event.withdrawn === true && (
+                        <span className="chip muted">{t.images.historyWithdrawn}</span>
+                      )}
+                    </>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+    </>
+  );
 }
 
 /** One list tile: the row's own picture, or a part's, marked as such.

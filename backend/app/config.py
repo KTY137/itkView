@@ -97,6 +97,11 @@ class Settings(BaseSettings):
     # sweep; the small default keeps the load on the production PDB modest
     # while cutting a multi-hour sweep down by roughly that factor.
     sync_fetch_concurrency: int = Field(default=4, ge=1, le=16)
+    # A module's assembled parts frequently belong to another institute, so the
+    # institute listing never returns them. They are fetched individually,
+    # which is one request each — bounded here so an unexpected assembly graph
+    # cannot turn one sync into an unbounded read.
+    sync_assembled_part_limit: int = Field(default=3000, ge=0, le=20000)
     # How often the unattended-refresh scheduler WAKES UP to evaluate the
     # institute profiles. This is a database query, not PDB traffic: whether a
     # sweep actually runs is decided per institute by

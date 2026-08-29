@@ -112,6 +112,21 @@ itkFlow-Frontend kann deshalb keine verbotene Mutation ausfuehren.
    darstellbare Formate als beschrifteter Platzhalter — nie als kaputtes
    `<img>` und nie als falscher Leerzustand. Eigene und Kind-Anhaenge bleiben
    nach ihrer echten Besitzer-SN getrennt.
+   **History-Panel (2026-08-28):** Unter dem Worksheet steht `History` — eine
+   Zeitachse aus `GET /api/components/{sn}/history`, neuestes zuerst, die
+   Stage-Uebergaenge und gespiegelte Testlaeufe mischt. Beide Fakten lagen
+   bereits im Spiegel (8 662 Stage-Ereignisse ueber 3 046 Bauteile), aber der
+   Stage-Log speiste nur Statistics und die Laeufe hingen hinter dem
+   Worksheet; die Reihenfolge musste im Kopf rekonstruiert werden. Das Panel
+   faellt kein Urteil: ein von der PDB zurueckgezogener Lauf erscheint
+   **markiert**, nicht weggelassen — das Stage-Gate ignoriert ihn zu Recht,
+   eine Luecke im Protokoll waere aber selbst eine Behauptung. Ein Lauf ohne
+   Messzeit steht am Ende und wird als undatiert ausgewiesen, statt ein Datum
+   zu erfinden. Seit demselben Schnitt traegt die Achse eine dritte
+   Ereignisart: **Ortswechsel** (`Moved to <Site>`), aus `location_event`. Sie
+   erscheinen nur bei tatsaechlich verschickten Bauteilen und nennen immer
+   einen aufgeloesten Standort, nie eine PDB-Objekt-ID. Rein lokal, kein
+   PDB-Aufruf.
    Derselbe servereigene Status steht als Chip im Detailkopf und als
    persistenter kritischer Hinweis mit den konkreten Stage-/Testgruenden. Die
    Komponentenliste zeigt ihn neben dem lokalen Namen und bietet Filter sowie

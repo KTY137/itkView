@@ -285,6 +285,40 @@ Der produktive `listComponents`-Read ist weiterhin rein lesend und verwendet:
   abgefragt kommen beide Scopes dublettenfrei und vollstaendig zurueck;
   zusammengefuehrt ergibt das 3044 statt 2538 gespiegelte Komponenten.
   Sortierhinweise (`orderBy`/`sortBy`) akzeptiert die API nicht.
+- **einen dritten Durchgang fuer verbaute Teile (2026-08-28):** Die beiden
+  Listings fragen „gehoert dem Institut" und „liegt beim Institut". Die Teile
+  eines Moduls erfuellen haeufig keines von beidem — im TUDO-Spiegel gehoert
+  ein Halbmodul TUDO, sein Hybrid aber UT und sein Sensor CERN, beide an einem
+  dritten Standort. Sie fielen durch jedes Raster: keine lokale Zeile, keine
+  Assembly-Verknuepfung, eine leere Modulseite ohne Bilder. Nach den Listings
+  werden deshalb die in `children[].component` genannten Objekt-IDs, die der
+  Batch nicht enthaelt, einzeln per `getComponent` nachgeholt — **ein Request
+  je fehlendem Teil**, nicht je Teil, begrenzt durch
+  `sync_assembled_part_limit` (Default 3000). Ein Teil, das die PDB verweigert,
+  faellt aus diesem Lauf heraus statt den Job zu kippen: das Listing ist die
+  Nutzlast, dieser Durchgang die Anreicherung. Gemessen am Owner-Spiegel:
+  **64 zusaetzliche Bauteile** (UT 24, CERN 24, UNIFREIBURG 16; Typen
+  HYBRID_ASSEMBLY 24, SENSOR 24, PWB 16), die **24 Modul-/Halbmodulseiten**
+  ueberhaupt erst Teile geben; Assembly-Links im Gesamtlauf 1853 -> 1917.
+  Der Prune-Lauf fasst sie nicht an, weil er nur Zeilen kennt, die dem
+  Institut gehoeren oder dort liegen.
+- **`parents[].component` hat zwei Formen (2026-08-28):** `listComponents`
+  liefert die bloße **Objekt-ID** als String, `getComponent` ein
+  **verschachteltes Objekt mit `serialNumber`** — und dessen ID steht in keinem
+  Batch, ist ueber `id_to_sn` also unaufloesbar. Zusaetzlich ist `state` dort
+  `null`, was ein Filter auf `!= "ready"` faelschlich als tote Verknuepfung
+  liest. Beide Formen werden jetzt gelesen und ein fehlendes `state` gilt als
+  lebend; ohne das kamen die 64 Teile zwar an, haetten aber an nichts
+  gehangen (real gemessen: 64 von 64 ohne Link).
+- **die Orts-Historie (2026-08-28):** `locations[]` nennt den Standort nur als
+  interne Institutions-**Objekt-ID**. `listInstitutions` loest alle 156 Sites in
+  **einem** Request auf, was den Log ueberhaupt bezahlbar macht; die Alternative
+  waere eine Abfrage je jemals bewegter Komponente. Ein Eintrag, dessen Site
+  nicht aufloesbar ist, wird **verworfen** statt roh gespiegelt — „verschoben
+  nach 5a84991d…" ist keine Information. Faellt der Institutions-Read aus,
+  kostet das diesen Lauf die Orts-Historie und sonst nichts. Eintraege haben
+  nur tatsaechlich verschickte Bauteile; der aktuelle Standort bleibt eine
+  Spalte, die Bewegung wird ein Ereignis (`location_event`).
 - den festen, verhaltensaequivalenten Filter `state=ready` (der Mapper konnte
   andere States ohnehin nicht spiegeln),
 - `outputType=full`, weil Parents, DUMMY-Batches und Stage-Historie gebraucht

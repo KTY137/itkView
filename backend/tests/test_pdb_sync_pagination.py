@@ -450,3 +450,179 @@ def test_profile_filters_cannot_override_the_scope_keys(monkeypatch):
         present = [v for v in scope_values if v is not None]
         assert present == [["TUDO"]], filter_map
         assert filter_map["componentType"] == ["MODULE"]
+
+
+# --- Assembled parts owned by another institute -----------------------------
+
+
+class FamilyClient:
+    """`listComponents` for the institute, `getComponent` for foreign parts."""
+
+    def __init__(self, listing: list[dict], by_object_id: dict[str, dict]) -> None:
+        self.listing = listing
+        self.by_object_id = by_object_id
+        self.fetched: list[str] = []
+
+    def get(self, action: str, *, json: dict, timeout=None):
+        if action == "listComponents":
+            scope = json["filterMap"]
+            values = self.listing if "institute" in scope else []
+            return page(0, len(values), values)
+        assert action == "getComponent"
+        component = json["component"]
+        self.fetched.append(component)
+        return self.by_object_id[component]
+
+
+def _family_settings_and_institute():
+    return (
+        Settings(_env_file=None),
+        InstituteProfile(
+            code="TUDO", name="TU Dortmund", local_name_prefix="TUDO-", settings={}
+        ),
+    )
+
+
+def _install(monkeypatch, client, codes):
+    class FakeGateway:
+        is_configured = True
+
+        def __init__(self, settings, *, access_codes):
+            assert access_codes is codes
+
+        def client(self):
+            return client
+
+    monkeypatch.setattr("app.pdb_sync.PdbGateway", FakeGateway)
+
+
+def test_fetch_pulls_in_assembled_parts_owned_by_another_institute(monkeypatch):
+    """A module's parts often belong to someone else, and were never fetched.
+
+    The listing asks for components owned by *or* located at the institute. On
+    the owner's mirror a half module belongs to TUDO while its hybrid belongs
+    to UT and its sensor to CERN, both sitting at a third site — so both fall
+    through every scope, no local row is created, and the module page shows an
+    empty assembly with no pictures. 24 modules were empty for exactly this.
+    """
+    module = {
+        "id": "OID-MODULE",
+        "serialNumber": "20USE5L0000754",
+        "componentType": {"code": "MODULE"},
+        "type": {"code": "R5M1_HALFMODULE"},
+        "institution": {"code": "TUDO"},
+        "currentStage": {"code": "STITCH_BONDING"},
+        "state": "ready",
+        "children": [
+            {"component": "OID-HYBRID"},
+            {"component": "OID-SENSOR"},
+            {"component": None},  # an empty slot names nothing to fetch
+        ],
+    }
+    foreign = {
+        "OID-HYBRID": {
+            "id": "OID-HYBRID",
+            "serialNumber": "20USEHC0000298",
+            "componentType": {"code": "HYBRID_ASSEMBLY"},
+            "type": {"code": "R5H1"},
+            "institution": {"code": "UT"},
+            "currentStage": {"code": "ON_MODULE"},
+            "state": "ready",
+            "parents": [{"component": "OID-MODULE", "state": "ready"}],
+        },
+        "OID-SENSOR": {
+            "id": "OID-SENSOR",
+            "serialNumber": "20USES50001965",
+            "componentType": {"code": "SENSOR"},
+            "type": {"code": "ATLAS18R5"},
+            "institution": {"code": "CERN"},
+            "currentStage": {"code": "READY_FOR_MODULE"},
+            "state": "ready",
+            "parents": [{"component": "OID-MODULE", "state": "ready"}],
+        },
+    }
+    codes = PdbAccessCodes(access_code1="c1", access_code2="c2")
+    client = FamilyClient([module], foreign)
+    _install(monkeypatch, client, codes)
+    settings, institute = _family_settings_and_institute()
+
+    result = fetch_for_institute(settings, institute, codes)
+
+    by_sn = {record.sn: record for record in result.records}
+    assert set(by_sn) == {"20USE5L0000754", "20USEHC0000298", "20USES50001965"}
+    # Fetched under their own owner, and linked to the module that holds them.
+    assert by_sn["20USEHC0000298"].institute_code == "UT"
+    assert by_sn["20USES50001965"].institute_code == "CERN"
+    assert by_sn["20USEHC0000298"].parent_sn == "20USE5L0000754"
+    assert by_sn["20USES50001965"].parent_sn == "20USE5L0000754"
+    assert sorted(client.fetched) == ["OID-HYBRID", "OID-SENSOR"]
+
+
+def test_parts_already_in_the_listing_are_not_fetched_again(monkeypatch):
+    """The extra pass costs one call per *missing* part, never per part."""
+    module = {
+        "id": "OID-MODULE",
+        "serialNumber": "20USEM20000041",
+        "componentType": {"code": "MODULE"},
+        "type": {"code": "R2"},
+        "institution": {"code": "TUDO"},
+        "currentStage": {"code": "GLUED"},
+        "state": "ready",
+        "children": [{"component": "OID-SENSOR"}],
+    }
+    sensor = {
+        "id": "OID-SENSOR",
+        "serialNumber": "20USES20000035",
+        "componentType": {"code": "SENSOR"},
+        "type": {"code": "ATLAS18R2"},
+        "institution": {"code": "TUDO"},
+        "currentStage": {"code": "READY_FOR_MODULE"},
+        "state": "ready",
+        "parents": [{"component": "OID-MODULE", "state": "ready"}],
+    }
+    codes = PdbAccessCodes(access_code1="c1", access_code2="c2")
+    client = FamilyClient([module, sensor], {})
+    _install(monkeypatch, client, codes)
+    settings, institute = _family_settings_and_institute()
+
+    result = fetch_for_institute(settings, institute, codes)
+
+    assert {record.sn for record in result.records} == {
+        "20USEM20000041",
+        "20USES20000035",
+    }
+    assert client.fetched == []
+
+
+def test_an_unreachable_part_does_not_fail_the_whole_sync(monkeypatch):
+    """One missing part must not cost the institute its entire mirror refresh.
+
+    The listing is the sync's real payload; the extra pass is an enrichment.
+    A part the PDB refuses is left out of this run and picked up by the next,
+    rather than turning a complete fetch into a failed job.
+    """
+
+    class RefusingClient(FamilyClient):
+        def get(self, action: str, *, json: dict, timeout=None):
+            if action == "getComponent":
+                raise TimeoutError("part lookup timed out")
+            return super().get(action, json=json, timeout=timeout)
+
+    module = {
+        "id": "OID-MODULE",
+        "serialNumber": "20USE5L0000754",
+        "componentType": {"code": "MODULE"},
+        "type": {"code": "R5M1_HALFMODULE"},
+        "institution": {"code": "TUDO"},
+        "currentStage": {"code": "STITCH_BONDING"},
+        "state": "ready",
+        "children": [{"component": "OID-HYBRID"}],
+    }
+    codes = PdbAccessCodes(access_code1="c1", access_code2="c2")
+    client = RefusingClient([module], {})
+    _install(monkeypatch, client, codes)
+    settings, institute = _family_settings_and_institute()
+
+    result = fetch_for_institute(settings, institute, codes)
+
+    assert [record.sn for record in result.records] == ["20USE5L0000754"]

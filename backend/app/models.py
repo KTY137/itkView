@@ -693,6 +693,35 @@ class StageEvent(Base):
     rework: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class LocationEvent(Base):
+    """One dated relocation, reconstructed from the PDB `locations[]` log.
+
+    A shipment is an event, not a standing property — the component's current
+    site is already a column. Only components that actually moved carry rows
+    here, which is why the table stays small next to the stage log.
+
+    The PDB names the site by internal institution object id; the sync resolves
+    it to a code before writing, because "moved to 5a84991d…" is not
+    information. An entry that cannot be resolved is dropped rather than
+    mirrored raw.
+    """
+
+    __tablename__ = "location_event"
+    __table_args__ = (
+        # A component arrives at a given site at a given instant exactly once;
+        # this makes re-sync idempotent, and the listing does return a
+        # component twice when it is both owned by and located at an institute.
+        UniqueConstraint("component_sn", "location", "entered_at", name="uq_location_event"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    component_sn: Mapped[str] = mapped_column(String(20), index=True)
+    location: Mapped[str] = mapped_column(String(32), index=True)
+    entered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    # The stage the component was in when it moved, when the PDB records one.
+    stage: Mapped[str | None] = mapped_column(String(48), default=None)
+
+
 class SyncJob(Base):
     """Persistent status for a long-running read-only mirror sync.
 

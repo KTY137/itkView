@@ -421,6 +421,43 @@ def test_map_string_parent_without_state_is_treated_live():
     assert rec is not None and rec.parent_sn == "20USEM00000002"
 
 
+def test_map_resolves_a_nested_parent_by_its_own_serial_number():
+    """`getComponent` nests the parent; `listComponents` sends a bare id.
+
+    The same field name carries two shapes. The assembled-parts pass fetches a
+    foreign part with `getComponent`, so its parent arrives as an object that
+    already names the serial — and no `id_to_sn` entry can resolve it, because
+    the id belongs to a payload that pass never listed. Reading only the string
+    form left all 64 of the owner's newly reachable parts linked to nothing.
+    """
+    child = _pdb_payload(
+        "20USEHC0000298",
+        "OID_CHILD",
+        parents=[
+            {"component": None, "state": None},
+            {"component": {"id": "OID_PARENT", "serialNumber": "20USE5L0000754"}, "state": None},
+        ],
+    )
+
+    rec = map_pdb_component(child, {})
+
+    assert rec is not None
+    assert rec.parent_sn == "20USE5L0000754"
+
+
+def test_map_ignores_a_parent_link_the_pdb_marks_not_ready():
+    """An explicit non-ready link is a disassembled relationship, not a parent."""
+    child = _pdb_payload(
+        "20USES00000009",
+        "C9",
+        parents=[{"component": {"serialNumber": "20USEM00000009"}, "state": "deleted"}],
+    )
+
+    rec = map_pdb_component(child, {})
+
+    assert rec is not None and rec.parent_sn is None
+
+
 def test_map_unresolved_parent_stays_none_without_crashing():
     """A parent outside the fetched batch must not dangle or raise."""
     child = _pdb_payload("20USES00000003", "C3", parents=[{"component": "OID_MISSING"}])

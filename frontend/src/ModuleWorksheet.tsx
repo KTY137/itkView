@@ -291,7 +291,7 @@ function arraySummaryLabel(array: WorksheetArraySummary): string {
     : t.worksheet.arrayPoints(array.points);
 }
 
-function formatMeasuredAt(value: string | null): string {
+export function formatMeasuredAt(value: string | null): string {
   if (value === null) return t.common.none;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();

@@ -19,7 +19,7 @@ from app.config import Settings
 from app.models import InstituteProfile
 from app.pdb_gateway import PDB_REQUEST_TIMEOUT, PdbClientUnavailable, PdbGateway
 from app.pdb_scope import DUMMY_BATCH_PREFIX
-from app.sync import StageEventRecord, SyncRecord
+from app.sync import LocationEventRecord, StageEventRecord, SyncRecord
 
 if TYPE_CHECKING:
     from app.pdb_credentials import PdbAccessCodes
@@ -120,25 +120,35 @@ def _stage_events(payload: dict) -> list[StageEventRecord]:
     return events
 
 
-def _live_parent_object_id(payload: dict) -> str | None:
-    """Internal object-id of the assembly this part is currently mounted into.
+def _live_parent_link(payload: dict) -> tuple[str | None, str | None]:
+    """The assembly this part is currently mounted into, as (object id, serial).
 
-    Each `parents` entry carries the parent's **internal PDB object id** as a
-    bare string in `component` (not a nested object, and *not* a serial
-    number); empty slots carry `None`. A disassembled relationship drops its
-    id (goes null) and, where present, a `state` other than `ready` marks a
-    non-live link. A part sits in at most one live assembly, so the first
-    entry that still names a component wins. The caller maps this object id
-    back to a serial number via the batch's `id_to_sn` lookup.
+    The same field carries two shapes. `listComponents` puts the parent's
+    **internal PDB object id** in `component` as a bare string, which the
+    caller maps back through the batch's `id_to_sn`. `getComponent` nests the
+    parent instead, as an object that already names its `serialNumber` — and
+    that id is not in any batch, so only the nested serial can resolve it.
+    Reading only the string form left every part fetched by the assembled-parts
+    pass linked to nothing: 64 of the owner's, all of them real assemblies.
+
+    Empty slots carry `None`. A disassembled relationship drops its component,
+    and an explicit `state` other than `ready` marks a non-live link — but a
+    missing or null `state` is the common case for a live one and must not be
+    read as a rejection. A part sits in at most one live assembly, so the
+    first entry that still names a component wins.
     """
     for member in payload.get("parents") or []:
         component = member.get("component")
-        if not isinstance(component, str) or not component:
+        state = member.get("state")
+        if state is not None and state != "ready":
             continue
-        if member.get("state", "ready") != "ready":
-            continue
-        return component
-    return None
+        if isinstance(component, str) and component:
+            return component, None
+        if isinstance(component, dict):
+            serial = component.get("serialNumber")
+            if isinstance(serial, str) and serial:
+                return None, serial
+    return None, None
 
 
 def build_id_to_sn(payloads: list[dict]) -> dict[str, str]:
@@ -154,7 +164,63 @@ def build_id_to_sn(payloads: list[dict]) -> dict[str, str]:
     }
 
 
-def map_pdb_component(payload: dict, id_to_sn: dict[str, str] | None = None) -> SyncRecord | None:
+def _location_events(
+    payload: dict, institution_codes: dict[str, str]
+) -> list[LocationEventRecord]:
+    """Dated relocations from a component's `locations[]` log.
+
+    Each entry names the site by internal institution **object id**, so it is
+    only usable once resolved (`listInstitutions`, one request for all 156).
+    An entry whose site cannot be named is dropped: "moved to 5a84991d…" is
+    not information, and a raw id on a history line is worse than silence.
+    """
+    events: list[LocationEventRecord] = []
+    for entry in payload.get("locations") or []:
+        if not isinstance(entry, dict):
+            continue
+        code = institution_codes.get(entry.get("institution") or "")
+        when = entry.get("dateTime")
+        if not code or not when:
+            continue
+        try:
+            events.append(
+                LocationEventRecord(location=code, entered_at=when, stage=entry.get("stage"))
+            )
+        except ValidationError:
+            continue
+    return events
+
+
+def fetch_institution_codes(client: Any) -> dict[str, str]:
+    """Object id to institute code for every site the PDB knows.
+
+    One request covers all of them, which is what makes the relocation log
+    affordable: the alternative is a lookup per component that ever moved.
+    A failure here costs the location history for this run, not the sync.
+    """
+    try:
+        response = client.get("listInstitutions", json={}, timeout=PDB_REQUEST_TIMEOUT)
+    except Exception:
+        return {}
+    items = response.data if hasattr(response, "data") else response
+    if not isinstance(items, list):
+        return {}
+    codes: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        object_id = item.get("id")
+        code = item.get("code")
+        if isinstance(object_id, str) and isinstance(code, str) and object_id and code:
+            codes[object_id] = code
+    return codes
+
+
+def map_pdb_component(
+    payload: dict,
+    id_to_sn: dict[str, str] | None = None,
+    institution_codes: dict[str, str] | None = None,
+) -> SyncRecord | None:
     """Turn one PDB component payload into a `SyncRecord`, or None to skip it.
 
     `id_to_sn` resolves the parent's internal object id to its serial number;
@@ -170,8 +236,10 @@ def map_pdb_component(payload: dict, id_to_sn: dict[str, str] | None = None) -> 
     institute_code = _code(payload.get("institution")) or _code(payload.get("currentLocation"))
     if not sn or component_type is None or institute_code is None:
         return None
-    parent_oid = _live_parent_object_id(payload)
-    parent_sn = (id_to_sn or {}).get(parent_oid) if parent_oid else None
+    parent_oid, nested_parent_sn = _live_parent_link(payload)
+    parent_sn = nested_parent_sn or (
+        (id_to_sn or {}).get(parent_oid) if parent_oid else None
+    )
     try:
         return SyncRecord(
             sn=sn,
@@ -185,9 +253,75 @@ def map_pdb_component(payload: dict, id_to_sn: dict[str, str] | None = None) -> 
             is_dummy=_is_dummy(payload),
             trashed=bool(payload.get("trashed", False)),
             stage_events=_stage_events(payload),
+            location_events=_location_events(payload, institution_codes or {}),
         )
     except ValidationError:
         return None
+
+
+def _assembled_part_ids(payloads: list[dict]) -> list[str]:
+    """Object ids of parts mounted into the fetched components, in order.
+
+    `children[].component` carries the part's **internal PDB object id** as a
+    bare string, exactly like `parents[].component`; an empty slot carries
+    `None`. Order is preserved so a bounded run always takes the same prefix
+    instead of a different arbitrary subset each time.
+    """
+    wanted: dict[str, None] = {}
+    for payload in payloads:
+        for member in payload.get("children") or []:
+            component = member.get("component")
+            if isinstance(component, str) and component:
+                wanted.setdefault(component, None)
+    return list(wanted)
+
+
+def _fetch_assembled_parts(
+    client: Any,
+    payloads: list[dict],
+    limit: int,
+    progress: SyncProgress | None = None,
+) -> list[dict]:
+    """Fetch the parts of the fetched components that the listing cannot return.
+
+    The institute listing asks for components owned by *or* located at the
+    institute. A module's parts routinely satisfy neither: on the owner's
+    mirror a half module belongs to TUDO while its hybrid belongs to UT and
+    its sensor to CERN, both standing at a third site. Without this pass no
+    local row is created for them, no assembly link can form, and the module
+    page shows an empty assembly with no pictures — 24 of the owner's modules
+    were empty for exactly this reason, hiding 64 parts.
+
+    Cost is one request per *missing* part, never per part: anything the
+    listing already returned is skipped. A part the PDB refuses is left out of
+    this run rather than failing the job — the listing is the sync's payload,
+    this pass is enrichment, and the next run picks the part up.
+    """
+    if limit <= 0:
+        return []
+    known = {
+        payload["id"]
+        for payload in payloads
+        if isinstance(payload.get("id"), str) and payload["id"]
+    }
+    missing = [oid for oid in _assembled_part_ids(payloads) if oid not in known][:limit]
+    if not missing:
+        return []
+    fetched: list[dict] = []
+    for index, object_id in enumerate(missing, start=1):
+        try:
+            payload = client.get(
+                "getComponent",
+                json={"component": object_id},
+                timeout=PDB_REQUEST_TIMEOUT,
+            )
+        except Exception:
+            continue
+        if isinstance(payload, dict) and payload.get("serialNumber"):
+            fetched.append(payload)
+        if progress is not None and (index == len(missing) or index % PDB_PAGE_SIZE == 0):
+            progress("fetching", len(payloads) + index, None)
+    return fetched
 
 
 def fetch_for_institute(
@@ -283,14 +417,26 @@ def fetch_for_institute(
                         continue  # owned *and* located here: keep one copy
                     seen_serials.add(serial)
                 payloads.append(payload)
+        # The parts mounted into these components are usually owned elsewhere,
+        # so the scoped listings never return them. Fetch them before the id
+        # map is built: their `parents` entry resolves against this same batch.
+        payloads.extend(
+            _fetch_assembled_parts(
+                client, payloads, settings.sync_assembled_part_limit, progress
+            )
+        )
         # Parents reference components by internal object id; resolving those
         # links to serial numbers needs the whole batch mapped up front.
         id_to_sn = build_id_to_sn(payloads)
+        # One request names every site the PDB knows, which is what makes the
+        # relocation log affordable. A failure costs this run its location
+        # history and nothing else — the components still mirror.
+        institution_codes = fetch_institution_codes(client)
         mapped = []
         if progress is not None:
             progress("mapping", 0, len(payloads))
         for index, payload in enumerate(payloads, start=1):
-            mapped.append(map_pdb_component(payload, id_to_sn))
+            mapped.append(map_pdb_component(payload, id_to_sn, institution_codes))
             if progress is not None and (
                 index == len(payloads) or index % PDB_PAGE_SIZE == 0
             ):

@@ -1134,6 +1134,42 @@ export type ChildAttachments = {
  * sensor that is a module's direct child and 3 on modules themselves, and a
  * photograph of a sensor is a statement about that sensor. Each group carries
  * the child's serial, so its bytes are fetched under the child's own URL. */
+/** One dated fact from a component's record.
+ *
+ * The fields that do not apply to a kind stay null rather than being folded
+ * into a formatted string, so the view can group and translate them itself. */
+export type ComponentHistoryEvent = {
+  kind: "stage" | "test" | "location";
+  /** Null for a legacy run whose instrument time was never mirrored. Shown,
+   * marked undated — dropping it would hide real work. */
+  at: string | null;
+  stage: string | null;
+  /** Where a relocation moved the component. Always a named site — the sync
+   * drops an entry whose PDB object id it cannot resolve. */
+  location: string | null;
+  rework: boolean | null;
+  test_type: string | null;
+  passed: boolean | null;
+  /** A run the PDB retracted. No evidence for a gate, but still history. */
+  withdrawn: boolean | null;
+  external_ref: string | null;
+};
+
+export type ComponentHistory = {
+  component_sn: string;
+  events: ComponentHistoryEvent[];
+};
+
+export function getComponentHistory(
+  sn: string,
+  signal?: AbortSignal,
+): Promise<ComponentHistory> {
+  return request<ComponentHistory>(
+    `/api/components/${encodeURIComponent(sn)}/history`,
+    { signal },
+  );
+}
+
 export type ComponentAttachments = {
   component_sn: string;
   attachments: TestRunAttachment[];

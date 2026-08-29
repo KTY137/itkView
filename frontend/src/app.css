@@ -2746,6 +2746,55 @@ code {
   display: block;
 }
 
+/* The component history: one row per dated fact, newest first. A fixed-width
+   time column keeps the events aligned so the eye reads the sequence, not the
+   formatting. */
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.history-item {
+  display: grid;
+  grid-template-columns: minmax(9rem, max-content) 1fr;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.history-item:last-child {
+  border-bottom: 0;
+}
+
+.history-item.is-stage {
+  /* A stage change is the spine of the record; runs hang off it. */
+  font-weight: 600;
+}
+
+.history-when {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+.history-what {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+@media (max-width: 700px) {
+  .history-item {
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+  }
+}
+
 /* A tile borrowed from an assembled part is marked, never passed off as a
    picture of the row itself: dashed edge plus a corner glyph, so it reads as
    borrowed in both themes and without relying on colour alone. */

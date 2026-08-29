@@ -727,6 +727,16 @@ const en = {
     childrenIntro:
       "Photographed on the parts built into this component, not on it. Shown with the serial they belong to.",
     ownEmpty: "No images mirrored for this component itself.",
+    historyTitle: "History",
+    historyIntro:
+      "Stage transitions and mirrored test runs on one time axis, newest first. Local mirror only.",
+    historyEmpty: "Nothing mirrored for this component yet.",
+    historyUndated: "no measurement time",
+    historyRework: "rework",
+    historyWithdrawn: "retracted",
+    historyStageEntered: (stage: string) => `Entered ${stage}`,
+    historyMovedTo: (site: string) => `Moved to ${site}`,
+    historyOffline: "The history is unavailable while the backend is offline.",
     // A list tile is borrowed from a part when the row has no picture of its
     // own. It must say so: a sensor's photograph is not a picture of the
     // module, and an unmarked tile would claim exactly that.
