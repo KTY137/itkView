@@ -11,6 +11,7 @@ their parents. The caller owns the transaction (commit/rollback).
 """
 
 import json
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -102,10 +103,10 @@ def sync_components(
     wins. `synced_at` is refreshed on every seen component, changed or not.
 
     `prune_scope` is an institute code that makes this a *full* sync of that
-    institute: after upserting, any mirror row governed by it (owned by or
-    located at it) that this batch did not return is flagged `stale`, so a
-    complete fetch also cleans up components that left the PDB's view. Rows
-    seen this run are un-staled. Leave it None for partial/fixture syncs.
+    institute: after upserting, any mirror row governed by it (owned by,
+    located at, or currently assembled below a governed component) that this
+    batch did not return is flagged `stale`. Rows seen this run are un-staled.
+    Leave it None for partial/fixture syncs.
     """
     now = utcnow()
     by_sn: dict[str, Component] = {}
@@ -132,7 +133,10 @@ def sync_components(
         component = by_sn.get(record.sn) or existing_by_sn.get(record.sn)
         if component is None:
             component = Component(
-                synced_at=now, **record.model_dump(exclude={"parent_sn", "stage_events", "location_events"})
+                synced_at=now,
+                **record.model_dump(
+                    exclude={"parent_sn", "stage_events", "location_events"}
+                ),
             )
             session.add(component)
             created.add(record.sn)
@@ -169,24 +173,48 @@ def sync_components(
     _sync_stage_events(session, records, by_sn)
     _sync_location_events(session, records)
 
-    # Prune pass: flag governed rows this full sync did not return as stale.
-    # Keyed on the seen serial numbers (not timestamps) so it is independent of
-    # clock resolution and re-runnable.
+    # Prune pass: the authoritative scope is not only the institute's roots.
+    # Cross-institute parts are fetched because they are assembled below those
+    # roots, so their old local links must also be retired when the current PDB
+    # closure no longer returns them. Otherwise a disassembled sensor or hybrid
+    # remains a live-looking child forever and its evidence keeps leaking into
+    # the parent's read model.
     stale = 0
     if prune_scope is not None:
         seen = set(by_sn)
-        governed = session.scalars(
-            select(Component).where(
-                or_(
-                    Component.institute_code == prune_scope,
-                    Component.location == prune_scope,
+        governed_roots = list(
+            session.scalars(
+                select(Component).where(
+                    or_(
+                        Component.institute_code == prune_scope,
+                        Component.location == prune_scope,
+                    )
                 )
             )
         )
-        for row in governed:
-            if row.sn not in seen:
-                row.stale = True
-                stale += 1
+        root_ids = {row.id for row in governed_roots}
+        governed_by_id = {row.id: row for row in governed_roots}
+        frontier: deque[int] = deque(sorted(root_ids))
+        while frontier:
+            parent_ids = [frontier.popleft() for _ in range(min(500, len(frontier) + 1))]
+            for child in session.scalars(
+                select(Component).where(Component.parent_id.in_(parent_ids))
+            ):
+                if child.id in governed_by_id:
+                    continue
+                governed_by_id[child.id] = child
+                frontier.append(child.id)
+
+        for row in governed_by_id.values():
+            if row.sn in seen:
+                continue
+            row.stale = True
+            # An external descendant is governed only through this current
+            # assembly edge. Once absent from a complete closure, retaining the
+            # old edge would claim that it is still installed.
+            if row.id not in root_ids:
+                row.parent_id = None
+            stale += 1
         session.flush()
 
     return SyncStats(
