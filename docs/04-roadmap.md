@@ -31,6 +31,20 @@ vom Design-Ziel abdriftet.
 
 ## Aktueller Stand (2026-08-28)
 
+- **itkView spiegelt Test-Evidence ueber die vollstaendige Assembly-Closure
+  (2026-08-29):** Der Komponenten-Sync folgte institutsfremden verbauten
+  Teilen bisher nur einen Hop; der Evidence-Sweep filterte danach erneut nach
+  Eigentum/Standort und einer statischen Typenliste. Dadurch konnten Sensor-,
+  Hybrid-, PWB- und ASIC-Evidenzen trotz sichtbarem Komponentenbaum fehlen.
+  Der read-only Sync verfolgt `children[]` jetzt rekursiv, lehnt abgeschnittene
+  oder widerspruechliche Snapshots fail-closed ab und prueft anschliessend alle
+  lebenden lokalen Roots plus ihre rekursiven Assembly-Nachfahren. Explizite
+  Profil-Whitelists und der MODULE-only Lightweight-Modus bleiben bewusste
+  Einschraenkungen. Nicht mehr gelieferte externe Nachfahren werden stale und
+  vom alten Parent getrennt, damit ihre Evidenz nicht weiter am Modul erscheint.
+  Keine Stage- oder PDB-Schreiblogik wurde geaendert. Vertrag:
+  [`docs/14`](14-evidence-completeness.md).
+
 - **Urheberschaft ist im Code verankert (2026-08-29):** Das Repo hatte weder
   `LICENSE` noch eine einzige Copyright-Angabe. Jetzt drei Ebenen: MIT-Lizenz
   im Wurzelverzeichnis, ein SPDX-Header in **214 Quelldateien**

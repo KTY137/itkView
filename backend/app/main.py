@@ -14,15 +14,16 @@ from fastapi import FastAPI
 from app import __version__
 from app.api import router
 from app.auto_sync import AutoSyncScheduler
+from app.complete_component_sync import fetch_complete_for_institute
+from app.complete_evidence_sync import CompleteEvidenceSyncJobManager
 from app.config import Settings, get_settings
 from app.db import Base, ensure_phase0_sqlite_schema, make_engine, make_session_factory
 from app.notifications import make_notifier
 from app.outbox_processor import OutboxProcessor
-from app.pdb_sync import fetch_for_institute
 from app.product_policy import ProductVariantPolicyMiddleware
 from app.reminders import ReminderScheduler
 from app.static_spa import mount_spa
-from app.sync_jobs import SyncJobManager, recover_interrupted_sync_jobs
+from app.sync_jobs import recover_interrupted_sync_jobs
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -45,7 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # durable live row is therefore closed as interrupted before accepting a
     # new job, which also releases the global single-flight lease.
     recover_interrupted_sync_jobs(app.state.session_factory)
-    app.state.component_fetcher = fetch_for_institute
+    app.state.component_fetcher = fetch_complete_for_institute
     # Outbound notification seam (docs/11): the test-notification endpoint uses
     # this; tests inject a fake the same way they fake the component fetcher.
     app.state.notifier = make_notifier(settings)
@@ -68,7 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.router.add_event_handler("shutdown", app.state.outbox_processor.stop)
     else:
         app.state.outbox_processor = None
-    app.state.sync_job_manager = SyncJobManager(app.state.session_factory, settings)
+    app.state.sync_job_manager = CompleteEvidenceSyncJobManager(app.state.session_factory, settings)
     # Unattended mirror refresh, off unless a deployment asks for it. Built
     # after the manager because it hands jobs to it (docs/09, app/auto_sync.py).
     if settings.auto_sync_poll_minutes > 0:

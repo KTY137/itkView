@@ -102,10 +102,10 @@ def sync_components(
     wins. `synced_at` is refreshed on every seen component, changed or not.
 
     `prune_scope` is an institute code that makes this a *full* sync of that
-    institute: after upserting, any mirror row governed by it (owned by or
-    located at it) that this batch did not return is flagged `stale`, so a
-    complete fetch also cleans up components that left the PDB's view. Rows
-    seen this run are un-staled. Leave it None for partial/fixture syncs.
+    institute: after upserting, any mirror row governed by it (owned by,
+    located at, or currently assembled below a governed component) that this
+    batch did not return is flagged `stale`. Rows seen this run are un-staled.
+    Leave it None for partial/fixture syncs.
     """
     now = utcnow()
     by_sn: dict[str, Component] = {}
@@ -122,9 +122,7 @@ def sync_components(
     }
     existing_by_sn: dict[str, Component] = {}
     for sn_chunk in _chunks(sorted(lookup_sns), 500):
-        for component in session.scalars(
-            select(Component).where(Component.sn.in_(sn_chunk))
-        ):
+        for component in session.scalars(select(Component).where(Component.sn.in_(sn_chunk))):
             existing_by_sn[component.sn] = component
 
     # Pass 1: upsert mirror fields by serial number.
@@ -132,7 +130,8 @@ def sync_components(
         component = by_sn.get(record.sn) or existing_by_sn.get(record.sn)
         if component is None:
             component = Component(
-                synced_at=now, **record.model_dump(exclude={"parent_sn", "stage_events", "location_events"})
+                synced_at=now,
+                **record.model_dump(exclude={"parent_sn", "stage_events", "location_events"}),
             )
             session.add(component)
             created.add(record.sn)
@@ -169,24 +168,42 @@ def sync_components(
     _sync_stage_events(session, records, by_sn)
     _sync_location_events(session, records)
 
-    # Prune pass: flag governed rows this full sync did not return as stale.
-    # Keyed on the seen serial numbers (not timestamps) so it is independent of
-    # clock resolution and re-runnable.
+    # Prune pass: the authoritative scope is not only the institute's roots.
+    # Cross-institute parts are fetched because they are assembled below those
+    # roots, so their old local links must also be retired when the current PDB
+    # closure no longer returns them. Otherwise a disassembled sensor or hybrid
+    # remains a live-looking child forever and its evidence keeps leaking into
+    # the parent's read model.
     stale = 0
     if prune_scope is not None:
         seen = set(by_sn)
-        governed = session.scalars(
-            select(Component).where(
+        governed_ids = (
+            select(Component.id.label("id"))
+            .where(
                 or_(
                     Component.institute_code == prune_scope,
                     Component.location == prune_scope,
                 )
             )
+            .cte("governed_component_ids", recursive=True)
         )
-        for row in governed:
-            if row.sn not in seen:
-                row.stale = True
-                stale += 1
+        governed_ids = governed_ids.union(
+            select(Component.id.label("id")).where(Component.parent_id == governed_ids.c.id)
+        )
+        governed_rows = session.scalars(
+            select(Component).join(governed_ids, Component.id == governed_ids.c.id)
+        )
+        for row in governed_rows:
+            if row.sn in seen:
+                continue
+            row.stale = True
+            # A missing row cannot retain a current assembly edge. This also
+            # covers a part whose old location made it a direct governed root:
+            # owner/location and assembly membership may change in one PDB
+            # transaction, while the local row still carries both old facts.
+            if row.parent_id is not None:
+                row.parent_id = None
+            stale += 1
         session.flush()
 
     return SyncStats(

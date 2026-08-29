@@ -41,6 +41,7 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 | [`docs/11-logistics-operations.md`](11-logistics-operations.md) | Glue-Batches, Shipment-Mirror/Empfang, Reminder und Notification-Adapter |
 | [`docs/12-attachments-and-images.md`](12-attachments-and-images.md) | Attachment-/Bild-Mechanik: drei Speicherwege (Binary-Store, EOS, Share-Link), lokaler Spiegel, Fehlersuche |
 | [`docs/13-metrology-artifacts.md`](13-metrology-artifacts.md) | Metrologie-Artefakte: was wirklich am Lauf haengt, Benennungs-/Metadaten-Mehrdeutigkeit, Schluesselregeln |
+| [`docs/14-evidence-completeness.md`](14-evidence-completeness.md) | Vollstaendiger Read-Scope fuer rekursive Assembly-Komponenten, Test-Evidence und fail-closed Snapshot-Semantik |
 | [`docs/adr/001-outbox-status-contract.md`](adr/001-outbox-status-contract.md) | Outbox-Statusvertrag |
 | [`docs/adr/002-async-outbox-worker.md`](adr/002-async-outbox-worker.md) | Async-Outbox-Worker, Retry/Backoff |
 | [`docs/adr/003-pdb-dummy-write-scope.md`](adr/003-pdb-dummy-write-scope.md) | `pdb_write_scope=dummy_only` |
@@ -54,12 +55,12 @@ sind ausgenommen — dann genuegt eine Zeile Begruendung.
 | Codebereich | Doc |
 |---|---|
 | `backend/app/auth.py`, `models.User`/`UserSession`, `/api/auth`, `/api/users` | [`06`](06-users-roles-audit.md) |
-| `backend/app/pdb_gateway.py`, `pdb_sync.py`, `sync.py` (Mirror) | [`02`](02-revamp-plan.md) (Phase 1), [`09`](09-pdb-production-strategy.md) |
-| `backend/app/pdb_test_evidence.py`, `test_run_evidence.py`, `models.TestRunEvidence` | [`04`](04-roadmap.md), [`09`](09-pdb-production-strategy.md) |
+| `backend/app/pdb_gateway.py`, `pdb_sync.py`, `complete_component_sync.py`, `sync.py` (Mirror) | [`02`](02-revamp-plan.md) (Phase 1), [`09`](09-pdb-production-strategy.md), [`14`](14-evidence-completeness.md) |
+| `backend/app/pdb_test_evidence.py`, `test_run_evidence.py`, `models.TestRunEvidence` | [`04`](04-roadmap.md), [`09`](09-pdb-production-strategy.md), [`14`](14-evidence-completeness.md) |
 | `backend/app/attachment_store.py`, `share_credentials.py`, `models.TestRunAttachment`/`ExternalShareCredential`, `pdb_attachments.py` | [`12`](12-attachments-and-images.md), [`13`](13-metrology-artifacts.md), [`04`](04-roadmap.md), [`09`](09-pdb-production-strategy.md) |
 | `backend/app/preview.py`, Component-Preview-Schemas und `/api/components/{sn}/preview` | [`adr/006`](adr/006-staged-first-ui-auto-mirror.md), [`04`](04-roadmap.md), [`05`](05-ui-design-reference.md) |
 | `models.TestTypeSchema`, `backend/app/pdb_test_types.py`, `test_type_schemas.py` und `/api/test-types` | [`adr/006`](adr/006-staged-first-ui-auto-mirror.md), [`04`](04-roadmap.md) |
-| Evidence-Job in `backend/app/sync_jobs.py`, EOS-/Share-Link-Mirror | [`adr/006`](adr/006-staged-first-ui-auto-mirror.md), [`04`](04-roadmap.md), [`09`](09-pdb-production-strategy.md) |
+| Evidence-Job in `backend/app/sync_jobs.py`, `complete_evidence_sync.py`, EOS-/Share-Link-Mirror | [`adr/006`](adr/006-staged-first-ui-auto-mirror.md), [`04`](04-roadmap.md), [`09`](09-pdb-production-strategy.md), [`14`](14-evidence-completeness.md) |
 | `backend/app/desktop_server.py`, `diagnostics.py`, `static_spa.py`, `desktop/` (Tauri) | [`adr/005`](adr/005-desktop-packaging.md), [`04`](04-roadmap.md), [`05`](05-ui-design-reference.md), [README](../deploy/README.md) |
 | `backend/app/pdb_credentials.py`, `models.PdbCredential` | [`06`](06-users-roles-audit.md), [`adr/004`](adr/004-personal-pdb-credentials.md) |
 | `backend/app/pdb_scope.py` | [`adr/003`](adr/003-pdb-dummy-write-scope.md), [`09`](09-pdb-production-strategy.md) |
