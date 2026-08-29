@@ -49,10 +49,14 @@ Team: `docs/03-agent-team.md`.
    Beispieldaten nur anonymisiert (Schema wie in der Referenz: `Anna Abel <anna.abel@example.org>`).
 4. **Kein Institut-Hardcoding.** `TUDO`/`DESYZ`, lokale Namensschemata, Stage-/Test-Mappings,
    Klebegewichts-Formeln usw. gehören ins Institute-Profil (DB/Config), nie in den Code.
-5. **Alles Produkt-Facing ist Englisch** (internationale Nutzung): App-UI, Nutzerdoku,
+5. **Alleinige Autorenschaft in Commits.** Commit-Nachrichten tragen **keine**
+   `Co-Authored-By:`-Zeile fuer Agenten oder Modelle. Der Owner ist alleiniger
+   Autor; Copyright und `LICENSE` nennen ihn ebenso. Owner-Entscheidung
+   2026-08-29, rueckwirkend auf die gesamte Historie angewandt.
+6. **Alles Produkt-Facing ist Englisch** (internationale Nutzung): App-UI, Nutzerdoku,
    API-/Fehlermeldungen, Code, Kommentare, Commits. Nur die internen Planungsdokumente
    in `docs/` bleiben Deutsch. UI-Texte i18n-fähig aufbauen (EN als Default-Locale).
-6. **Dokumentationsdisziplin.** Jede Verhaltens- oder Vertragsänderung am Code aktualisiert im
+7. **Dokumentationsdisziplin.** Jede Verhaltens- oder Vertragsänderung am Code aktualisiert im
    selben Change das zuständige Dokument (Ownership: `docs/00-doc-map.md`) und den Abschnitt
    „Aktueller Stand" in `docs/04-roadmap.md`. Keinen konkurrierenden Plan im Chat erfinden
    (siehe Startkontext). Der `Stop`-Hook `.claude/hooks/doc-guard.ps1` erinnert, wenn Produktivcode
