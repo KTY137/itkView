@@ -11,7 +11,6 @@ their parents. The caller owns the transaction (commit/rollback).
 """
 
 import json
-from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -178,31 +177,23 @@ def sync_components(
     stale = 0
     if prune_scope is not None:
         seen = set(by_sn)
-        governed_roots = list(
-            session.scalars(
-                select(Component).where(
-                    or_(
-                        Component.institute_code == prune_scope,
-                        Component.location == prune_scope,
-                    )
+        governed_ids = (
+            select(Component.id.label("id"))
+            .where(
+                or_(
+                    Component.institute_code == prune_scope,
+                    Component.location == prune_scope,
                 )
             )
+            .cte("governed_component_ids", recursive=True)
         )
-        root_ids = {row.id for row in governed_roots}
-        governed_by_id = {row.id: row for row in governed_roots}
-        frontier: deque[int] = deque(sorted(root_ids))
-        while frontier:
-            batch_size = min(500, len(frontier))
-            parent_ids = [frontier.popleft() for _ in range(batch_size)]
-            for child in session.scalars(
-                select(Component).where(Component.parent_id.in_(parent_ids))
-            ):
-                if child.id in governed_by_id:
-                    continue
-                governed_by_id[child.id] = child
-                frontier.append(child.id)
-
-        for row in governed_by_id.values():
+        governed_ids = governed_ids.union(
+            select(Component.id.label("id")).where(Component.parent_id == governed_ids.c.id)
+        )
+        governed_rows = session.scalars(
+            select(Component).join(governed_ids, Component.id == governed_ids.c.id)
+        )
+        for row in governed_rows:
             if row.sn in seen:
                 continue
             row.stale = True
