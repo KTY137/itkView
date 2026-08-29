@@ -200,9 +200,7 @@ def fetch_complete_for_institute(
 
     gateway = PdbGateway(settings, access_codes=access_codes)
     if not gateway.is_configured:
-        raise PdbSyncUnavailable(
-            "No personal ITKDB access codes are connected for this account."
-        )
+        raise PdbSyncUnavailable("No personal ITKDB access codes are connected for this account.")
     try:
         client = gateway.client()
     except PdbClientUnavailable:
@@ -280,9 +278,7 @@ def fetch_complete_for_institute(
             progress("mapping", 0, len(payloads))
         for index, payload in enumerate(payloads, start=1):
             mapped.append(map_pdb_component(payload, id_to_sn, institution_codes))
-            if progress is not None and (
-                index == len(payloads) or index % PDB_PAGE_SIZE == 0
-            ):
+            if progress is not None and (index == len(payloads) or index % PDB_PAGE_SIZE == 0):
                 progress("mapping", index, len(payloads))
     except PdbSyncUnavailable:
         raise
