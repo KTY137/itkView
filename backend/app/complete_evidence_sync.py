@@ -21,7 +21,7 @@ an explicit opt-in restriction; lightweight sync remains module-only.
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -34,10 +34,11 @@ from app.sync_jobs import (
     EVIDENCE_SYNC_KIND,
     EVIDENCE_SYNC_MODE_KEY,
     EvidenceGatewayFactory,
+    EvidenceSyncContext,
     EvidenceSyncMode,
     SyncJobManager,
-    run_evidence_sync_job as _run_evidence_sync_job,
 )
+from app.sync_jobs import run_evidence_sync_job as _run_evidence_sync_job
 
 EvidenceScopePolicy = Literal[
     "complete_local_production", "profile_type_filter", "lightweight"
@@ -300,7 +301,7 @@ def run_complete_evidence_sync_job(
     settings,
     gateway_factory: EvidenceGatewayFactory,
     job_id: int,
-    on_transient_failure: Any | None = None,
+    on_transient_failure: Callable[[EvidenceSyncContext], None] | None = None,
 ) -> None:
     """Run the proven evidence mirror against the complete production scope."""
 
