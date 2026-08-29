@@ -69,9 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.router.add_event_handler("shutdown", app.state.outbox_processor.stop)
     else:
         app.state.outbox_processor = None
-    app.state.sync_job_manager = CompleteEvidenceSyncJobManager(
-        app.state.session_factory, settings
-    )
+    app.state.sync_job_manager = CompleteEvidenceSyncJobManager(app.state.session_factory, settings)
     # Unattended mirror refresh, off unless a deployment asks for it. Built
     # after the manager because it hands jobs to it (docs/09, app/auto_sync.py).
     if settings.auto_sync_poll_minutes > 0:
