@@ -129,9 +129,7 @@ def _scope_fixture(session_factory):
 def test_standard_scope_captures_all_types_and_recursive_assembled_parts(session_factory):
     expected = _scope_fixture(session_factory)
     with session_factory() as session:
-        profile = session.scalar(
-            select(InstituteProfile).where(InstituteProfile.code == "SCOPE")
-        )
+        profile = session.scalar(select(InstituteProfile).where(InstituteProfile.code == "SCOPE"))
         scope = evidence_component_scope(session, profile, "standard")
 
     assert set(scope.component_sns) == expected["all"]
@@ -154,9 +152,7 @@ def test_standard_scope_captures_all_types_and_recursive_assembled_parts(session
 def test_profile_filter_applies_after_recursive_traversal(session_factory):
     _scope_fixture(session_factory)
     with session_factory() as session:
-        profile = session.scalar(
-            select(InstituteProfile).where(InstituteProfile.code == "SCOPE")
-        )
+        profile = session.scalar(select(InstituteProfile).where(InstituteProfile.code == "SCOPE"))
         profile.settings = {"evidence_component_types": ["sensor", "ABC", "sensor"]}
         session.commit()
         scope = evidence_component_scope(session, profile, "standard")
@@ -171,9 +167,7 @@ def test_profile_filter_applies_after_recursive_traversal(session_factory):
 def test_lightweight_scope_keeps_module_descendants_but_skips_other_types(session_factory):
     _scope_fixture(session_factory)
     with session_factory() as session:
-        profile = session.scalar(
-            select(InstituteProfile).where(InstituteProfile.code == "SCOPE")
-        )
+        profile = session.scalar(select(InstituteProfile).where(InstituteProfile.code == "SCOPE"))
         scope = evidence_component_scope(session, profile, "lightweight")
 
     assert set(scope.component_sns) == {"20USEM00001001", "20USEM00001002"}
