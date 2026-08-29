@@ -110,6 +110,20 @@ def test_fetch_assembled_component_closure_walks_every_descendant_once():
     assert progress[-1][2] is None
 
 
+def test_fetch_assembled_component_closure_pins_a_missing_response_id():
+    root = payload("root-id", "ROOT", [member("half-id")])
+    half = payload("half-id", "HALF")
+    del half["id"]
+
+    fetched = fetch_assembled_component_closure(
+        FakeComponentClient({"half-id": half}),
+        [root],
+        limit=10,
+    )
+
+    assert fetched[0]["id"] == "half-id"
+
+
 def test_fetch_assembled_component_closure_rejects_a_truncated_limit():
     root = payload("root-id", "ROOT", [member("half-id")])
     rows = {
@@ -130,6 +144,26 @@ def test_fetch_assembled_component_closure_rejects_an_unreadable_child():
 
     with pytest.raises(PdbSyncUnavailable, match="could not be read"):
         fetch_assembled_component_closure(client, [root], limit=10)
+
+
+def test_fetch_assembled_component_closure_rejects_non_ready_or_wrong_identity():
+    root = payload("root-id", "ROOT", [member("half-id")])
+    not_ready = payload("half-id", "HALF")
+    not_ready["state"] = "deleted"
+    with pytest.raises(PdbSyncUnavailable, match="not ready"):
+        fetch_assembled_component_closure(
+            FakeComponentClient({"half-id": not_ready}),
+            [root],
+            limit=10,
+        )
+
+    wrong_id = payload("other-id", "HALF")
+    with pytest.raises(PdbSyncUnavailable, match="different object identity"):
+        fetch_assembled_component_closure(
+            FakeComponentClient({"half-id": wrong_id}),
+            [root],
+            limit=10,
+        )
 
 
 def test_fetch_complete_for_institute_maps_the_recursive_closure(monkeypatch):
