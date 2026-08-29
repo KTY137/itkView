@@ -196,7 +196,8 @@ def sync_components(
         governed_by_id = {row.id: row for row in governed_roots}
         frontier: deque[int] = deque(sorted(root_ids))
         while frontier:
-            parent_ids = [frontier.popleft() for _ in range(min(500, len(frontier) + 1))]
+            batch_size = min(500, len(frontier))
+            parent_ids = [frontier.popleft() for _ in range(batch_size)]
             for child in session.scalars(
                 select(Component).where(Component.parent_id.in_(parent_ids))
             ):
