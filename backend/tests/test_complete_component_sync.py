@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 import app.complete_component_sync as complete_sync
 from app.complete_component_sync import (
@@ -11,8 +12,9 @@ from app.complete_component_sync import (
     fetch_assembled_component_closure,
     fetch_complete_for_institute,
 )
-from app.models import InstituteProfile
+from app.models import Component, InstituteProfile
 from app.pdb_sync import PdbSyncUnavailable
+from app.sync import SyncRecord, sync_components
 
 
 class FakeComponentClient:
@@ -42,6 +44,25 @@ def payload(object_id, serial, children=()):
         "state": "ready",
         "children": list(children),
     }
+
+
+def mirror_record(
+    sn,
+    *,
+    component_type="MODULE",
+    owner="SCOPE",
+    location="SCOPE",
+    parent_sn=None,
+):
+    return SyncRecord(
+        sn=sn,
+        component_type=component_type,
+        type_code="TEST",
+        stage="READY",
+        institute_code=owner,
+        location=location,
+        parent_sn=parent_sn,
+    )
 
 
 def test_assembled_child_ids_accepts_both_id_shapes_and_only_live_links():
@@ -211,6 +232,55 @@ def test_fetch_complete_for_institute_maps_the_recursive_closure(monkeypatch):
     assert result.skipped == 0
     assert listing_filters[0]["institute"] == ["SCOPE"]
     assert listing_filters[1]["currentLocation"] == ["SCOPE"]
+
+
+def test_prune_retires_external_descendants_missing_from_the_new_closure(session_factory):
+    initial = [
+        mirror_record("ROOT"),
+        mirror_record(
+            "HALF",
+            owner="CERN",
+            location="REMOTE",
+            parent_sn="ROOT",
+        ),
+        mirror_record(
+            "SENSOR",
+            component_type="SENSOR",
+            owner="CERN",
+            location="REMOTE",
+            parent_sn="HALF",
+        ),
+    ]
+    with session_factory() as session:
+        first = sync_components(session, initial, prune_scope="SCOPE")
+        session.commit()
+    assert first.stale == 0
+
+    with session_factory() as session:
+        second = sync_components(session, [mirror_record("ROOT")], prune_scope="SCOPE")
+        session.commit()
+    assert second.stale == 2
+
+    with session_factory() as session:
+        rows = {
+            row.sn: row
+            for row in session.scalars(
+                select(Component).where(Component.sn.in_(("ROOT", "HALF", "SENSOR")))
+            )
+        }
+        assert rows["ROOT"].stale is False
+        assert rows["HALF"].stale is True and rows["HALF"].parent_id is None
+        assert rows["SENSOR"].stale is True and rows["SENSOR"].parent_id is None
+
+        restored = sync_components(session, initial, prune_scope="SCOPE")
+        session.commit()
+    assert restored.stale == 0
+
+    with session_factory() as session:
+        half = session.scalar(select(Component).where(Component.sn == "HALF"))
+        sensor = session.scalar(select(Component).where(Component.sn == "SENSOR"))
+        assert half is not None and half.stale is False and half.parent_sn == "ROOT"
+        assert sensor is not None and sensor.stale is False and sensor.parent_sn == "HALF"
 
 
 def test_application_uses_complete_component_fetcher(client):
