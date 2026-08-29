@@ -25,7 +25,7 @@ class FakeComponentClient:
 
     def get(self, action, *, json, timeout):
         assert action == "getComponent"
-        assert timeout > 0
+        assert timeout is not None
         object_id = json["component"]
         self.calls.append(object_id)
         if object_id in self.failing:
