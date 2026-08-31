@@ -127,9 +127,9 @@ class DesktopVariantTests(unittest.TestCase):
                     / "bundle"
                 )
                 expected = (
-                    bundle_dir / "deb" / "itkView_0.2.2_amd64.deb",
-                    bundle_dir / "rpm" / "itkView-0.2.2-1.x86_64.rpm",
-                    bundle_dir / "appimage" / "itkView_0.2.2_amd64.AppImage",
+                    bundle_dir / "deb" / "itkView_0.2.3_amd64.deb",
+                    bundle_dir / "rpm" / "itkView-0.2.3-1.x86_64.rpm",
+                    bundle_dir / "appimage" / "itkView_0.2.3_amd64.AppImage",
                 )
                 for artifact in expected:
                     artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -151,7 +151,7 @@ class DesktopVariantTests(unittest.TestCase):
                     / "release"
                     / "bundle"
                     / "deb"
-                    / "itkView_0.2.2_arm64.deb"
+                    / "itkView_0.2.3_arm64.deb"
                 )
                 deb.parent.mkdir(parents=True, exist_ok=True)
                 deb.touch()
@@ -202,6 +202,11 @@ class DesktopVariantTests(unittest.TestCase):
         self.assertIn("libgtk-3-0", workflow)
         self.assertIn("libwebkit2gtk-4.1.so.0()(64bit)", workflow)
         self.assertIn("libgtk-3.so.0()(64bit)", workflow)
+        self.assertIn('target_triple="$(rustc -vV', workflow)
+        self.assertIn('find "${deb_dir}"', workflow)
+        self.assertIn('find "${bundle_root}/${target}"', workflow)
+        self.assertIn("-mindepth 1 -maxdepth 1 -type f", workflow)
+        self.assertNotIn('-path "*/release/bundle/${target}/*" -type f', workflow)
 
     def test_linux_tag_release_waits_for_both_verified_architectures(self) -> None:
         workflow = (

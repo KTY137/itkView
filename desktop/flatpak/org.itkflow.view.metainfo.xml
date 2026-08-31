@@ -28,6 +28,7 @@
     </p>
   </description>
   <releases>
+    <release version="0.2.3" date="2026-08-31" />
     <release version="0.2.2" date="2026-08-31" />
     <release version="0.2.1" date="2026-08-28" />
   </releases>

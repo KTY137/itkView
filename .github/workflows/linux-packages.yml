@@ -265,8 +265,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t debs < <(find desktop/build/view/tauri-target \
-            -path '*/release/bundle/deb/*.deb' -type f)
+          target_triple="$(rustc -vV | sed -n 's/^host: //p')"
+          deb_dir="desktop/build/view/tauri-target/${target_triple}/release/bundle/deb"
+          test -d "${deb_dir}"
+          mapfile -t debs < <(find "${deb_dir}" \
+            -mindepth 1 -maxdepth 1 -type f -name '*.deb')
           test "${#debs[@]}" -eq 1
           cp "${debs[0]}" desktop/flatpak/itkview.deb
           sudo flatpak remote-add --if-not-exists flathub \
@@ -292,10 +295,17 @@ jobs:
         run: |
           set -euo pipefail
           output="desktop/build/linux-packages-${{ matrix.arch }}"
+          target_triple="$(rustc -vV | sed -n 's/^host: //p')"
+          bundle_root="desktop/build/view/tauri-target/${target_triple}/release/bundle"
           mkdir -p "${output}"
           for target in deb rpm appimage; do
-            mapfile -t matches < <(find desktop/build/view/tauri-target \
-              -path "*/release/bundle/${target}/*" -type f)
+            case "${target}" in
+              appimage) suffix="AppImage" ;;
+              *) suffix="${target}" ;;
+            esac
+            test -d "${bundle_root}/${target}"
+            mapfile -t matches < <(find "${bundle_root}/${target}" \
+              -mindepth 1 -maxdepth 1 -type f -name "*.${suffix}")
             test "${#matches[@]}" -eq 1
             cp "${matches[0]}" "${output}/"
           done
