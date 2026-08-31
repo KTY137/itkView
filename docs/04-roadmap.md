@@ -110,8 +110,9 @@ vom Design-Ziel abdriftet.
   Spiegel vollstaendig aussah und es nicht war (fehlende Bildzuordnung,
   64 nie geholte Teile). Rohdaten zu beschneiden, bevor das geklaert ist,
   vernichtet genau die Beweismittel, mit denen der naechste solche Fall
-  auffaellt. Geplant fuer 0.2.2, mit Messung des Plot-Bedarfs und ausdruecklich
-  umkehrbar.
+  auffaellt. Der Schnitt ist zugunsten der Linux-Auslieferung bewusst **nicht**
+  Teil von 0.2.2 und bleibt ein eigener, erst nach Messung des Plot-Bedarfs
+  umkehrbar umzusetzender Folgeschritt.
 
 - **Ortswechsel stehen in der History (2026-08-28):** Die PDB fuehrt Umzuege in
   `locations[]`, nennt den Standort dort aber nur als interne

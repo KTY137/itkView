@@ -837,8 +837,9 @@ Kind-Bilder.
 - Der Umbau war Absicht (>100 Läufe waren als Zahlenwand unlesbar, docs/04),
   hat aber als Nebeneffekt genau diese Vorschaubilder hinter eine
   Nutzeraktion geschoben. Der zugehörige Commit `07a59d9` ist per
-  Tag-Nachfahrprüfung in `v0.2.2-alpha` enthalten; damit gilt das Verhalten ab
-  Desktop-Bundle 0.2.2. `desktop/package.json` traegt die Bundle-Version und
+  Commit-Nachfahrprüfung in der für `v0.2.2` vorbereiteten Commit-Linie
+  enthalten; damit gilt das Verhalten ab Desktop-Bundle 0.2.2.
+  `desktop/package.json` traegt die Bundle-Version und
   wird mit jedem Release gemeinsam mit den Tauri-Metadaten angehoben.
 
 ### 5.3 Thumbnails in Listen
@@ -1096,7 +1097,7 @@ Zusicherung.
   wird ohne Request abgelehnt (Abschnitt 2.3); reparierbar wäre sie nur, indem
   jemand die Datei als öffentlichen Share neu verlinkt.
 - **Verifiziert:** der Worksheet-Umbau aus `07a59d9`, der die Laufansicht
-  hinter „All mirrored runs" verschoben hat, ist in `v0.2.2-alpha` enthalten.
+  hinter „All mirrored runs" verschoben hat, ist in `v0.2.2` enthalten.
 - **Offen:** ob der Fall „Datei gespeichert, aber `content_type` leer →
   unsichtbar" real vorkommt (Abschnitt 3.3).
 - **Erledigt/entkräftet (2026-08-27):** ein zuvor hier vermerkter Verdacht auf
