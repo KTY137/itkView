@@ -68,8 +68,15 @@ Python ist — der Gateway-Code kann Muster aus zFlow 1:1 portieren. FastAPI lie
 (→ Instrument-PCs können direkt posten). Postgres statt Datei-Cache. React/TS für ein UI, das
 schneller sein muss als das Sheet, sonst gewinnt das Sheet.
 
-**Deployment:** Ein `docker-compose.yml` (app, worker, postgres, optional minio). Kein CERN-Dienst
-nötig; läuft auf einem Lab-PC oder Instituts-VM. Updates via Container-Tag.
+**Deployment:** Der gemeinsame Institutsbetrieb nutzt `docker-compose.yml`
+(app, worker, postgres, optional minio). Kein CERN-Dienst ist nötig; der Stack
+läuft auf einem Lab-PC oder einer Instituts-VM. Die heutige Repo-Konfiguration
+baut Images lokal; ein veröffentlichter Container-Tag-Updatekanal ist noch
+Release-Arbeit. Für einen isolierten Einzelplatz startet dieselbe Anwendung als
+Tauri-Desktop-Bundle mit lokalem SQLite-Zustand: Windows per NSIS, Linux nativ
+als DEB/RPM/AppImage sowie als Flatpak, jeweils für `x86_64` und `aarch64`.
+Das ersetzt nicht die gemeinsame Server-, Rollen- und Datenhaltung des
+Institutsdeployments.
 
 **Auth:** Lokale Accounts + optional OIDC (CERN SSO / Instituts-IdP). Geplant waren vier
 Rollen (`viewer`, `operator`, `coordinator` fuer PDB-Writes/Stage-Moves, `admin`); umgesetzt
@@ -158,8 +165,9 @@ toolConverter, emailReminderManager, Telegram-Watchdogs.*
 *Ersetzt: visualInspectionManager, CERNBox-HTML.*
 
 **Phase 6 — Multi-Institut-Härtung:** Onboarding-Assistent ("neues Institut in 30 min"),
-i18n (EN/DE), Mandantentrennung, Doku, Beispiel-Profile (Endcap/Barrel), Release v1.0 +
-Pilot bei einem zweiten Institut.
+i18n (EN/DE), Mandantentrennung, Doku, Beispiel-Profile (Endcap/Barrel), gepflegte
+Desktop-Supportmatrix mit Signatur/Upgrade-Pfad, Release v1.0 + Pilot bei einem
+zweiten Institut.
 
 ## 5. Migration & Risiken
 
@@ -168,6 +176,8 @@ Pilot bei einem zweiten Institut.
 - **Parallelbetrieb mit Reconciliation:** Solange zFlow läuft, vergleicht ein Job PDB-Zustand vs.
   itkFlow-Erwartung und meldet Abweichungen — Vertrauen vor Abschaltung.
 - **Risiken:** PDB-Latenz/-Limits (→ Sync + Outbox), Token-Handling (→ Sandbox zuerst, Audit),
+  glibc/WebKitGTK- und Flatpak-Runtime-Lebenszyklen sowie native Architektur-Builds
+  (→ explizite Supportmatrix statt „alle Distributionen"),
   Akzeptanz der Schichtcrews (→ Phase 1 zuerst Nutzen ohne Verhaltensänderung; Wizards müssen
   schneller sein als das Sheet), Instituts-Sonderlocken (→ alles Profil, nichts Code).
 - **Nicht-Ziele:** Kein PDB-Ersatz, keine Analyse-Physik (bleibt in den bestehenden Tools),

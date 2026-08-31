@@ -29,7 +29,48 @@ UI-Arbeit folgt zusaetzlich der verbindlichen Design-Referenz
 [`itkflow-ui-mockup.html`](itkflow-ui-mockup.html)), damit die Umsetzung nicht
 vom Design-Ziel abdriftet.
 
-## Aktueller Stand (2026-08-28)
+## Aktueller Stand (2026-08-31)
+
+- **itkView besitzt eine ehrliche Linux-Desktop-Paketmatrix (2026-08-31):**
+  `npm run build` erzeugt auf einem nativen Linux-Host jetzt DEB, RPM und
+  AppImage; ein eigener manueller/Tag-Workflow baut auf Ubuntu 22.04 je einmal
+  für `x86_64` und `aarch64`, verpackt das DEB zusätzlich mit GNOME Runtime 50
+  als Flatpak und legt pro Architektur `SHA256SUMS-<arch>` bei. Der Build nimmt
+  Python und PyInstaller reproduzierbar aus dem gelockten
+  `backend[desktop]`-Extra;
+  fehlendes `itkdb` ist ein harter Paketfehler statt eines still unvollständigen
+  Sidecars. Beim normalen Linux-Exit erhält der Onefile-Bootstrap jetzt zuerst
+  `SIGTERM`; die Shell wartet begrenzt, damit PyInstaller den Server geordnet
+  beendet und sein `_MEI*`-Verzeichnis entfernt, bevor nur im Timeout-/Fehlerfall
+  `SIGKILL` folgt. Linux-Onefile-Prozesse setzen zusätzlich
+  `PR_SET_PDEATHSIG`; der Workflow prüft deshalb zwei getrennte Pfade: normaler
+  Exit ohne Child, Port oder `_MEI*`-Rest sowie absichtlich erschlagener
+  Bootstrap ohne überlebenden Child/Localhost-Port. Native Zustände liegen
+  unter dem XDG-Datenpfad, Flatpak hat keinen pauschalen
+  Home-/Host-Dateizugriff. Das ist
+  absichtlich **kein** Versprechen für jedes Paketökosystem: musl/Alpine,
+  Nix/Guix, AUR/Snap und 32-Bit bleiben ohne first-party natives Paket; Flatpak
+  oder Compose sind dort die vorgesehenen portablen Wege. Noch offen sind
+  Signierung und ein Updatekanal. Ein passender Tag wartet auf beide
+  Architekturjobs, verifiziert ihre getrennten Prüfsummen erneut und hängt
+  alle zehn Dateien gemeinsam an ein dauerhaftes GitHub Release. **Lokale
+  Abnahme:** In einem sauberen Ubuntu-22.04-x86_64-Container liefen 16
+  Paketverträge, Frontend, PyInstaller und Tauri vollständig durch und
+  erzeugten `itkView_0.2.2_amd64.deb`, `itkView-0.2.2-1.x86_64.rpm` und
+  `itkView_0.2.2_amd64.AppImage`; der Workflow verlangt in DEB und RPM die
+  WebKitGTK-4.1- und GTK-3-Laufzeitabhängigkeiten. Der eingefrorene Sidecar
+  meldete
+  `itkView`/`view`, `write_features_enabled=false`,
+  `pdb_write_scope=disabled`; nach normalem `SIGTERM` blieb auch im dedizierten
+  Temp-Verzeichnis kein `_MEI*`-Baum zurück. Der getrennte `SIGKILL`-Fallback
+  ließ weder Child noch Port zurück; in beiden Läufen entstand der erwartete
+  lokale View-Spiegel.
+  Mit `flatpak-builder` 1.4.8 aus dem Stable-PPA entstand danach auch das
+  39.632.640 Byte große `itkView_0.2.2_x86_64.flatpak`; Installation gegen
+  GNOME Runtime 50 und der Health-Smoke
+  innerhalb der Sandbox bestaetigten erneut `view`, deaktivierte Writes und
+  PDB-Scope `disabled`. Entscheidung:
+  [`ADR 005`](adr/005-desktop-packaging.md).
 
 - **itkView spiegelt Test-Evidence ueber die vollstaendige Assembly-Closure
   (2026-08-29):** Der Komponenten-Sync folgte institutsfremden verbauten
@@ -1144,10 +1185,11 @@ vom Design-Ziel abdriftet.
   SPA selbst ausliefern (`app/static_spa.py`, Setting `static_dir`), damit UI
   und API auf einer Origin liegen und Session-Cookie/CSRF unveraendert
   funktionieren. Zustand (DB, Credential-Key, Logs) liegt im
-  Anwendungsdatenverzeichnis, dasselbe wie beim Windows-Launcher. Die
+  produktgetrennten Anwendungsdatenverzeichnis des jeweiligen Betriebssystems.
   Das Endnutzer-Bundle waehlt Production-Reads ab Werk; PDB-Verkehr beginnt
   erst nach dem Verbinden persoenlicher Access-Codes. Der Schreibbereich bleibt
-  `dummy_only`. Details: `docs/adr/005-desktop-packaging.md`.
+  beim expliziten itkFlow-Build `dummy_only`; itkView erzwingt `disabled`.
+  Details: `docs/adr/005-desktop-packaging.md`.
 - **PDB-Request-Timeout griff nie (2026-08-25, Bugfix):** `requests` waehlt den
   Adapter mit dem *laengsten* Prefix, und itkdb mountet einen eigenen fuer die
   PDB-Basis-URL. Der generische `https://`-Adapter war damit fuer jeden echten
@@ -1685,12 +1727,19 @@ v1.0 ist installierbar, dokumentiert und betreibbar.
 - Beispielprofile fuer Endcap/Barrel und konfigurierbare Workflows.
 - i18n-Grundlage fuer EN/DE, mit Englisch als Produkt-Default.
 - Release-/Upgrade-Doku, Backup/Restore, Monitoring und Pilot-Checkliste.
+- Desktop-Supportmatrix ist für Windows sowie Linux `x86_64`/`aarch64`
+  implementiert; die dauerhafte GitHub-Release-Veröffentlichung der
+  Linux-Matrix ist ebenfalls verdrahtet. Signierung und Upgrade-Kanal bleiben
+  Phase-6-Releasearbeit.
 
 **Done-Kriterien:**
 
 - Neues Institut braucht keine Codeaenderung fuer Namensschema, Workflows,
   Stage-/Test-Mappings oder Notifications.
 - Deployment funktioniert per dokumentiertem `docker compose up`.
+- Dokumentierte Desktop-Artefakte werden je Architektur nativ gebaut,
+  smoke-getestet, signiert und über einen dauerhaften Release-/Upgrade-Pfad
+  ausgeliefert; nicht unterstützte Distributionen sind explizit benannt.
 - Kein Web-/Worker-PDB-Pfad faellt auf globale oder fremde Credentials zurueck;
   Backup/Restore umfasst DB und getrennten Master-Key.
 - v1.0-Pilot hat dokumentierte Akzeptanzkriterien, bekannte Risiken und

@@ -1,18 +1,18 @@
 {
   "name": "itkview-desktop",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "itkView desktop shell with an explicit shared itkFlow regression build.",
   "scripts": {
     "icon": "tauri icon icon-source.png",
-    "sidecar": "python build-sidecar.py",
-    "sidecar:flow": "python build-sidecar.py --variant flow",
-    "sidecar:view": "python build-sidecar.py --variant view",
-    "dev": "python build-sidecar.py --variant view && tauri dev",
-    "build": "python build-sidecar.py --variant view --bundle",
-    "build:flow": "python build-sidecar.py --variant flow --bundle",
-    "build:view": "python build-sidecar.py --variant view --bundle",
-    "test:variants": "python -m unittest discover -s tests -p test_*.py"
+    "sidecar": "uv run --project ../backend --extra desktop --locked python build-sidecar.py",
+    "sidecar:flow": "uv run --project ../backend --extra desktop --locked python build-sidecar.py --variant flow",
+    "sidecar:view": "uv run --project ../backend --extra desktop --locked python build-sidecar.py --variant view",
+    "dev": "uv run --project ../backend --extra desktop --locked python build-sidecar.py --variant view && tauri dev",
+    "build": "uv run --project ../backend --extra desktop --locked python build-sidecar.py --variant view --bundle",
+    "build:flow": "uv run --project ../backend --extra desktop --locked python build-sidecar.py --variant flow --bundle",
+    "build:view": "uv run --project ../backend --extra desktop --locked python build-sidecar.py --variant view --bundle",
+    "test:variants": "uv run --project ../backend --extra desktop --locked python -m unittest discover -s tests -p test_*.py"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.1"

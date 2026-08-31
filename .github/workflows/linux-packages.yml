@@ -1,0 +1,425 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-69ecfa5abbf5
+name: Linux desktop packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  packages:
+    name: ${{ matrix.arch }} packages
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+            flatpak_arch: x86_64
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+            flatpak_arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      # Lets linuxdeploy run on restricted CI hosts without mounting FUSE.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify native runner architecture
+        shell: bash
+        run: test "$(uname -m)" = "${{ matrix.arch }}"
+
+      - name: Install native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            gnupg \
+            software-properties-common
+          sudo add-apt-repository --yes ppa:flatpak/stable
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            curl \
+            file \
+            flatpak \
+            flatpak-builder \
+            libayatana-appindicator3-dev \
+            libfuse2 \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            procps \
+            rpm \
+            wget
+          builder_version="$(flatpak-builder --version | sed 's/^flatpak-builder-//')"
+          dpkg --compare-versions "${builder_version}" ge 1.4.4
+
+      - name: Install locked application dependencies
+        run: |
+          uv sync --project backend --extra desktop --locked --python 3.12
+          npm ci --prefix frontend --no-fund --no-audit
+          npm ci --prefix desktop --no-fund --no-audit
+
+      - name: Verify desktop contracts
+        run: npm --prefix desktop run test:variants
+
+      - name: Verify tag matches bundle version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")"
+          test "v${version}" = "${GITHUB_REF_NAME}"
+
+      - name: Build DEB, RPM and AppImage
+        run: npm --prefix desktop run build
+
+      - name: Smoke-test graceful cleanup and forced parent death
+        shell: bash
+        run: |
+          set -euo pipefail
+          sidecar="desktop/build/view/dist/itkview-server"
+          test -x "${sidecar}"
+
+          pick_port() {
+            python - <<'PY'
+          import socket
+          with socket.socket() as listener:
+              listener.bind(("127.0.0.1", 0))
+              print(listener.getsockname()[1])
+          PY
+          }
+
+          child_pid=""
+          process_is_live() {
+            local pid="$1"
+            local state=""
+            kill -0 "${pid}" 2>/dev/null || return 1
+            state="$(awk '/^State:/ {print $2}' "/proc/${pid}/status" \
+              2>/dev/null || true)"
+            test -n "${state}" && test "${state}" != "Z"
+          }
+
+          wait_for_ready() {
+            local bootstrap_pid="$1"
+            local port="$2"
+            local health_file="$3"
+            child_pid=""
+            for _ in $(seq 1 120); do
+              if curl --fail --silent --show-error \
+                "http://127.0.0.1:${port}/health" > "${health_file}"; then
+                child_pid="$(pgrep -P "${bootstrap_pid}" | head -n 1 || true)"
+                test -z "${child_pid}" || return 0
+              fi
+              kill -0 "${bootstrap_pid}"
+              sleep 1
+            done
+            echo "Frozen sidecar did not become ready" >&2
+            return 1
+          }
+
+          assert_stopped() {
+            local bootstrap_pid="$1"
+            local child_pid="$2"
+            local port="$3"
+            local mode="$4"
+            for _ in $(seq 1 80); do
+              if ! process_is_live "${bootstrap_pid}" \
+                && ! process_is_live "${child_pid}"; then
+                break
+              fi
+              sleep 0.25
+            done
+            if process_is_live "${bootstrap_pid}"; then
+              echo "PyInstaller bootstrap survived ${mode}" >&2
+              return 1
+            fi
+            if process_is_live "${child_pid}"; then
+              echo "PyInstaller server child survived its bootstrap (${mode})" >&2
+              return 1
+            fi
+            if curl --fail --silent "http://127.0.0.1:${port}/health" >/dev/null; then
+              echo "Frozen sidecar still owns its localhost port (${mode})" >&2
+              return 1
+            fi
+          }
+
+          graceful_data_dir="$(mktemp -d)"
+          graceful_tmp_dir="$(mktemp -d)"
+          graceful_health_file="${RUNNER_TEMP}/itkview-health-graceful.json"
+          graceful_port="$(pick_port)"
+          graceful_child_pid=""
+          graceful_bootstrap_pid=""
+          forced_data_dir="$(mktemp -d)"
+          forced_tmp_dir="$(mktemp -d)"
+          forced_health_file="${RUNNER_TEMP}/itkview-health-forced.json"
+          forced_port="$(pick_port)"
+          forced_child_pid=""
+          forced_bootstrap_pid=""
+
+          child_pid=""
+          cleanup() {
+            test -z "${graceful_child_pid}" \
+              || kill -KILL "${graceful_child_pid}" 2>/dev/null || true
+            test -z "${graceful_bootstrap_pid}" \
+              || kill -KILL "${graceful_bootstrap_pid}" 2>/dev/null || true
+            test -z "${forced_child_pid}" \
+              || kill -KILL "${forced_child_pid}" 2>/dev/null || true
+            test -z "${forced_bootstrap_pid}" \
+              || kill -KILL "${forced_bootstrap_pid}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          TMPDIR="${graceful_tmp_dir}" \
+          ITKFLOW_DATA_DIR="${graceful_data_dir}" \
+          ITKFLOW_PRODUCT_VARIANT=view \
+          ITKFLOW_DATABASE_URL="" \
+          ITKFLOW_ATTACHMENT_DIR="${graceful_data_dir}/attachments" \
+          ITKFLOW_STATIC_DIR="" \
+            "${sidecar}" --host 127.0.0.1 --port "${graceful_port}" &
+          graceful_bootstrap_pid=$!
+          wait_for_ready \
+            "${graceful_bootstrap_pid}" \
+            "${graceful_port}" \
+            "${graceful_health_file}"
+          graceful_child_pid="${child_pid}"
+          mapfile -t mei_dirs < <(find "${graceful_tmp_dir}" \
+            -mindepth 1 -maxdepth 1 -type d -name '_MEI*')
+          test "${#mei_dirs[@]}" -eq 1
+
+          HEALTH_FILE="${graceful_health_file}" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          health = json.loads(Path(os.environ["HEALTH_FILE"]).read_text())
+          assert health["app"] == "itkView"
+          assert health["product_variant"] == "view"
+          assert health["write_features_enabled"] is False
+          assert health["pdb_write_scope"] == "disabled"
+          PY
+
+          kill -TERM "${graceful_bootstrap_pid}"
+          assert_stopped \
+            "${graceful_bootstrap_pid}" \
+            "${graceful_child_pid}" \
+            "${graceful_port}" \
+            "graceful SIGTERM shutdown"
+          wait "${graceful_bootstrap_pid}" 2>/dev/null || true
+          if find "${graceful_tmp_dir}" -mindepth 1 -maxdepth 1 \
+            -type d -name '_MEI*' -print -quit | grep -q .; then
+            echo "PyInstaller left its _MEI extraction directory after SIGTERM" >&2
+            exit 1
+          fi
+          test -f "${graceful_data_dir}/itkview.db"
+
+          TMPDIR="${forced_tmp_dir}" \
+          ITKFLOW_DATA_DIR="${forced_data_dir}" \
+          ITKFLOW_PRODUCT_VARIANT=view \
+          ITKFLOW_DATABASE_URL="" \
+          ITKFLOW_ATTACHMENT_DIR="${forced_data_dir}/attachments" \
+          ITKFLOW_STATIC_DIR="" \
+            "${sidecar}" --host 127.0.0.1 --port "${forced_port}" &
+          forced_bootstrap_pid=$!
+          wait_for_ready \
+            "${forced_bootstrap_pid}" \
+            "${forced_port}" \
+            "${forced_health_file}"
+          forced_child_pid="${child_pid}"
+
+          kill -KILL "${forced_bootstrap_pid}"
+          assert_stopped \
+            "${forced_bootstrap_pid}" \
+            "${forced_child_pid}" \
+            "${forced_port}" \
+            "forced SIGKILL parent death"
+          wait "${forced_bootstrap_pid}" 2>/dev/null || true
+          test -f "${forced_data_dir}/itkview.db"
+          trap - EXIT
+
+      - name: Build Flatpak bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t debs < <(find desktop/build/view/tauri-target \
+            -path '*/release/bundle/deb/*.deb' -type f)
+          test "${#debs[@]}" -eq 1
+          cp "${debs[0]}" desktop/flatpak/itkview.deb
+          sudo flatpak remote-add --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install --noninteractive -y flathub \
+            org.gnome.Platform//50 org.gnome.Sdk//50
+          flatpak-builder \
+            --default-branch=stable \
+            --disable-rofiles-fuse \
+            --force-clean \
+            --repo="desktop/build/flatpak-repo-${{ matrix.arch }}" \
+            "desktop/build/flatpak-${{ matrix.arch }}" \
+            desktop/flatpak/org.itkflow.view.yml
+          version="$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")"
+          flatpak build-bundle \
+            --arch="${{ matrix.flatpak_arch }}" \
+            "desktop/build/flatpak-repo-${{ matrix.arch }}" \
+            "desktop/build/itkView_${version}_${{ matrix.arch }}.flatpak" \
+            org.itkflow.view stable
+
+      - name: Validate and collect packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="desktop/build/linux-packages-${{ matrix.arch }}"
+          mkdir -p "${output}"
+          for target in deb rpm appimage; do
+            mapfile -t matches < <(find desktop/build/view/tauri-target \
+              -path "*/release/bundle/${target}/*" -type f)
+            test "${#matches[@]}" -eq 1
+            cp "${matches[0]}" "${output}/"
+          done
+          cp desktop/build/itkView_*.flatpak "${output}/"
+          dpkg-deb --info "${output}"/*.deb >/dev/null
+          deb_requires="$(dpkg-deb --field "${output}"/*.deb Depends)"
+          grep -Fq 'libwebkit2gtk-4.1-0' <<< "${deb_requires}"
+          grep -Fq 'libgtk-3-0' <<< "${deb_requires}"
+          rpm -qip "${output}"/*.rpm >/dev/null
+          rpm_requires="$(rpm -qpR "${output}"/*.rpm)"
+          grep -Fqx 'libwebkit2gtk-4.1.so.0()(64bit)' <<< "${rpm_requires}"
+          grep -Fqx 'libgtk-3.so.0()(64bit)' <<< "${rpm_requires}"
+          (
+            cd "${output}"
+            sha256sum ./*.deb ./*.rpm ./*.AppImage ./*.flatpak \
+              | sed 's#  \./#  #' \
+              | sort -k2 > "SHA256SUMS-${{ matrix.arch }}"
+          )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: itkview-linux-${{ matrix.arch }}
+          path: desktop/build/linux-packages-${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: packages
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged release notes
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download x86_64 packages
+        uses: actions/download-artifact@v4
+        with:
+          name: itkview-linux-x86_64
+          path: release-assets/x86_64
+
+      - name: Download aarch64 packages
+        uses: actions/download-artifact@v4
+        with:
+          name: itkview-linux-aarch64
+          path: release-assets/aarch64
+
+      - name: Verify and stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="release-assets/publish"
+          mkdir -p "${destination}"
+
+          for arch in x86_64 aarch64; do
+            source_dir="release-assets/${arch}"
+            checksum_file="SHA256SUMS-${arch}"
+            test -d "${source_dir}"
+            test -f "${source_dir}/${checksum_file}"
+
+            for suffix in deb rpm AppImage flatpak; do
+              mapfile -t matches < <(find "${source_dir}" \
+                -mindepth 1 -maxdepth 1 -type f -name "*.${suffix}")
+              if test "${#matches[@]}" -ne 1; then
+                echo "Expected exactly one ${suffix} package for ${arch}" >&2
+                exit 1
+              fi
+            done
+
+            mapfile -t source_files < <(find "${source_dir}" \
+              -mindepth 1 -maxdepth 1 -type f)
+            if test "${#source_files[@]}" -ne 5; then
+              echo "Expected four packages and one checksum file for ${arch}" >&2
+              exit 1
+            fi
+
+            (
+              cd "${source_dir}"
+              sha256sum --check --strict "${checksum_file}"
+            )
+
+            for source_file in "${source_files[@]}"; do
+              filename="$(basename "${source_file}")"
+              if test -e "${destination}/${filename}"; then
+                echo "Release asset filename collision: ${filename}" >&2
+                exit 1
+              fi
+              cp "${source_file}" "${destination}/${filename}"
+            done
+          done
+
+          mapfile -t release_files < <(find "${destination}" \
+            -mindepth 1 -maxdepth 1 -type f)
+          test "${#release_files[@]}" -eq 10
+
+      - name: Publish verified assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          notes_file="docs/releases/${tag}.md"
+          test -f "${notes_file}"
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            is_draft="$(gh release view "${tag}" --json isDraft --jq .isDraft)"
+            if test "${is_draft}" != "true"; then
+              echo "Release ${tag} already exists and is published" >&2
+              exit 1
+            fi
+            gh release edit "${tag}" --notes-file "${notes_file}"
+          else
+            gh release create "${tag}" \
+              --draft \
+              --notes-file "${notes_file}" \
+              --title "itkView ${tag#v}" \
+              --verify-tag
+          fi
+
+          gh release upload "${tag}" release-assets/publish/* --clobber
+          gh release edit "${tag}" --draft=false

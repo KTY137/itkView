@@ -30,6 +30,44 @@ itkFlow. This includes the SQLite database, encrypted credential key,
 attachments and rotating logs. A fresh itkView installation therefore starts
 empty even when itkFlow is already installed; that isolation is intentional.
 
+## Install on Linux
+
+Linux release builds provide four package formats for both `x86_64` and
+`aarch64`:
+
+| Package | Intended systems |
+|---|---|
+| `.flatpak` | Distribution-independent desktop install with a constrained runtime |
+| `.AppImage` | Portable launch on compatible glibc-based desktop distributions; the current Ubuntu 22.04 build can require glibc 2.35 |
+| `.deb` | Debian, Ubuntu, Linux Mint and derivatives |
+| `.rpm` | Fedora and openSUSE families; RHEL 10 derivatives need EPEL 10 |
+
+Verify the downloaded files against the checksum file for your architecture
+(`SHA256SUMS-x86_64` or `SHA256SUMS-aarch64`), then install one format:
+
+```bash
+sha256sum --ignore-missing -c "SHA256SUMS-$(uname -m)"
+flatpak install --user ./itkView_<version>_<arch>.flatpak
+# or: chmod +x ./itkView_<version>_<arch>.AppImage && ./itkView_<version>_<arch>.AppImage
+# or: sudo apt install ./itkView_<version>_<arch>.deb
+# or: sudo dnf install ./itkView-<version>-1.<arch>.rpm
+```
+
+Run the Flatpak with `flatpak run org.itkflow.view`. Its sandbox grants
+network, display and GPU access, but no blanket home- or host-filesystem
+access. Native packages store application data under
+`${XDG_DATA_HOME:-$HOME/.local/share}/itkview`; Flatpak keeps the same logical
+state inside its per-application data directory.
+
+These formats cover the mainstream Linux desktop families; they are not a
+claim that every package manager or libc is supported natively. Alpine/musl,
+NixOS, Guix, source-only distributions and 32-bit systems have no first-party
+native package. RHEL 9 and compatible distributions also lack the required
+WebKitGTK 4.1 runtime, so use the Flatpak there. The AppImage bundles WebKitGTK
+and therefore does not need that host package, but its Ubuntu 22.04 payload can
+require glibc 2.35 and is not advertised for RHEL 9. Where no desktop format
+fits, use the Docker Compose deployment for an institute-wide service.
+
 ## What itkView includes
 
 - component search, scanner input, board, family and detail views;
@@ -109,21 +147,51 @@ password is shipped.
 
 ### Desktop installer
 
-Install a Rust toolchain and the platform prerequisites required by Tauri,
-then run:
+Install `uv`, a Rust toolchain and the platform prerequisites required by
+Tauri, then run:
 
 ```bash
+# Ubuntu 22.04 release-builder prerequisites
+sudo apt install build-essential file libayatana-appindicator3-dev libfuse2 \
+  librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf rpm
+```
+
+The release workflow uses Python 3.12 and Node.js 22. With those runtimes
+available, the application build itself is:
+
+```bash
+uv sync --project backend --extra desktop --locked
 cd desktop
 npm ci
 npm run build
 ```
 
-The default command builds the itkView frontend, PyInstaller sidecar and Tauri
-installer in a variant-isolated tree. On Windows, the expected artifact is:
+The default command builds the itkView frontend, PyInstaller sidecar and
+native Tauri packages in a variant-isolated tree. On Windows, the expected
+artifact is:
 
 ```text
 desktop/build/view/tauri-target/<triple>/release/bundle/nsis/itkView_<version>_x64-setup.exe
 ```
+
+On Linux it produces one artifact in each of these directories:
+
+```text
+desktop/build/view/tauri-target/<triple>/release/bundle/deb/
+desktop/build/view/tauri-target/<triple>/release/bundle/rpm/
+desktop/build/view/tauri-target/<triple>/release/bundle/appimage/
+```
+
+The manual/tag workflow in `.github/workflows/linux-packages.yml` builds these
+packages natively on `x86_64` and `aarch64`, verifies both graceful sidecar
+shutdown (including PyInstaller `_MEI*` cleanup) and the forced parent-death
+fallback, wraps the DEB as a Flatpak and emits per-architecture checksums. On
+the Ubuntu 22.04 runners it obtains `flatpak-builder >= 1.4.4` from the Flatpak stable PPA
+because Jammy's archive builder cannot compose metadata for the current GNOME
+runtime. A tag matching the bundle version publishes both verified
+architectures together on the GitHub Releases page; manual workflow runs keep
+the packages as 30-day Actions artifacts without publishing them. Package and
+binary signing remain explicit maintainer work.
 
 ## Verification
 

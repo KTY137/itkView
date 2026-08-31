@@ -1,6 +1,6 @@
 [project]
 name = "itkflow-backend"
-version = "0.2.1"
+version = "0.2.2"
 description = "itkFlow backend — production cockpit for ATLAS ITk strip module assembly"
 requires-python = ">=3.10"
 dependencies = [
@@ -18,6 +18,7 @@ dependencies = [
 pdb = ["itkdb>=0.6"]
 postgres = ["psycopg[binary]>=3.1"]
 dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.5"]
+desktop = ["itkdb>=0.6", "pyinstaller>=6.10,<7"]
 
 [build-system]
 requires = ["setuptools>=68"]

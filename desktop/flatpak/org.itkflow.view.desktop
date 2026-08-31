@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-3f280338433d
+[Desktop Entry]
+Type=Application
+Name=itkView
+GenericName=ITk production viewer
+Comment=Read-only viewer for ATLAS ITk strip production data
+Exec=itkview
+Icon=org.itkflow.view
+Terminal=false
+Categories=Science;DataVisualization;
+Keywords=ATLAS;ITk;production;detector;viewer;

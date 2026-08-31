@@ -41,6 +41,8 @@ desktop/src-tauri/target/
 # The sidecar is a 20 MB build output, rebuilt by desktop/build-sidecar.py
 desktop/src-tauri/binaries/*.exe
 desktop/src-tauri/binaries/itkflow-server-*
+desktop/src-tauri/binaries/itkview-server-*
+desktop/flatpak/itkview.deb
 desktop/src-tauri/gen/
 
 # Locally mirrored PDB attachments — real production images, never commit

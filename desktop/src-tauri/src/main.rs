@@ -30,6 +30,12 @@ const HOST: &str = "127.0.0.1";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const IO_TIMEOUT: Duration = Duration::from_millis(750);
+#[cfg(target_os = "linux")]
+const SIDECAR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(target_os = "linux")]
+const SIDECAR_FORCE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
+const SIDECAR_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DESKTOP_LOG_MAX_BYTES: u64 = 1024 * 1024;
 const DESKTOP_LOG_BACKUPS: usize = 3;
 const PRODUCT_VARIANT: &str = match option_env!("ITKFLOW_PRODUCT_VARIANT") {
@@ -54,10 +60,13 @@ const SIDECAR_NAME: &str = match option_env!("ITKFLOW_DESKTOP_SIDECAR_NAME") {
 };
 
 fn log_hint() -> String {
+    let location = application_data_dir()
+        .map(|directory| directory.join("logs"))
+        .map(|directory| directory.display().to_string())
+        .unwrap_or_else(|_| format!("the {DATA_SLUG} application data directory"));
     format!(
         "Close and reopen {PRODUCT_NAME}. Your local data is preserved. Logs: \
-         %LOCALAPPDATA%\\{DATA_SLUG}\\logs\\server.log and \
-         %LOCALAPPDATA%\\{DATA_SLUG}\\logs\\desktop.log"
+         {location} (server.log and desktop.log)"
     )
 }
 
@@ -518,13 +527,40 @@ fn start_server(app: &AppHandle, data_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn send_sigterm(pid: u32) -> io::Result<()> {
+    let pid = libc::pid_t::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "sidecar PID is out of range"))?;
+    // SAFETY: kill only reads the scalar PID and signal values. The PID comes
+    // from the still-retained CommandChild and SIGTERM is a valid Linux signal.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_termination(terminated: &AtomicBool, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if terminated.load(Ordering::SeqCst) {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        thread::sleep(SIDECAR_SHUTDOWN_POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+    }
+}
+
 fn stop_server(app: &AppHandle) {
     let state = app.state::<ServerHandle>();
     state.intentional_stop.store(true, Ordering::SeqCst);
     state.logger.event("INFO", "sidecar_stop_requested", &[]);
     let logger = state.logger.clone();
     let child = state.child.lock().ok().and_then(|mut guard| guard.take());
-    drop(state);
 
     if let Some(child) = child {
         let child_pid = child.pid();
@@ -562,7 +598,66 @@ fn stop_server(app: &AppHandle) {
                 );
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let signal_result = send_sigterm(child_pid);
+            logger.event(
+                if signal_result.is_ok() {
+                    "INFO"
+                } else {
+                    "WARN"
+                },
+                "sidecar_stop_signal",
+                &[
+                    ("pid", child_pid.to_string()),
+                    ("method", "sigterm".to_string()),
+                    ("success", signal_result.is_ok().to_string()),
+                ],
+            );
+            if signal_result.is_ok()
+                && wait_for_termination(&state.terminated, SIDECAR_SHUTDOWN_TIMEOUT)
+            {
+                logger.event(
+                    "INFO",
+                    "sidecar_stop_complete",
+                    &[
+                        ("pid", child_pid.to_string()),
+                        ("method", "sigterm".to_string()),
+                    ],
+                );
+                return;
+            }
+
+            logger.event(
+                "WARN",
+                "sidecar_stop_forced",
+                &[
+                    ("pid", child_pid.to_string()),
+                    (
+                        "reason",
+                        if signal_result.is_ok() {
+                            "timeout"
+                        } else {
+                            "sigterm_failed"
+                        }
+                        .to_string(),
+                    ),
+                ],
+            );
+            let killed = child.kill().is_ok();
+            let stopped =
+                killed && wait_for_termination(&state.terminated, SIDECAR_FORCE_SHUTDOWN_TIMEOUT);
+            logger.event(
+                if stopped { "WARN" } else { "ERROR" },
+                "sidecar_stop_complete",
+                &[
+                    ("pid", child_pid.to_string()),
+                    ("method", "sigkill".to_string()),
+                    ("success", stopped.to_string()),
+                ],
+            );
+        }
+        #[cfg(all(not(windows), not(target_os = "linux")))]
         {
             let killed = child.kill().is_ok();
             logger.event(
@@ -737,5 +832,17 @@ mod tests {
             }
             other => panic!("unsupported desktop product variant: {other}"),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn termination_wait_is_bounded_and_observes_completion() {
+        let completed = AtomicBool::new(true);
+        assert!(wait_for_termination(&completed, Duration::ZERO));
+
+        let pending = AtomicBool::new(false);
+        let started = Instant::now();
+        assert!(!wait_for_termination(&pending, Duration::from_millis(20)));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

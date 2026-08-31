@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
 # SPDX-FileComment: itkflow-7f2f4cd24a38
-"""Build a desktop product variant: frontend -> PyInstaller -> Tauri bundle.
+"""Build a desktop product variant: frontend -> PyInstaller -> Tauri bundles.
 
 Tauri's `externalBin` looks for a file named `<name>-<target-triple>` next to
 the configured path, so the sidecar step ends in a rename, not a copy into
 place by hand. `--bundle` then runs `tauri build --target <host triple>`
 itself: the explicit target keeps the bundler's triple aligned with the
-sidecar's file name (without it, an MSVC-defaulting bundler looks for a
-sidecar the GNU host never produced — ADR 005).
+sidecar's file name. Windows produces NSIS; Linux produces DEB, RPM and
+AppImage bundles (ADR 005).
 
     python desktop/build-sidecar.py [--variant flow|view] [--skip-frontend] [--bundle]
 
@@ -30,12 +30,21 @@ from pathlib import Path
 DESKTOP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = DESKTOP_DIR.parent
 FRONTEND_DIR = REPO_ROOT / "frontend"
-BACKEND_PYTHON = REPO_ROOT / "backend" / ".venv" / "Scripts" / "python.exe"
-if not BACKEND_PYTHON.is_file():  # POSIX layout
+if sys.platform == "win32":
+    BACKEND_PYTHON = REPO_ROOT / "backend" / ".venv" / "Scripts" / "python.exe"
+else:
     BACKEND_PYTHON = REPO_ROOT / "backend" / ".venv" / "bin" / "python"
 BINARIES_DIR = DESKTOP_DIR / "src-tauri" / "binaries"
 BUILD_DIR = DESKTOP_DIR / "build"
 TAURI_CONFIG = DESKTOP_DIR / "src-tauri" / "tauri.conf.json"
+LINUX_TAURI_CONFIG = DESKTOP_DIR / "src-tauri" / "tauri.linux.conf.json"
+
+BUNDLE_SUFFIXES = {
+    "appimage": ".AppImage",
+    "deb": ".deb",
+    "nsis": ".exe",
+    "rpm": ".rpm",
+}
 
 
 @dataclass(frozen=True)
@@ -183,7 +192,22 @@ def installer_arch(triple: str) -> str:
         ) from None
 
 
+def bundle_targets(triple: str) -> tuple[str, ...]:
+    """Return the first-party bundle set for a native target triple."""
+    normalized = triple.lower()
+    if "-windows-" in normalized:
+        return ("nsis",)
+    if "-linux-" in normalized:
+        return ("deb", "rpm", "appimage")
+    raise SystemExit(
+        f"unsupported desktop bundle platform in target triple: {triple}. "
+        "Supported release platforms are Windows and Linux."
+    )
+
+
 def expected_installer(variant: DesktopVariant, triple: str) -> Path:
+    if bundle_targets(triple) != ("nsis",):
+        raise SystemExit(f"NSIS installers are only available for Windows: {triple}")
     target_dir = variant_build_dir(variant) / "tauri-target"
     filename = (
         f"{variant.product_name}_{bundle_version()}_{installer_arch(triple)}-setup.exe"
@@ -191,10 +215,37 @@ def expected_installer(variant: DesktopVariant, triple: str) -> Path:
     return target_dir / triple / "release" / "bundle" / "nsis" / filename
 
 
+def bundle_artifacts(variant: DesktopVariant, triple: str) -> tuple[Path, ...]:
+    """Resolve exactly one artifact for every platform target."""
+    bundle_dir = (
+        variant_build_dir(variant) / "tauri-target" / triple / "release" / "bundle"
+    )
+    artifacts: list[Path] = []
+    for target in bundle_targets(triple):
+        if target == "nsis":
+            matches = [expected_installer(variant, triple)]
+        else:
+            suffix = BUNDLE_SUFFIXES[target]
+            target_dir = bundle_dir / target
+            matches = sorted(
+                path for path in target_dir.glob(f"*{suffix}") if path.is_file()
+            )
+        if len(matches) != 1 or not matches[0].is_file():
+            rendered = ", ".join(str(path) for path in matches) or "none"
+            raise SystemExit(
+                f"Tauri did not produce exactly one {target} bundle in "
+                f"{bundle_dir / target}; found: {rendered}"
+            )
+        artifacts.append(matches[0])
+    return tuple(artifacts)
+
+
 def bundle_app(
     variant: DesktopVariant, triple: str, environment: dict[str, str]
-) -> Path:
+) -> tuple[Path, ...]:
+    targets = bundle_targets(triple)
     command = [npm_command(), "exec", "--", "tauri", "build", "--target", triple]
+    command += ["--bundles", ",".join(targets)]
     if variant.tauri_overlay is not None:
         if not variant.tauri_overlay.is_file():
             raise SystemExit(
@@ -203,11 +254,10 @@ def bundle_app(
         command += ["--config", str(variant.tauri_overlay)]
     run(command, cwd=DESKTOP_DIR, env=environment)
 
-    installer = expected_installer(variant, triple)
-    if not installer.is_file():
-        raise SystemExit(f"Tauri did not produce the expected installer: {installer}")
-    print(f"installer ready: {installer.relative_to(REPO_ROOT)}")
-    return installer
+    artifacts = bundle_artifacts(variant, triple)
+    for artifact in artifacts:
+        print(f"bundle ready: {artifact.relative_to(REPO_ROOT)}")
+    return artifacts
 
 
 def build_sidecar(variant: DesktopVariant, environment: dict[str, str]) -> Path:
@@ -254,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--bundle",
         action="store_true",
-        help="After the sidecar, run 'tauri build --target <host triple>' too.",
+        help="After the sidecar, build the native Windows or Linux bundle set too.",
     )
     args = parser.parse_args(argv)
     variant = VARIANTS[args.variant]

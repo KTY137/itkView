@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Kaya Yesilyurt
+# SPDX-FileComment: itkflow-9e4b17151510
+id: org.itkflow.view
+runtime: org.gnome.Platform
+runtime-version: "50"
+sdk: org.gnome.Sdk
+command: itkview
+finish-args:
+  # The desktop shell binds its private localhost API and the viewer connects
+  # to the PDB only after the user supplies personal access codes.
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+modules:
+  - name: itkview
+    buildsystem: simple
+    sources:
+      - type: file
+        path: itkview.deb
+      - type: file
+        path: org.itkflow.view.desktop
+      - type: file
+        path: org.itkflow.view.metainfo.xml
+      - type: file
+        path: ../src-tauri/icons/128x128.png
+        dest-filename: org.itkflow.view.png
+    build-commands:
+      - mkdir -p deb-extract deb-root
+      - cd deb-extract && ar x ../itkview.deb
+      - tar -C deb-root -xf deb-extract/data.tar.*
+      # Preserve Tauri's generated /usr layout under /app.
+      - cp -a deb-root/usr/. /app/
+      - rm -f /app/share/applications/*.desktop
+      - install -Dm644 org.itkflow.view.desktop /app/share/applications/org.itkflow.view.desktop
+      - install -Dm644 org.itkflow.view.metainfo.xml /app/share/metainfo/org.itkflow.view.metainfo.xml
+      - install -Dm644 org.itkflow.view.png /app/share/icons/hicolor/128x128/apps/org.itkflow.view.png

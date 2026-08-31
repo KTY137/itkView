@@ -47,8 +47,10 @@ hiddenimports += collect_submodules("app")
 for package in ("itkdb", "certifi"):
     try:
         pkg_datas, pkg_binaries, pkg_hidden = collect_all(package)
-    except Exception:
-        continue
+    except Exception as error:
+        raise SystemExit(
+            f"Required desktop package {package!r} could not be collected: {error}"
+        ) from error
     datas += pkg_datas
     binaries += pkg_binaries
     hiddenimports += pkg_hidden
@@ -61,7 +63,11 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    # On Linux the Tauri shell normally gives PyInstaller's onefile bootstrap
+    # SIGTERM so it can clean up. If the bounded grace period expires, the
+    # runtime hook makes the real server follow a forced bootstrap death instead
+    # of surviving headless with the SQLite database and localhost port open.
+    runtime_hooks=[str(SPEC_DIR / "pyinstaller_parent_guard.py")],
     # Never bundle the test toolchain into a shipped artifact.
     excludes=["pytest", "_pytest", "PyInstaller"],
     noarchive=False,

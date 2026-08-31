@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: MIT -->
+<!-- SPDX-FileCopyrightText: 2026 Kaya Yesilyurt -->
+<!-- SPDX-FileComment: itkflow-5b8a50345b33 -->
+<component type="desktop-application">
+  <id>org.itkflow.view</id>
+  <name>itkView</name>
+  <summary>Read-only viewer for ATLAS ITk strip production data</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="io.github.kty137">
+    <name>Kaya Yesilyurt</name>
+  </developer>
+  <launchable type="desktop-id">org.itkflow.view.desktop</launchable>
+  <url type="homepage">https://github.com/KTY137/itkView</url>
+  <url type="bugtracker">https://github.com/KTY137/itkView/issues</url>
+  <content_rating type="oars-1.1" />
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <description>
+    <p>
+      itkView mirrors authorized production data into an isolated local store
+      and presents components, evidence, images, plots and statistics without
+      exposing production-data authoring or PDB writes.
+    </p>
+  </description>
+  <releases>
+    <release version="0.2.2" date="2026-08-31" />
+    <release version="0.2.1" date="2026-08-28" />
+  </releases>
+</component>

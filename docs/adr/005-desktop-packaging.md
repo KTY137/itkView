@@ -1,6 +1,6 @@
 # ADR 005: Desktop-Paketierung (Tauri-Shell + PyInstaller-Sidecar)
 
-Status: akzeptiert (2026-08-25)
+Status: akzeptiert (2026-08-25), Linux-Paketmatrix ergänzt (2026-08-31)
 
 ## Kontext
 
@@ -37,11 +37,14 @@ keine reduzierte Zweitfassung, die auseinanderdriftet.
    Scheitert das Binden, endet der Sidecar mit Status 2 statt zu hängen.
 5. **Zustand außerhalb des Bundles und pro Produkt getrennt.** Datenbank,
    Attachments, Credential-Key und Logs liegen im jeweiligen
-   Anwendungsdatenverzeichnis. itkView verwendet `%LOCALAPPDATA%\itkview`;
-   der explizite Flow-Build und der historische Windows-Launcher verwenden
-   `%LOCALAPPDATA%\itkflow`. Ein vorhandener Key wird **nie** ersetzt: das
-   würde jede gespeicherte Verbindung unlesbar machen. Die Trennung verhindert
-   zugleich, dass itkView eine Flow-Outbox oder Flow-Session erbt.
+   Anwendungsdatenverzeichnis. itkView verwendet unter Windows
+   `%LOCALAPPDATA%\itkview` und unter nativem Linux
+   `${XDG_DATA_HOME:-$HOME/.local/share}/itkview`; der explizite Flow-Build
+   verwendet jeweils den getrennten `itkflow`-Baum. Flatpak kapselt denselben
+   logischen Zustand zusätzlich in seinem App-Datenverzeichnis. Ein
+   vorhandener Key wird **nie** ersetzt: das würde jede gespeicherte Verbindung
+   unlesbar machen. Die Trennung verhindert zugleich, dass itkView eine
+   Flow-Outbox oder Flow-Session erbt.
 6. **Keine Abkürzung an den Sicherheitsregeln vorbei.** Der explizite
    itkFlow-Build bleibt auf `pdb_write_scope=dummy_only` beschränkt; itkView
    erzwingt den strengeren Scope `disabled` und startet keinen
@@ -71,6 +74,21 @@ keine reduzierte Zweitfassung, die auseinanderdriftet.
    getrennte Datenpfade und Cookie-Namen und koennen deshalb gleichzeitig
    laufen. Die fachliche Read-only-Grenze besitzt
    [ADR 007](007-itkview-read-only-product.md).
+8. **Linux wird als Paketmatrix, nicht als unprüfbares „alle Distros"
+   geliefert.** Der native Builder erzeugt auf seiner Host-Architektur genau
+   ein DEB, RPM und AppImage. Der Release-Workflow baut diese Artefakte auf
+   nativen Ubuntu-22.04-Runnern für `x86_64` und `aarch64`, prüft den
+   eingefrorenen Sidecar und erzeugt zusätzlich ein Flatpak mit GNOME Runtime
+   50. Das Flatpak erhält Netzwerk, IPC, Wayland/Fallback-X11 und DRI, aber
+   keinen pauschalen Zugriff auf Home oder Host-Dateisystem. Damit sind die
+   verbreiteten glibc-basierten Desktop-Familien abgedeckt; APK, Nix, Guix,
+   AUR/Snap, musl und 32-Bit sind keine first-party nativen Ziele. Wo Flatpak
+   nicht verfügbar ist, bleibt Compose der portable Serverweg. Bei einem zum
+   Bundle passenden Tag wartet ein separater Release-Job auf **beide**
+   Architekturen, prüft deren getrennte `SHA256SUMS-<arch>` erneut und
+   veröffentlicht DEB, RPM, AppImage, Flatpak und Prüfsummen erst danach
+   gemeinsam als GitHub Release. Manuelle Läufe bleiben unveröffentlichte,
+   30 Tage aufbewahrte Actions-Artefakte.
 
 ## Konsequenzen
 
@@ -92,12 +110,27 @@ keine reduzierte Zweitfassung, die auseinanderdriftet.
   Institutsadmins haben diesen Endpoint nicht. Die READY-Zeile enthaelt keinen
   Datenverzeichnispfad.
 - Onefile heißt zwei Prozesse: der gestartete Bootstrap re-exekutiert sich als
-  eigentlicher Server. Beim Beenden killt die Shell deshalb den ganzen
-  Prozessbaum (`taskkill /T` unter Windows) — nur den Bootstrap zu killen ließ
-  den Server nachweislich headless weiterlaufen (Port + DB blieben belegt).
+  eigentlicher Server. Beim normalen Beenden sendet die Linux-Shell deshalb
+  zuerst `SIGTERM` an den Bootstrap und wartet höchstens acht Sekunden auf das
+  `Terminated`-Event. PyInstaller kann so den Signalweg zum Server abwickeln und
+  sein `_MEI*`-Verzeichnis entfernen. Erst wenn das Signal scheitert oder die
+  Frist verstreicht, folgt `SIGKILL`; ein PyInstaller-Runtime-Hook setzt dafür
+  `PR_SET_PDEATHSIG`, damit der eigentliche Server nicht mit offener SQLite-DB
+  und Localhost-Port headless weiterläuft. Dieser Crash-Fallback kann das
+  `_MEI*`-Aufräumen nicht garantieren. Unter Windows bleibt der bewährte ganze
+  Prozessbaum via `taskkill /T /F` maßgeblich. Der Release-Smoke-Test prüft die
+  zwei Linux-Pfade getrennt: `SIGTERM` muss Bootstrap, Child, Port **und** das
+  kontrollierte `_MEI*`-Verzeichnis entfernen; nach erzwungenem `SIGKILL`
+  dürfen kein laufender Child und kein Port übrig sein. Ein bereits beendeter,
+  vom minimalistischen Container-PID-1 noch nicht eingesammelter Zombie gilt
+  dabei nicht als lebender Prozess; der Check liest deshalb zusätzlich zum
+  PID-Signaltest den Zustand aus `/proc`.
 - Startzeit: Onefile entpackt bei jedem Start (~20 MB). Der Splash überbrückt
   das; wird es störend, ist Onedir plus Tauri-Resources der nächste Schritt.
-- Signierung ist offen. Ohne Zertifikat zeigt Windows SmartScreen eine Warnung.
+- Signierung ist offen. Ohne Zertifikat zeigt Windows SmartScreen eine Warnung;
+  Linux-Artefakte erhalten SHA-256-Prüfsummen und Tag-Builds werden dauerhaft
+  an ein GitHub Release gehängt, aber es gibt noch keine Paket-/Binärsignatur
+  oder Veröffentlichung in distributionsspezifische Repositories.
 - Toolchain: Tauri unter Windows ist offiziell MSVC. Der Build lief hier mit
   der GNU-Toolchain vollstaendig durch — Binary und NSIS-Installer
   (`itkFlow_0.1.0_x64-setup.exe`, 21 MB) —, mit zwei Eigenheiten:
@@ -108,6 +141,18 @@ keine reduzierte Zweitfassung, die auseinanderdriftet.
   `--bundle`-Schritt (`npm run build` in `desktop/` ruft
   `build-sidecar.py --bundle`) setzt der Build das Host-Triple selbst — der
   Handgriff entfaellt. Fuer Releases bleibt MSVC die getretene Pfadstrecke.
+- Linux-Pakete werden nativ je Architektur gebaut. Die Ubuntu-22.04-Basis hält
+  den glibc-Floor niedriger als ein Build auf einer aktuellen Rolling
+  Distribution; insbesondere das AppImage ist trotzdem kein Container und
+  kann nicht jede beliebige libc-/Desktop-Kombination abstrahieren. Flatpak
+  übernimmt diese Rolle mit einer versionierten Runtime. Der Jammy-Archivstand
+  von `flatpak-builder` ist zu alt für die AppStream-Komposition der GNOME-
+  Runtime 50; der Workflow bezieht deshalb mindestens Version 1.4.4 aus dem
+  Stable-PPA des Flatpak-Teams und prüft die Mindestversion vor dem Build. Die
+  Paketabnahme kontrolliert außerdem die von Tauri injizierten WebKitGTK-4.1-
+  und GTK-3-Laufzeitabhängigkeiten explizit im DEB- und RPM-Metadatensatz; ein
+  formal lesbares, aber nicht installierbares Paket darf nicht hochgeladen
+  werden.
 
 ## Alternativen
 
