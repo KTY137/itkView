@@ -71,6 +71,15 @@ vom Design-Ziel abdriftet.
   innerhalb der Sandbox bestaetigten erneut `view`, deaktivierte Writes und
   PDB-Scope `disabled`. Entscheidung:
   [`ADR 005`](adr/005-desktop-packaging.md).
+  **Release-Nachlauf:** Der erste öffentliche Tag `v0.2.2` baute auf beiden
+  nativen GitHub-Runnern alle vier Formate; auch beide Shutdown-Smokes und die
+  Flatpak-Komposition waren grün. Erst die Sammlung scheiterte fail-closed,
+  weil ein rekursives `find -path` neben den drei Paketen auch Tauri-Staging-
+  Dateien zählte. Der Release-Job wurde übersprungen; für `v0.2.2` entstanden
+  weder GitHub Release noch Assets. `v0.2.3` sammelt pro Host-Triple und Format
+  ausschließlich die direkte Datei mit passender Endung und wiederholt danach
+  Prüfsummen- und Publikationsgate; der bestehende `v0.2.2`-Tag wird aus
+  Provenienzgründen nicht verschoben.
 
 - **itkView spiegelt Test-Evidence ueber die vollstaendige Assembly-Closure
   (2026-08-29):** Der Komponenten-Sync folgte institutsfremden verbauten
